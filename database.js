@@ -1312,12 +1312,14 @@ async function getUserLanguage(chatId) {
 async function setUserLanguage(chatId, lang, source = 'manual') {
     const normalizedLang = normalizeLanguageCode(lang);
     const normalizedSource = source === 'manual' ? 'manual' : 'auto';
-    let user = await dbGet('SELECT wallets FROM users WHERE chatId = ?', [chatId]);
-    if (user) {
-        await dbRun('UPDATE users SET lang = ?, lang_source = ? WHERE chatId = ?', [normalizedLang, normalizedSource, chatId]);
-    } else {
-        await dbRun('INSERT INTO users (chatId, lang, lang_source, wallets) VALUES (?, ?, ?, ?)', [chatId, normalizedLang, normalizedSource, '[]']);
-    }
+
+    await dbRun(
+        'INSERT OR IGNORE INTO users (chatId, lang, lang_source, wallets) VALUES (?, ?, ?, ?)',
+        [chatId, normalizedLang, normalizedSource, '[]']
+    );
+
+    await dbRun('UPDATE users SET lang = ?, lang_source = ? WHERE chatId = ?', [normalizedLang, normalizedSource, chatId]);
+
     console.log(`[DB] Đã lưu ngôn ngữ ${normalizedLang} (${normalizedSource}) cho ${chatId}`);
 }
 
