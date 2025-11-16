@@ -33,6 +33,39 @@ const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
     });
 });
 
+const DEFAULT_QUOTE_TARGETS = ['USDT', 'OKB'];
+
+function safeJsonParse(text, fallback) {
+    if (!text) {
+        return fallback;
+    }
+
+    try {
+        const parsed = JSON.parse(text);
+        return parsed ?? fallback;
+    } catch (error) {
+        return fallback;
+    }
+}
+
+function normalizeWalletAddressSafe(address) {
+    if (!address) {
+        return null;
+    }
+    try {
+        return ethers.getAddress(address);
+    } catch (error) {
+        return null;
+    }
+}
+
+function normalizeTokenKey(token) {
+    if (!token) {
+        return null;
+    }
+    return token.toString().trim().toLowerCase();
+}
+
 function sanitizeTimeSlot(value) {
     if (typeof value !== 'string') {
         return null;
@@ -1044,6 +1077,48 @@ async function init() {
             PRIMARY KEY (groupChatId, userId)
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS group_bot_settings (
+            chatId TEXT PRIMARY KEY,
+            settings TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS user_wallet_tokens (
+            chatId TEXT NOT NULL,
+            walletAddress TEXT NOT NULL,
+            tokenKey TEXT NOT NULL,
+            tokenLabel TEXT,
+            tokenAddress TEXT,
+            quoteTargets TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, walletAddress, tokenKey)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS user_warnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chatId TEXT NOT NULL,
+            targetUserId TEXT NOT NULL,
+            targetUsername TEXT,
+            reason TEXT,
+            createdBy TEXT NOT NULL,
+            createdAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS pending_memes (
+            id TEXT PRIMARY KEY,
+            chatId TEXT NOT NULL,
+            authorId TEXT,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+        );
+    `);
 
     await dbRun(`
         CREATE TABLE IF NOT EXISTS checkin_groups (
@@ -1246,12 +1321,14 @@ async function removeWalletFromUser(chatId, walletAddress) {
     let wallets = JSON.parse(user.wallets);
     const newWallets = wallets.filter(w => w !== walletAddress);
     await dbRun('UPDATE users SET wallets = ? WHERE chatId = ?', [JSON.stringify(newWallets), chatId]);
+    await removeWalletTokensForWallet(chatId, walletAddress);
     console.log(`[DB] Đã xóa ví ${walletAddress} khỏi chatId ${chatId}`);
     return true;
 }
 
 async function removeAllWalletsFromUser(chatId) {
     await dbRun('UPDATE users SET wallets = ? WHERE chatId = ?', ['[]', chatId]);
+    await removeAllWalletTokens(chatId);
     console.log(`[DB] Đã xóa tất cả ví khỏi chatId ${chatId}`);
     return true;
 }
@@ -1259,6 +1336,105 @@ async function removeAllWalletsFromUser(chatId) {
 async function getWalletsForUser(chatId) {
     let user = await dbGet('SELECT wallets FROM users WHERE chatId = ?', [chatId]);
     return user ? JSON.parse(user.wallets) : [];
+}
+
+async function upsertWalletTokenRecord({ chatId, walletAddress, tokenKey, tokenLabel, tokenAddress = null, quoteTargets = DEFAULT_QUOTE_TARGETS }) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    const normalizedTokenKey = normalizeTokenKey(tokenKey);
+    if (!chatId || !normalizedWallet || !normalizedTokenKey) {
+        throw new Error('INVALID_WALLET_TOKEN_INPUT');
+    }
+
+    const payload = Array.isArray(quoteTargets) && quoteTargets.length > 0
+        ? quoteTargets
+        : DEFAULT_QUOTE_TARGETS;
+
+    const normalizedTokenAddress = tokenAddress ? normalizeWalletAddressSafe(tokenAddress) : null;
+    const normalizedLabel = tokenLabel && tokenLabel.trim().length > 0
+        ? tokenLabel.trim()
+        : normalizedTokenKey.toUpperCase();
+    const now = Date.now();
+
+    await dbRun(`
+        INSERT INTO user_wallet_tokens (chatId, walletAddress, tokenKey, tokenLabel, tokenAddress, quoteTargets, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chatId, walletAddress, tokenKey)
+        DO UPDATE SET tokenLabel = excluded.tokenLabel, tokenAddress = excluded.tokenAddress,
+            quoteTargets = excluded.quoteTargets, updatedAt = excluded.updatedAt
+    `, [
+        chatId,
+        normalizedWallet,
+        normalizedTokenKey,
+        normalizedLabel,
+        normalizedTokenAddress,
+        JSON.stringify(payload),
+        now,
+        now
+    ]);
+}
+
+async function removeWalletTokenRecord(chatId, walletAddress, tokenKey) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    const normalizedTokenKey = normalizeTokenKey(tokenKey);
+    if (!chatId || !normalizedWallet || !normalizedTokenKey) {
+        return false;
+    }
+
+    await dbRun('DELETE FROM user_wallet_tokens WHERE chatId = ? AND walletAddress = ? AND tokenKey = ?', [
+        chatId,
+        normalizedWallet,
+        normalizedTokenKey
+    ]);
+    return true;
+}
+
+async function removeWalletTokensForWallet(chatId, walletAddress) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    if (!chatId || !normalizedWallet) {
+        return false;
+    }
+    await dbRun('DELETE FROM user_wallet_tokens WHERE chatId = ? AND walletAddress = ?', [chatId, normalizedWallet]);
+    return true;
+}
+
+async function removeAllWalletTokens(chatId) {
+    if (!chatId) {
+        return false;
+    }
+    await dbRun('DELETE FROM user_wallet_tokens WHERE chatId = ?', [chatId]);
+    return true;
+}
+
+async function getWalletTokenOverview(chatId) {
+    if (!chatId) {
+        return [];
+    }
+
+    const rows = await dbAll('SELECT walletAddress, tokenKey, tokenLabel, tokenAddress, quoteTargets FROM user_wallet_tokens WHERE chatId = ? ORDER BY createdAt ASC', [chatId]);
+    if (!rows || rows.length === 0) {
+        return [];
+    }
+
+    const grouped = new Map();
+    for (const row of rows) {
+        const wallet = normalizeWalletAddressSafe(row.walletAddress);
+        if (!wallet) {
+            continue;
+        }
+
+        if (!grouped.has(wallet)) {
+            grouped.set(wallet, []);
+        }
+
+        grouped.get(wallet).push({
+            tokenKey: row.tokenKey,
+            tokenLabel: row.tokenLabel || row.tokenKey.toUpperCase(),
+            tokenAddress: row.tokenAddress || null,
+            quoteTargets: safeJsonParse(row.quoteTargets, DEFAULT_QUOTE_TARGETS)
+        });
+    }
+
+    return Array.from(grouped.entries()).map(([wallet, tokens]) => ({ walletAddress: wallet, tokens }));
 }
 
 async function getUsersForWallet(walletAddress) {
@@ -1329,6 +1505,143 @@ async function setLanguage(chatId, lang) {
 
 async function setLanguageAuto(chatId, lang) {
     await setUserLanguage(chatId, lang, 'auto');
+}
+
+async function getGroupBotSettings(chatId) {
+    if (!chatId) {
+        return {};
+    }
+    const row = await dbGet('SELECT settings FROM group_bot_settings WHERE chatId = ?', [chatId]);
+    return row ? safeJsonParse(row.settings, {}) || {} : {};
+}
+
+async function updateGroupBotSettings(chatId, updates = {}) {
+    if (!chatId) {
+        return {};
+    }
+    const current = await getGroupBotSettings(chatId);
+    const next = { ...current, ...updates };
+    const now = Date.now();
+
+    await dbRun(`
+        INSERT INTO group_bot_settings (chatId, settings, updatedAt)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chatId) DO UPDATE SET settings = excluded.settings, updatedAt = excluded.updatedAt
+    `, [chatId, JSON.stringify(next), now]);
+
+    return next;
+}
+
+async function setGroupRules(chatId, rulesText, updatedBy) {
+    const normalized = (rulesText || '').trim();
+    return updateGroupBotSettings(chatId, {
+        rulesText: normalized,
+        rulesUpdatedAt: Date.now(),
+        rulesUpdatedBy: updatedBy || null
+    });
+}
+
+async function getGroupRules(chatId) {
+    const settings = await getGroupBotSettings(chatId);
+    return settings.rulesText || null;
+}
+
+async function updateBlacklist(chatId, transformFn) {
+    const settings = await getGroupBotSettings(chatId);
+    const existing = Array.isArray(settings.blacklist) ? settings.blacklist : [];
+    const nextList = transformFn(existing);
+    return updateGroupBotSettings(chatId, { blacklist: nextList });
+}
+
+async function addBlacklistWord(chatId, word) {
+    const normalized = (word || '').trim().toLowerCase();
+    if (!normalized) {
+        return [];
+    }
+    return updateBlacklist(chatId, (list) => {
+        const unique = new Set(list.map((item) => item.toLowerCase()));
+        unique.add(normalized);
+        return Array.from(unique);
+    });
+}
+
+async function removeBlacklistWord(chatId, word) {
+    const normalized = (word || '').trim().toLowerCase();
+    if (!normalized) {
+        return [];
+    }
+    return updateBlacklist(chatId, (list) => list.filter((item) => item.toLowerCase() !== normalized));
+}
+
+async function addWarning({ chatId, targetUserId, targetUsername = null, reason = '', createdBy }) {
+    if (!chatId || !targetUserId || !createdBy) {
+        throw new Error('INVALID_WARNING_INPUT');
+    }
+    const now = Date.now();
+    await dbRun(`
+        INSERT INTO user_warnings (chatId, targetUserId, targetUsername, reason, createdBy, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `, [chatId, targetUserId.toString(), targetUsername, reason, createdBy.toString(), now]);
+}
+
+async function getWarnings(chatId, targetUserId) {
+    if (!chatId || !targetUserId) {
+        return [];
+    }
+    const rows = await dbAll(`
+        SELECT id, reason, createdBy, createdAt
+        FROM user_warnings
+        WHERE chatId = ? AND targetUserId = ?
+        ORDER BY createdAt ASC
+    `, [chatId, targetUserId.toString()]);
+    return rows || [];
+}
+
+async function clearWarnings(chatId, targetUserId) {
+    if (!chatId || !targetUserId) {
+        return false;
+    }
+    await dbRun('DELETE FROM user_warnings WHERE chatId = ? AND targetUserId = ?', [chatId, targetUserId.toString()]);
+    return true;
+}
+
+async function setMemberXp(chatId, userId, amount) {
+    if (!chatId || !userId) {
+        throw new Error('INVALID_XP_INPUT');
+    }
+    const normalized = Number(amount);
+    if (!Number.isFinite(normalized)) {
+        throw new Error('INVALID_XP_VALUE');
+    }
+    const now = Date.now();
+    await dbRun(`
+        INSERT OR IGNORE INTO checkin_members (chatId, userId, streak, longestStreak, totalCheckins, totalPoints, createdAt, updatedAt)
+        VALUES (?, ?, 0, 0, 0, 0, ?, ?)
+    `, [chatId, userId.toString(), now, now]);
+    await dbRun('UPDATE checkin_members SET totalPoints = ?, updatedAt = ? WHERE chatId = ? AND userId = ?', [normalized, now, chatId, userId.toString()]);
+    return normalized;
+}
+
+async function getPendingMemes(chatId, status = 'pending') {
+    if (!chatId) {
+        return [];
+    }
+    const rows = await dbAll(`
+        SELECT id, chatId, authorId, content, status, createdAt
+        FROM pending_memes
+        WHERE chatId = ? AND status = ?
+        ORDER BY createdAt ASC
+        LIMIT 25
+    `, [chatId, status]);
+    return rows || [];
+}
+
+async function updateMemeStatus(id, status) {
+    if (!id || !status) {
+        return false;
+    }
+    await dbRun('UPDATE pending_memes SET status = ?, updatedAt = ? WHERE id = ?', [status, Date.now(), id]);
+    return true;
 }
 
 // --- Hàm xử lý Pending (Deep Link) ---
@@ -1501,11 +1814,28 @@ module.exports = {
     removeWalletFromUser,
     removeAllWalletsFromUser,
     getWalletsForUser,
+    upsertWalletTokenRecord,
+    removeWalletTokenRecord,
+    removeWalletTokensForWallet,
+    removeAllWalletTokens,
+    getWalletTokenOverview,
     getUsersForWallet,
     getUserLanguage,
     getUserLanguageInfo,
     setLanguage,
     setLanguageAuto,
+    getGroupBotSettings,
+    updateGroupBotSettings,
+    setGroupRules,
+    getGroupRules,
+    addBlacklistWord,
+    removeBlacklistWord,
+    addWarning,
+    getWarnings,
+    clearWarnings,
+    setMemberXp,
+    getPendingMemes,
+    updateMemeStatus,
     addPendingToken,
     getPendingWallet,
     deletePendingToken,

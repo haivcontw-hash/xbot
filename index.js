@@ -412,13 +412,153 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function normalizeAddressSafe(address) {
+    if (!address) {
+        return null;
+    }
+    try {
+        return ethers.getAddress(address);
+    } catch (error) {
+        return null;
+    }
+}
+
+function shortenAddress(address) {
+    if (!address || address.length < 10) {
+        return address || '';
+    }
+    const normalized = normalizeAddressSafe(address) || address;
+    return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
+}
+
+function buildWalletActionKeyboard(lang) {
+    return {
+        inline_keyboard: [
+            [{ text: t(lang, 'wallet_action_view'), callback_data: 'wallet_overview' }],
+            [{ text: t(lang, 'wallet_action_manage'), callback_data: 'wallet_manage' }]
+        ]
+    };
+}
+
+async function loadWalletOverviewEntries(chatId) {
+    const wallets = await db.getWalletsForUser(chatId);
+    const overview = await db.getWalletTokenOverview(chatId);
+    const tokenMap = new Map();
+    for (const entry of overview) {
+        const key = (entry.walletAddress || '').toLowerCase();
+        tokenMap.set(key, Array.isArray(entry.tokens) ? entry.tokens : []);
+    }
+
+    return wallets.map((wallet) => {
+        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const key = (normalized || '').toLowerCase();
+        return {
+            address: normalized,
+            tokens: tokenMap.get(key) || []
+        };
+    });
+}
+
+function buildWalletOverviewText(lang, entries) {
+    if (!entries || entries.length === 0) {
+        return t(lang, 'wallet_overview_empty');
+    }
+
+    const lines = [t(lang, 'wallet_overview_title', { count: entries.length.toString() })];
+    for (const entry of entries) {
+        const shortAddr = shortenAddress(entry.address);
+        lines.push('', t(lang, 'wallet_overview_wallet', { wallet: shortAddr }));
+        if (entry.tokens.length === 0) {
+            lines.push(t(lang, 'wallet_overview_wallet_no_token'));
+            continue;
+        }
+        for (const token of entry.tokens) {
+            const quotes = Array.isArray(token.quoteTargets) && token.quoteTargets.length > 0
+                ? token.quoteTargets.join(', ')
+                : 'USDT';
+            lines.push(t(lang, 'wallet_overview_token_line', {
+                token: token.tokenLabel || token.tokenKey?.toUpperCase() || 'Token',
+                quotes
+            }));
+        }
+    }
+
+    lines.push('', t(lang, 'wallet_overview_footer'));
+    return lines.join('\n');
+}
+
+async function buildUnregisterMenu(lang, chatId) {
+    const entries = await loadWalletOverviewEntries(chatId);
+    if (!entries || entries.length === 0) {
+        return {
+            text: t(lang, 'unregister_empty'),
+            replyMarkup: null
+        };
+    }
+
+    const lines = [t(lang, 'unregister_header')];
+    const inline_keyboard = [];
+    for (const entry of entries) {
+        const walletAddr = entry.address;
+        const shortAddr = shortenAddress(walletAddr);
+        inline_keyboard.push([{ text: `🧹 ${shortAddr}`, callback_data: `wallet_remove|wallet|${walletAddr}` }]);
+        for (const token of entry.tokens) {
+            inline_keyboard.push([{ text: `   • ${token.tokenLabel || token.tokenKey}`, callback_data: `wallet_remove|token|${walletAddr}|${token.tokenKey}` }]);
+        }
+    }
+    inline_keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'wallet_remove|all' }]);
+
+    return {
+        text: lines.join('\n'),
+        replyMarkup: { inline_keyboard }
+    };
+}
+
+function parseRegisterPayload(rawText) {
+    if (!rawText || typeof rawText !== 'string') {
+        return null;
+    }
+
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 2) {
+        return null;
+    }
+
+    const wallet = normalizeAddressSafe(parts[0]);
+    if (!wallet) {
+        return null;
+    }
+
+    const tokenRaw = parts[1];
+    const tokenKey = tokenRaw ? tokenRaw.toLowerCase() : null;
+    if (!tokenKey) {
+        return null;
+    }
+
+    let tokenAddress = null;
+    if (parts.length >= 3 && /^0x[0-9a-fA-F]{40}$/.test(parts[2])) {
+        tokenAddress = normalizeAddressSafe(parts[2]);
+    }
+
+    return {
+        wallet,
+        tokenKey,
+        tokenLabel: tokenRaw.toUpperCase(),
+        tokenAddress
+    };
+}
+
 const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
-    stats: { command: '/stats', icon: '📊', descKey: 'help_command_stats' },
+    rules: { command: '/rules', icon: '📜', descKey: 'help_command_rules' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
-    banmaoprice: { command: '/banmaoprice', icon: '💰', descKey: 'help_command_banmaoprice' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
@@ -453,7 +593,7 @@ const HELP_GROUP_DETAILS = {
         icon: '📈',
         titleKey: 'help_group_insights_title',
         descKey: 'help_group_insights_desc',
-        commands: ['stats', 'banmaoprice', 'okxchains', 'okx402status']
+        commands: ['rules', 'okxchains', 'okx402status']
     },
     support: {
         icon: '🎁',
@@ -5591,69 +5731,47 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: 'Markdown' });
     }
 
-    async function handleRegisterWithAddress(msg, address) {
+    async function handleRegisterCommand(msg, payload) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
+        if (!payload || !payload.trim()) {
+            await sendReply(msg, t(lang, 'register_usage'), { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
+            return;
+        }
+
+        const parsed = parseRegisterPayload(payload);
+        if (!parsed) {
+            await sendReply(msg, t(lang, 'register_missing_token'), { parse_mode: 'Markdown' });
+            return;
+        }
+
         try {
-            const normalizedAddr = ethers.getAddress(address);
-            await db.addWalletToUser(chatId, lang, normalizedAddr);
-            const message = t(lang, 'register_success', { walletAddress: normalizedAddr });
-            sendReply(msg, message, { parse_mode: 'Markdown' });
-            console.log(`[BOT] Thêm ví (Manual): ${normalizedAddr} -> ${chatId} (lang: ${lang})`);
+            await db.addWalletToUser(chatId, lang, parsed.wallet);
+            await db.upsertWalletTokenRecord({
+                chatId,
+                walletAddress: parsed.wallet,
+                tokenKey: parsed.tokenKey,
+                tokenLabel: parsed.tokenLabel,
+                tokenAddress: parsed.tokenAddress
+            });
+            const message = t(lang, 'register_token_saved', {
+                wallet: shortenAddress(parsed.wallet),
+                token: parsed.tokenLabel
+            });
+            await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
+            console.log(`[BOT] Đăng ký ${parsed.tokenLabel} @ ${parsed.wallet} -> ${chatId}`);
         } catch (error) {
-            const message = t(lang, 'register_invalid_address');
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            console.error(`[Register] Failed to save token for ${chatId}: ${error.message}`);
+            await sendReply(msg, t(lang, 'register_help_error'), { parse_mode: 'Markdown' });
         }
     }
 
     async function handleMyWalletCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length > 0) {
-            let message = t(lang, 'mywallet_list_header', { count: wallets.length }) + '\n\n';
-            wallets.forEach((wallet) => { message += `• \`${wallet}\`\n`; });
-            message += `\n${t(lang, 'mywallet_list_footer')}`;
-            sendReply(msg, message, { parse_mode: 'Markdown' });
-        } else {
-            sendReply(msg, t(lang, 'mywallet_not_linked'), { parse_mode: 'Markdown' });
-        }
-    }
-
-    async function handleStatsCommand(msg) {
-        const chatId = msg.chat.id.toString();
-        const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'stats_no_wallet'));
-            return;
-        }
-
-        const totalStats = { games: 0, wins: 0, losses: 0, draws: 0, totalWon: 0, totalLost: 0 };
-        for (const wallet of wallets) {
-            const stats = await db.getStats(wallet);
-            totalStats.games += stats.games;
-            totalStats.wins += stats.wins;
-            totalStats.losses += stats.losses;
-            totalStats.draws += stats.draws;
-            totalStats.totalWon += stats.totalWon;
-            totalStats.totalLost += stats.totalLost;
-        }
-
-        if (totalStats.games === 0) {
-            sendReply(msg, t(lang, 'stats_no_games'));
-            return;
-        }
-
-        const winRate = totalStats.games > 0 ? (totalStats.wins / totalStats.games * 100).toFixed(0) : 0;
-        const netProfit = totalStats.totalWon - totalStats.totalLost;
-        let message = t(lang, 'stats_header', { wallets: wallets.length, games: totalStats.games }) + '\n\n';
-        message += `• ${t(lang, 'stats_line_1', { wins: totalStats.wins, losses: totalStats.losses, draws: totalStats.draws })}\n`;
-        message += `• ${t(lang, 'stats_line_2', { rate: winRate })}\n`;
-        message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
-        message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
-        message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        sendReply(msg, message, { parse_mode: 'Markdown' });
+        const entries = await loadWalletOverviewEntries(chatId);
+        const text = buildWalletOverviewText(lang, entries);
+        await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang) });
     }
 
     async function handleDonateCommand(msg) {
@@ -5705,6 +5823,28 @@ function startTelegramBot() {
             console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
             sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
         }
+    }
+
+    async function handleRulesCommand(msg) {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
+        if (!isGroupChat) {
+            await sendReply(msg, t(lang, 'rules_private_hint'));
+            return;
+        }
+
+        const rules = await db.getGroupRules(chatId);
+        if (!rules) {
+            await sendReply(msg, t(lang, 'rules_not_configured'));
+            return;
+        }
+
+        const text = [t(lang, 'rules_title'), '', rules].join('\n');
+        await sendReply(msg, text, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: t(lang, 'rules_button_close'), callback_data: 'rules_close' }]] }
+        });
     }
 
     async function handleBanmaoPriceCommand(msg) {
@@ -5803,19 +5943,10 @@ function startTelegramBot() {
     async function handleUnregisterCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'mywallet_not_linked'));
-            return;
-        }
-
-        const keyboard = wallets.map((wallet) => {
-            const shortWallet = `${wallet.substring(0, 5)}...${wallet.substring(wallet.length - 4)}`;
-            return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
-        });
-        keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        sendReply(msg, t(lang, 'unregister_header'), {
-            reply_markup: { inline_keyboard: keyboard }
+        const menu = await buildUnregisterMenu(lang, chatId);
+        await sendReply(msg, menu.text, {
+            parse_mode: 'HTML',
+            reply_markup: menu.replyMarkup || undefined
         });
     }
 
@@ -5907,19 +6038,14 @@ function startTelegramBot() {
     });
 
     // COMMAND: /register - Cần async
-    bot.onText(/\/register (.+)/, async (msg, match) => {
-        const address = match[1];
-        await handleRegisterWithAddress(msg, address);
+    bot.onText(/^\/register(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        const payload = match[1];
+        await handleRegisterCommand(msg, payload);
     });
 
     // COMMAND: /mywallet - Cần async
     bot.onText(/\/mywallet/, async (msg) => {
         await handleMyWalletCommand(msg);
-    });
-
-    // COMMAND: /stats - Cần async
-    bot.onText(/\/stats/, async (msg) => {
-        await handleStatsCommand(msg);
     });
 
     // COMMAND: /donate - Cần async
@@ -5975,6 +6101,356 @@ function startTelegramBot() {
     bot.onText(/\/okxchains/, async (msg) => {
         await handleOkxChainsCommand(msg);
     });
+
+    function parseDurationText(value) {
+        if (!value) {
+            return null;
+        }
+        const match = String(value).trim().match(/^(\d+)([smhd])$/i);
+        if (!match) {
+            return null;
+        }
+        const amount = Number(match[1]);
+        const unit = match[2].toLowerCase();
+        const map = { s: 1, m: 60, h: 3600, d: 86400 };
+        const multiplier = map[unit];
+        if (!multiplier) {
+            return null;
+        }
+        return amount * multiplier;
+    }
+
+    function resolveCommandTarget(msg, explicitArg) {
+        if (msg.reply_to_message?.from?.id) {
+            const targetUser = msg.reply_to_message.from;
+            return {
+                id: targetUser.id,
+                name: targetUser.first_name || targetUser.username || String(targetUser.id)
+            };
+        }
+
+        if (explicitArg && /^\d+$/.test(explicitArg)) {
+            return { id: Number(explicitArg), name: explicitArg };
+        }
+
+        return null;
+    }
+
+    async function handleAdminActionCommand(msg, rawArgs) {
+        const lang = await getLang(msg);
+        const chatType = msg.chat.type;
+        if (!['group', 'supergroup'].includes(chatType)) {
+            await sendReply(msg, t(lang, 'admin_action_group_only'));
+            return;
+        }
+
+        const chatId = msg.chat.id.toString();
+        const adminId = msg.from?.id;
+        if (!adminId) {
+            return;
+        }
+
+        const isAdmin = await isGroupAdmin(chatId, adminId);
+        if (!isAdmin) {
+            await sendReply(msg, t(lang, 'admin_action_no_permission'));
+            return;
+        }
+
+        const args = (rawArgs || '').trim();
+        if (!args) {
+            await sendReply(msg, t(lang, 'admin_action_missing_args'));
+            return;
+        }
+
+        const [action, ...restParts] = args.split(/\s+/);
+        const command = action.toLowerCase();
+        const rest = [...restParts];
+        const defaultReplyOptions = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
+
+        const sendFeedback = async (text) => {
+            if (text) {
+                await bot.sendMessage(chatId, text, { ...defaultReplyOptions, parse_mode: 'Markdown' });
+            }
+        };
+
+        try {
+            switch (command) {
+                case 'mute': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_mute_invalid'));
+                        break;
+                    }
+                    const durationArg = rest.shift();
+                    const seconds = parseDurationText(durationArg) || 600;
+                    const untilDate = Math.floor(Date.now() / 1000) + seconds;
+                    const permissions = {
+                        can_send_messages: false,
+                        can_send_media_messages: false,
+                        can_send_polls: false,
+                        can_send_other_messages: false,
+                        can_add_web_page_previews: false,
+                        can_change_info: false,
+                        can_invite_users: false,
+                        can_pin_messages: false
+                    };
+                    await bot.restrictChatMember(chatId, target.id, { permissions, until_date: untilDate });
+                    await sendFeedback(t(lang, 'admin_mute_success', {
+                        user: target.name,
+                        minutes: Math.ceil(seconds / 60).toString()
+                    }));
+                    break;
+                }
+                case 'warn': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_warn_invalid'));
+                        break;
+                    }
+                    const reason = rest.join(' ') || t(lang, 'admin_warn_default_reason');
+                    await db.addWarning({
+                        chatId,
+                        targetUserId: target.id,
+                        targetUsername: msg.reply_to_message?.from?.username || null,
+                        reason,
+                        createdBy: adminId
+                    });
+                    const warnings = await db.getWarnings(chatId, target.id);
+                    await sendFeedback(t(lang, 'admin_warn_success', {
+                        user: target.name,
+                        count: warnings.length.toString(),
+                        reason
+                    }));
+                    break;
+                }
+                case 'warnings': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_warn_invalid'));
+                        break;
+                    }
+                    const warnings = await db.getWarnings(chatId, target.id);
+                    if (!warnings.length) {
+                        await sendFeedback(t(lang, 'admin_warnings_none', { user: target.name }));
+                        break;
+                    }
+                    const lines = warnings.map((warning, index) => {
+                        const time = new Date(Number(warning.createdAt || 0)).toLocaleString();
+                        return `${index + 1}. ${warning.reason || '—'} (${time})`;
+                    });
+                    await sendFeedback([t(lang, 'admin_warnings_header', { user: target.name }), ...lines].join('\n'));
+                    break;
+                }
+                case 'purge': {
+                    let count = parseInt(rest.shift(), 10);
+                    if (!Number.isFinite(count) || count <= 0) {
+                        count = 10;
+                    }
+                    count = Math.min(count, 100);
+                    let deleted = 0;
+                    const baseId = msg.reply_to_message?.message_id ?? msg.message_id;
+                    for (let i = 0; i < count; i += 1) {
+                        const targetMessageId = baseId - i - (msg.reply_to_message ? 0 : 1);
+                        if (targetMessageId <= 0) {
+                            break;
+                        }
+                        try {
+                            await bot.deleteMessage(chatId, targetMessageId);
+                            deleted += 1;
+                        } catch (error) {
+                            break;
+                        }
+                    }
+                    try {
+                        await bot.deleteMessage(chatId, msg.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                    await sendFeedback(t(lang, 'admin_purge_done', { count: deleted.toString() }));
+                    break;
+                }
+                case 'set_captcha': {
+                    const nextState = (rest.shift() || '').toLowerCase() === 'on';
+                    await db.updateGroupBotSettings(chatId, { captchaEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_captcha_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'set_rules': {
+                    const text = rest.join(' ') || msg.reply_to_message?.text;
+                    if (!text) {
+                        await sendFeedback(t(lang, 'admin_rules_missing'));
+                        break;
+                    }
+                    await db.setGroupRules(chatId, text, adminId);
+                    await sendFeedback(t(lang, 'admin_rules_updated'));
+                    break;
+                }
+                case 'add_blacklist': {
+                    const word = rest.join(' ');
+                    if (!word) {
+                        await sendFeedback(t(lang, 'admin_blacklist_missing'));
+                        break;
+                    }
+                    await db.addBlacklistWord(chatId, word);
+                    await sendFeedback(t(lang, 'admin_blacklist_added', { word }));
+                    break;
+                }
+                case 'remove_blacklist': {
+                    const word = rest.join(' ');
+                    if (!word) {
+                        await sendFeedback(t(lang, 'admin_blacklist_missing'));
+                        break;
+                    }
+                    await db.removeBlacklistWord(chatId, word);
+                    await sendFeedback(t(lang, 'admin_blacklist_removed', { word }));
+                    break;
+                }
+                case 'set_xp': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    const amountArg = rest.shift();
+                    if (!target || !amountArg) {
+                        await sendFeedback(t(lang, 'admin_set_xp_invalid'));
+                        break;
+                    }
+                    const amount = Number(amountArg);
+                    if (!Number.isFinite(amount)) {
+                        await sendFeedback(t(lang, 'admin_set_xp_invalid'));
+                        break;
+                    }
+                    await db.setMemberXp(chatId, target.id, amount);
+                    await sendFeedback(t(lang, 'admin_set_xp_success', {
+                        user: target.name,
+                        amount: amount.toString()
+                    }));
+                    break;
+                }
+                case 'update_info': {
+                    await db.updateGroupBotSettings(chatId, { infoRefreshedAt: Date.now() });
+                    await sendFeedback(t(lang, 'admin_update_info_done'));
+                    break;
+                }
+                case 'status': {
+                    const settings = await db.getGroupBotSettings(chatId);
+                    const lines = [
+                        t(lang, 'admin_status_header', { chat: msg.chat.title || chatId }),
+                        t(lang, 'admin_status_line', { label: 'Captcha', value: settings.captchaEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Predict', value: settings.predictEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'XP React', value: settings.xpReactEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Whale Alerts', value: settings.whaleWatchEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Tracked Wallets', value: (settings.trackedWallets?.length || 0).toString() })
+                    ];
+                    await sendFeedback(lines.join('\n'));
+                    break;
+                }
+                case 'toggle_predict': {
+                    const desired = (rest.shift() || '').toLowerCase();
+                    const settings = await db.getGroupBotSettings(chatId);
+                    let nextState = !settings.predictEnabled;
+                    if (desired === 'on') {
+                        nextState = true;
+                    } else if (desired === 'off') {
+                        nextState = false;
+                    }
+                    await db.updateGroupBotSettings(chatId, { predictEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_predict_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'set_xp_react': {
+                    const nextState = (rest.shift() || '').toLowerCase() === 'on';
+                    await db.updateGroupBotSettings(chatId, { xpReactEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_xp_react_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'whale': {
+                    const desired = (rest.shift() || '').toLowerCase();
+                    const settings = await db.getGroupBotSettings(chatId);
+                    let nextState = !settings.whaleWatchEnabled;
+                    if (desired === 'on') {
+                        nextState = true;
+                    } else if (desired === 'off') {
+                        nextState = false;
+                    }
+                    await db.updateGroupBotSettings(chatId, { whaleWatchEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_whale_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'draw': {
+                    const prize = rest.shift();
+                    const rules = rest.join(' ');
+                    if (!prize) {
+                        await sendFeedback(t(lang, 'admin_draw_invalid'));
+                        break;
+                    }
+                    const candidates = await db.getTopCheckins(chatId, 50, 'points');
+                    if (!candidates.length) {
+                        await sendFeedback(t(lang, 'admin_draw_no_candidates'));
+                        break;
+                    }
+                    const winner = candidates[Math.floor(Math.random() * candidates.length)];
+                    await sendFeedback(t(lang, 'admin_draw_result', { prize, winner: winner.userId, rules: rules || '—' }));
+                    break;
+                }
+                case 'review_memes': {
+                    const memes = await db.getPendingMemes(chatId);
+                    if (!memes.length) {
+                        await sendFeedback(t(lang, 'admin_review_memes_empty'));
+                        break;
+                    }
+                    const lines = memes.map((meme) => `#${meme.id} - ${meme.content.slice(0, 80)}`);
+                    await sendFeedback([t(lang, 'admin_review_memes_header'), ...lines].join('\n'));
+                    break;
+                }
+                case 'approve':
+                case 'reject': {
+                    const memeId = rest.shift();
+                    if (!memeId) {
+                        await sendFeedback(t(lang, 'admin_meme_invalid'));
+                        break;
+                    }
+                    const status = command === 'approve' ? 'approved' : 'rejected';
+                    await db.updateMemeStatus(memeId, status);
+                    await sendFeedback(t(lang, 'admin_review_memes_updated', { id: memeId, status }));
+                    break;
+                }
+                case 'announce': {
+                    const announcement = rest.join(' ') || msg.reply_to_message?.text;
+                    if (!announcement) {
+                        await sendFeedback(t(lang, 'admin_announce_missing'));
+                        break;
+                    }
+                    await bot.sendMessage(chatId, t(lang, 'admin_announce_prefix', { message: announcement }), { allow_sending_without_reply: true });
+                    await sendFeedback(t(lang, 'admin_announce_sent'));
+                    break;
+                }
+                case 'track': {
+                    const address = rest.shift();
+                    const label = rest.join(' ') || 'Tracked Wallet';
+                    const normalized = normalizeAddressSafe(address);
+                    if (!normalized) {
+                        await sendFeedback(t(lang, 'admin_track_invalid'));
+                        break;
+                    }
+                    const settings = await db.getGroupBotSettings(chatId);
+                    const list = Array.isArray(settings.trackedWallets) ? settings.trackedWallets : [];
+                    const nextList = list.filter((entry) => entry.address?.toLowerCase() !== normalized.toLowerCase());
+                    nextList.push({ address: normalized, name: label });
+                    await db.updateGroupBotSettings(chatId, { trackedWallets: nextList });
+                    await sendFeedback(t(lang, 'admin_track_added', { wallet: shortenAddress(normalized), name: label }));
+                    break;
+                }
+                default:
+                    await sendFeedback(t(lang, 'admin_action_unknown'));
+                    break;
+            }
+        } catch (error) {
+            console.error(`[AdminCommand] Failed to execute ${command}: ${error.message}`);
+            await sendFeedback(t(lang, 'admin_action_error'));
+        }
+    }
 
     async function handleAdminCommand(msg) {
         const chatId = msg.chat.id;
@@ -6048,6 +6524,10 @@ function startTelegramBot() {
         await handleAdminCommand(msg);
     });
 
+    bot.onText(/^\/admin(?:@[\w_]+)?\s+(.+)/, async (msg, match) => {
+        await handleAdminActionCommand(msg, match[1]);
+    });
+
     bot.onText(/^\/admin(?:@[\w_]+)?$/, async (msg) => {
         await handleAdminCommand(msg);
     });
@@ -6056,8 +6536,8 @@ function startTelegramBot() {
         await handleOkx402StatusCommand(msg);
     });
 
-    bot.onText(/\/banmaoprice/, async (msg) => {
-        await handleBanmaoPriceCommand(msg);
+    bot.onText(/\/rules/, async (msg) => {
+        await handleRulesCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
@@ -6106,19 +6586,14 @@ function startTelegramBot() {
             await handleMyWalletCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
-        stats: async (query, lang) => {
+        rules: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
-            await handleStatsCommand(synthetic);
+            await handleRulesCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         donate: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleDonateCommand(synthetic);
-            return { message: t(lang, 'help_action_executed') };
-        },
-        banmaoprice: async (query, lang) => {
-            const synthetic = buildSyntheticCommandMessage(query);
-            await handleBanmaoPriceCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         okxchains: async (query, lang) => {
@@ -6199,6 +6674,75 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'rules_close') {
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore cleanup errors
+                    }
+                }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data === 'wallet_overview') {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const entries = await loadWalletOverviewEntries(chatId);
+                const text = buildWalletOverviewText(callbackLang, entries);
+                await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(callbackLang) });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                return;
+            }
+
+            if (query.data === 'wallet_manage') {
+                const synthetic = buildSyntheticCommandMessage(query);
+                await handleUnregisterCommand(synthetic);
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_manage_opened') });
+                return;
+            }
+
+            if (query.data.startsWith('wallet_remove|')) {
+                if (!chatId || !query.message?.message_id) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const [, scope, wallet, tokenKey] = query.data.split('|');
+                let feedback = null;
+                if (scope === 'all') {
+                    await db.removeAllWalletsFromUser(chatId);
+                    feedback = t(callbackLang, 'unregister_all_success');
+                } else if (scope === 'wallet' && wallet) {
+                    await db.removeWalletFromUser(chatId, wallet);
+                    feedback = t(callbackLang, 'unregister_wallet_removed', { wallet: shortenAddress(wallet) });
+                } else if (scope === 'token' && wallet && tokenKey) {
+                    await db.removeWalletTokenRecord(chatId, wallet, tokenKey);
+                    feedback = t(callbackLang, 'unregister_token_removed', {
+                        wallet: shortenAddress(wallet),
+                        token: tokenKey.toUpperCase()
+                    });
+                }
+
+                const menu = await buildUnregisterMenu(callbackLang, chatId);
+                try {
+                    await bot.editMessageText(menu.text, {
+                        chat_id: query.message.chat.id,
+                        message_id: query.message.message_id,
+                        parse_mode: 'HTML',
+                        reply_markup: menu.replyMarkup || undefined
+                    });
+                } catch (error) {
+                    // ignore edit errors
+                }
+
+                await bot.answerCallbackQuery(queryId, { text: feedback || t(callbackLang, 'unregister_action_done') });
+                return;
+            }
+
             if (query.data === 'help_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -7635,25 +8179,6 @@ function startTelegramBot() {
                 bot.answerCallbackQuery(queryId, { text: message });
             }
 
-            else if (query.data.startsWith('delete_')) {
-                if (!chatId || !query.message?.message_id) {
-                    await bot.answerCallbackQuery(queryId);
-                    return;
-                }
-
-                const walletToDelete = query.data.substring(7);
-                if (walletToDelete === 'all') {
-                    await db.removeAllWalletsFromUser(chatId);
-                    const message = t(lang, 'unregister_all_success'); // Dùng lang đã lưu
-                    bot.editMessageText(message, { chat_id: chatId, message_id: query.message.message_id });
-                    bot.answerCallbackQuery(queryId, { text: message });
-                } else {
-                    await db.removeWalletFromUser(chatId, walletToDelete);
-                    const message = t(lang, 'unregister_one_success', { wallet: walletToDelete }); // Dùng lang đã lưu
-                    bot.editMessageText(message, { chat_id: chatId, message_id: query.message.message_id });
-                    bot.answerCallbackQuery(queryId, { text: message });
-                }
-            }
         } catch (error) {
             console.error("Lỗi khi xử lý callback_query:", error);
             bot.answerCallbackQuery(queryId, { text: "Error!" });
@@ -7683,8 +8208,20 @@ function startTelegramBot() {
                 }
 
                 try {
-                    const normalized = ethers.getAddress(rawText);
-                    await db.addWalletToUser(userId, lang, normalized);
+                    const parsed = parseRegisterPayload(rawText);
+                    if (!parsed) {
+                        await sendEphemeralMessage(userId, t(lang, 'register_help_invalid'));
+                        return;
+                    }
+
+                    await db.addWalletToUser(userId, lang, parsed.wallet);
+                    await db.upsertWalletTokenRecord({
+                        chatId: userId,
+                        walletAddress: parsed.wallet,
+                        tokenKey: parsed.tokenKey,
+                        tokenLabel: parsed.tokenLabel,
+                        tokenAddress: parsed.tokenAddress
+                    });
 
                     if (registerState.promptMessageId) {
                         try {
@@ -7695,15 +8232,14 @@ function startTelegramBot() {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    await sendEphemeralMessage(userId, t(lang, 'register_help_success', { wallet: normalized }), {}, 20000);
+                    await sendEphemeralMessage(userId, t(lang, 'register_help_success_token', {
+                        wallet: shortenAddress(parsed.wallet),
+                        token: parsed.tokenLabel
+                    }), {}, 20000);
                     registerWizardStates.delete(userId);
                 } catch (error) {
-                    if (error && error.code === 'INVALID_ARGUMENT') {
-                        await sendEphemeralMessage(userId, t(lang, 'register_help_invalid'));
-                    } else {
-                        console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
-                        await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
-                    }
+                    console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
+                    await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
                 }
                 return;
             }
