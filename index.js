@@ -5494,6 +5494,56 @@ function normalizeDexHolding(row) {
     };
 }
 
+function extractDexHoldingRows(payload) {
+    const rows = [];
+    if (!payload || typeof payload !== 'object') {
+        return rows;
+    }
+
+    const direct = unwrapOkxData(payload);
+    if (Array.isArray(direct)) {
+        for (const item of direct) {
+            if (!item) {
+                continue;
+            }
+            if (Array.isArray(item.tokenBalance)) {
+                rows.push(...item.tokenBalance);
+            }
+            if (Array.isArray(item.tokenBalances)) {
+                rows.push(...item.tokenBalances);
+            }
+            if (Array.isArray(item.balanceList)) {
+                rows.push(...item.balanceList);
+            }
+            if (Array.isArray(item.balances)) {
+                rows.push(...item.balances);
+            }
+            if (Array.isArray(item.list)) {
+                rows.push(...item.list);
+            }
+            rows.push(item);
+        }
+    }
+
+    const nested = payload.data && typeof payload.data === 'object' ? payload.data : null;
+    if (nested) {
+        const candidates = [
+            nested.tokenBalance,
+            nested.tokenBalances,
+            nested.balanceList,
+            nested.balances,
+            nested.list
+        ];
+        for (const candidate of candidates) {
+            if (Array.isArray(candidate)) {
+                rows.push(...candidate);
+            }
+        }
+    }
+
+    return rows;
+}
+
 async function fetchOkxDexWalletHoldings(walletAddress) {
     const normalized = normalizeAddressSafe(walletAddress);
     if (!normalized) {
@@ -5506,7 +5556,7 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
             ...baseQuery,
             address: normalized,
             walletAddress: normalized,
-            chainId: baseQuery.chainIndex,
+            chainId: baseQuery.chainId ?? baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK,
             chainIndex: baseQuery.chainIndex
         }
     ];
@@ -5519,23 +5569,26 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
     ];
 
     for (const query of queries) {
-        for (const path of endpoints) {
-            try {
-                const response = await okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false });
-                const rows = unwrapOkxData(response);
-                if (!Array.isArray(rows) || rows.length === 0) {
-                    continue;
-                }
+        const tasks = endpoints.map((path) =>
+            okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false })
+                .then((response) => {
+                    const rows = extractDexHoldingRows(response);
+                    return rows
+                        .map((row) => normalizeDexHolding(row))
+                        .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
+                })
+                .catch((error) => {
+                    console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
+                    return [];
+                })
+        );
 
-                const holdings = rows
-                    .map((row) => normalizeDexHolding(row))
-                    .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
-
-                if (holdings.length > 0) {
-                    return holdings;
-                }
-            } catch (error) {
-                console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
+        const settled = await Promise.allSettled(tasks);
+        for (let i = 0; i < endpoints.length; i += 1) {
+            const outcome = settled[i];
+            const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
+            if (Array.isArray(holdings) && holdings.length > 0) {
+                return holdings;
             }
         }
     }
@@ -6083,6 +6136,14 @@ async function buildOkxDexQuery(chainName, options = {}) {
             query.chainIndex = Number(OKX_CHAIN_INDEX);
         } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
             query.chainIndex = OKX_CHAIN_INDEX_FALLBACK;
+        }
+    }
+
+    if (!Number.isFinite(query.chainId)) {
+        if (Number.isFinite(query.chainIndex)) {
+            query.chainId = Number(query.chainIndex);
+        } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
+            query.chainId = Number(OKX_CHAIN_INDEX_FALLBACK);
         }
     }
 
