@@ -21,7 +21,7 @@ const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '') || `http://localhost:${API_PORT}`;
-const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
+const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'xlayer';
 const OKX_BANMAO_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
     '0x16d91d1615FC55B76d5f92365Bd60C069B46ef78';
@@ -5550,47 +5550,60 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
         return [];
     }
 
-    const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
-    const queries = [
-        {
-            ...baseQuery,
-            address: normalized,
-            walletAddress: normalized,
-            chainId: baseQuery.chainId ?? baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK,
-            chainIndex: baseQuery.chainIndex
-        }
-    ];
+    try {
+        const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
+        const safeChainShortName = (baseQuery.chainShortName || '').replace(/[^a-z0-9-]/gi, '') || 'xlayer';
+        const queries = [
+            {
+                ...baseQuery,
+                chainShortName: safeChainShortName,
+                address: normalized,
+                walletAddress: normalized,
+                chainId: baseQuery.chainId ?? baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK,
+                chainIndex: baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK
+            },
+            {
+                chainShortName: 'xlayer',
+                chainId: OKX_CHAIN_INDEX_FALLBACK,
+                chainIndex: OKX_CHAIN_INDEX_FALLBACK,
+                address: normalized,
+                walletAddress: normalized
+            }
+        ];
 
-    const endpoints = [
-        '/api/v6/dex/aggregator/portfolio/token-balance',
-        '/api/v5/dex/aggregator/portfolio/token-balance',
-        '/api/v6/explorer/address/token-balance',
-        '/api/v5/explorer/address/token-balance'
-    ];
+        const endpoints = [
+            '/api/v6/dex/aggregator/portfolio/token-balance',
+            '/api/v5/dex/aggregator/portfolio/token-balance',
+            '/api/v6/explorer/address/token-balance',
+            '/api/v5/explorer/address/token-balance'
+        ];
 
-    for (const query of queries) {
-        const tasks = endpoints.map((path) =>
-            okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false })
-                .then((response) => {
-                    const rows = extractDexHoldingRows(response);
-                    return rows
-                        .map((row) => normalizeDexHolding(row))
-                        .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
-                })
-                .catch((error) => {
-                    console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
-                    return [];
-                })
-        );
+        for (const query of queries) {
+            const tasks = endpoints.map((path) =>
+                okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false })
+                    .then((response) => {
+                        const rows = extractDexHoldingRows(response);
+                        return rows
+                            .map((row) => normalizeDexHolding(row))
+                            .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
+                    })
+                    .catch((error) => {
+                        console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
+                        return [];
+                    })
+            );
 
-        const settled = await Promise.allSettled(tasks);
-        for (let i = 0; i < endpoints.length; i += 1) {
-            const outcome = settled[i];
-            const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
-            if (Array.isArray(holdings) && holdings.length > 0) {
-                return holdings;
+            const settled = await Promise.allSettled(tasks);
+            for (let i = 0; i < endpoints.length; i += 1) {
+                const outcome = settled[i];
+                const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
+                if (Array.isArray(holdings) && holdings.length > 0) {
+                    return holdings;
+                }
             }
         }
+    } catch (error) {
+        console.warn(`[DexHoldings] Fatal error for ${shortenAddress(normalized)}: ${error.message}`);
     }
 
     return [];
@@ -6061,7 +6074,7 @@ async function resolveOkxChainContext(chainName) {
     }
 
     if (!match) {
-        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'xlayer';
         const fallbackKeys = collectChainSearchKeys(fallbackShortName);
         match = {
             chainShortName: fallbackShortName,
