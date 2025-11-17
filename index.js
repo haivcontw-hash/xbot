@@ -5423,7 +5423,16 @@ async function fetchOkxTokenDirectory(chainName, options = {}) {
         return cached.value;
     }
 
-    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', { query });
+    let payload = null;
+    try {
+        payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', {
+            query,
+            expectOkCode: false
+        });
+    } catch (error) {
+        console.warn(`[OKX] Token directory fetch failed: ${error.message}`);
+    }
+
     const rows = unwrapOkxData(payload);
 
     const tokens = [];
@@ -6141,7 +6150,7 @@ async function buildOkxDexQuery(chainName, options = {}) {
     }
 
     if (!query.chainShortName) {
-        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'xlayer';
     }
 
     if (!Number.isFinite(query.chainIndex)) {
