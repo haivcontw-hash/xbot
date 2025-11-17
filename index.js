@@ -5356,11 +5356,13 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
 
     if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
         try {
-            const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/tokenPrice', { query });
-            priceEntry = unwrapOkxFirst(payload);
-            source = 'OKX DEX tokenPrice';
+            const quoteResult = await fetchTokenQuotePrice({ chainName, tokenAddress });
+            if (quoteResult && Number.isFinite(quoteResult.price)) {
+                priceEntry = quoteResult.raw;
+                source = quoteResult.source;
+            }
         } catch (error) {
-            errors.push(new Error(`[tokenPrice:${chainLabel}] ${error.message}`));
+            errors.push(new Error(`[quotePrice:${chainLabel}] ${error.message}`));
         }
     }
 
@@ -5405,6 +5407,79 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
         tokenPrices,
         raw: { priceEntry, priceInfoEntry }
     };
+}
+
+async function fetchTokenQuotePrice(options = {}) {
+    const { chainName, tokenAddress } = options;
+
+    if (!tokenAddress || !OKX_QUOTE_TOKEN_ADDRESS) {
+        return null;
+    }
+
+    const normalizedAddress = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
+    const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
+    const context = await resolveOkxChainContext(chainName);
+
+    const chainIndex = Number.isFinite(query.chainIndex)
+        ? Number(query.chainIndex)
+        : (Number.isFinite(context?.chainIndex) ? Number(context.chainIndex) : null);
+
+    if (!Number.isFinite(chainIndex)) {
+        throw new Error('Unable to resolve OKX chain index');
+    }
+
+    const amount = await resolveTokenQuoteAmount(chainName, normalizedAddress);
+
+    const requestQuery = {
+        chainIndex,
+        fromTokenAddress: normalizedAddress,
+        toTokenAddress: OKX_QUOTE_TOKEN_ADDRESS,
+        amount,
+        swapMode: 'exactIn',
+        slippagePercent: '1'
+    };
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/quote', {
+        query: requestQuery
+    });
+
+    const quoteEntry = selectOkxQuoteByLiquidity(unwrapOkxData(payload)) || unwrapOkxFirst(payload);
+    if (!quoteEntry) {
+        return null;
+    }
+
+    const priceInfo = extractOkxQuotePrice(quoteEntry, { requestAmount: amount });
+    if (!Number.isFinite(priceInfo.price) || priceInfo.price <= 0) {
+        return null;
+    }
+
+    const okbUsd = resolveOkbUsdPrice(priceInfo.tokenUnitPrices);
+    const priceOkb = Number.isFinite(priceInfo.price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? priceInfo.price / okbUsd
+        : null;
+
+    return {
+        price: priceInfo.price,
+        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
+        chain: query.chainShortName || chainName || 'xlayer',
+        source: 'OKX DEX quote',
+        tokenPrices: priceInfo.tokenUnitPrices,
+        raw: quoteEntry
+    };
+}
+
+async function resolveTokenQuoteAmount(chainName, tokenAddress) {
+    const directory = await fetchOkxTokenDirectory(chainName);
+    const addressLower = (tokenAddress || '').toLowerCase();
+    const meta = directory?.byAddressLower?.get(addressLower) || null;
+    const decimals = Number.isFinite(meta?.decimals) ? Math.max(0, Math.trunc(meta.decimals)) : 18;
+
+    try {
+        return (BigInt(10) ** BigInt(decimals)).toString();
+    } catch (error) {
+        return '1000000000000000000';
+    }
 }
 
 async function fetchBanmaoTokenProfile(options = {}) {
