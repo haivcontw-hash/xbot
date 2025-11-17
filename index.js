@@ -5545,20 +5545,38 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         }
     };
 
+    const appendChainVariants = (base) => {
+        pushQuery({ ...base });
+
+        if (chainIds.length > 0) {
+            pushQuery({ ...base, chains: chainIds.join(',') });
+            for (const chainId of chainIds) {
+                pushQuery({ ...base, chains: chainId });
+            }
+        }
+
+        if (chainShortNames.length > 0) {
+            pushQuery({ ...base, chains: chainShortNames.join(',') });
+            for (const chainShortName of chainShortNames) {
+                pushQuery({ ...base, chains: chainShortName });
+            }
+        }
+    };
+
     // Always include both address keys to satisfy strict API validation
-    pushQuery({ ...baseAddressFields });
-    pushQuery({ ...baseAddressFields, chainShortName: safeChainShortName });
+    appendChainVariants({ ...baseAddressFields });
+    appendChainVariants({ ...baseAddressFields, chainShortName: safeChainShortName });
 
     for (const chainShortName of chainShortNames) {
-        pushQuery({ ...baseAddressFields, chainShortName });
+        appendChainVariants({ ...baseAddressFields, chainShortName });
     }
 
     for (const chainId of chainIds) {
-        pushQuery({ ...baseAddressFields, chainId });
-        pushQuery({ ...baseAddressFields, chainId, chainShortName: safeChainShortName });
+        appendChainVariants({ ...baseAddressFields, chainId });
+        appendChainVariants({ ...baseAddressFields, chainId, chainShortName: safeChainShortName });
 
         for (const chainShortName of chainShortNames) {
-            pushQuery({ ...baseAddressFields, chainId, chainShortName });
+            appendChainVariants({ ...baseAddressFields, chainId, chainShortName });
         }
     }
 
