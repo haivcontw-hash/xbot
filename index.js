@@ -5652,23 +5652,47 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
     try {
         const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
         const safeChainShortName = (baseQuery.chainShortName || '').replace(/[^a-z0-9-]/gi, '') || 'xlayer';
-        const queries = [
-            {
-                ...baseQuery,
-                chainShortName: safeChainShortName,
-                address: normalized,
-                walletAddress: normalized,
-                chainId: baseQuery.chainId ?? baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK,
-                chainIndex: baseQuery.chainIndex ?? OKX_CHAIN_INDEX_FALLBACK
-            },
-            {
-                chainShortName: 'xlayer',
-                chainId: OKX_CHAIN_INDEX_FALLBACK,
-                chainIndex: OKX_CHAIN_INDEX_FALLBACK,
-                address: normalized,
-                walletAddress: normalized
+        const chainIds = Array.from(new Set([
+            baseQuery.chainId,
+            baseQuery.chainIndex,
+            OKX_CHAIN_INDEX,
+            OKX_CHAIN_INDEX_FALLBACK,
+            196
+        ]))
+            .filter((value) => Number.isFinite(Number(value)))
+            .map((value) => String(Number(value)));
+
+        const chainShortNames = Array.from(new Set([
+            baseQuery.chainShortName,
+            safeChainShortName,
+            'xlayer',
+            'x-layer',
+            'X Layer',
+            OKX_CHAIN_SHORT_NAME
+        ].filter(Boolean)));
+
+        const queries = [];
+        const pushQuery = (query) => {
+            const key = JSON.stringify(query);
+            if (!queries.some((item) => JSON.stringify(item) === key)) {
+                queries.push(query);
             }
-        ];
+        };
+
+        for (const chainId of chainIds) {
+            pushQuery({ address: normalized, walletAddress: normalized, chainId });
+            pushQuery({ address: normalized, walletAddress: normalized, chainId, chainIndex: Number(chainId) });
+
+            for (const chainShortName of chainShortNames) {
+                pushQuery({
+                    address: normalized,
+                    walletAddress: normalized,
+                    chainId,
+                    chainIndex: Number(chainId),
+                    chainShortName
+                });
+            }
+        }
 
         const endpoints = [
             '/api/v6/dex/aggregator/portfolio/token-balance',
@@ -5677,27 +5701,31 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
             '/api/v5/explorer/address/token-balance'
         ];
 
-        for (const query of queries) {
-            const tasks = endpoints.map((path) =>
-                okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false })
-                    .then((response) => {
-                        const rows = extractDexHoldingRows(response);
-                        return rows
-                            .map((row) => normalizeDexHolding(row))
-                            .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
-                    })
-                    .catch((error) => {
-                        console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
-                        return [];
-                    })
-            );
+        const authOptions = hasOkxCredentials ? [false, true] : [false];
 
-            const settled = await Promise.allSettled(tasks);
-            for (let i = 0; i < endpoints.length; i += 1) {
-                const outcome = settled[i];
-                const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
-                if (Array.isArray(holdings) && holdings.length > 0) {
-                    return holdings;
+        for (const query of queries) {
+            for (const authFlag of authOptions) {
+                const tasks = endpoints.map((path) =>
+                    okxJsonRequest('GET', path, { query, auth: authFlag, expectOkCode: false })
+                        .then((response) => {
+                            const rows = extractDexHoldingRows(response);
+                            return rows
+                                .map((row) => normalizeDexHolding(row))
+                                .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
+                        })
+                        .catch((error) => {
+                            console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
+                            return [];
+                        })
+                );
+
+                const settled = await Promise.allSettled(tasks);
+                for (let i = 0; i < endpoints.length; i += 1) {
+                    const outcome = settled[i];
+                    const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
+                    if (Array.isArray(holdings) && holdings.length > 0) {
+                        return holdings;
+                    }
                 }
             }
         }
