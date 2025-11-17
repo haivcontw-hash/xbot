@@ -5555,6 +5555,33 @@ async function fetchOkxTokenDirectory(chainName, options = {}) {
     return directory;
 }
 
+function decimalToRawBigInt(amount, decimals) {
+    if (!Number.isFinite(Number(decimals))) {
+        return null;
+    }
+
+    if (amount === undefined || amount === null) {
+        return null;
+    }
+
+    const amountStr = String(amount).trim();
+    if (!amountStr) {
+        return null;
+    }
+
+    const decimalsInt = Number(decimals);
+    const [intPart, fracPartRaw = ''] = amountStr.split('.');
+    const fracPart = fracPartRaw.slice(0, Math.max(0, decimalsInt));
+    const paddedFrac = fracPart.padEnd(Math.max(0, decimalsInt), '0');
+    const combined = `${intPart || '0'}${paddedFrac}`.replace(/^0+(?=\d)/, '');
+
+    try {
+        return BigInt(combined || '0');
+    } catch (error) {
+        return null;
+    }
+}
+
 function normalizeDexHolding(row) {
     if (!row) {
         return null;
@@ -5580,6 +5607,24 @@ function normalizeDexHolding(row) {
         } catch (error) {
             amountRaw = null;
         }
+    } else if (row.coinAmount !== undefined && row.coinAmount !== null && Number.isFinite(decimals)) {
+        amountRaw = decimalToRawBigInt(row.coinAmount, decimals);
+    }
+
+    const currencyAmount = Number(row.currencyAmount);
+    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice))
+        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice)
+        : null;
+
+    if ((!Number.isFinite(priceUsd) || priceUsd === null) && amountRaw !== null && Number.isFinite(decimals) && Number.isFinite(currencyAmount) && currencyAmount > 0) {
+        try {
+            const amountNumeric = Number(ethers.formatUnits(amountRaw, decimals));
+            if (Number.isFinite(amountNumeric) && amountNumeric > 0) {
+                priceUsd = currencyAmount / amountNumeric;
+            }
+        } catch (error) {
+            // ignore price derivation errors
+        }
     }
 
     return {
@@ -5588,9 +5633,7 @@ function normalizeDexHolding(row) {
         symbol,
         name,
         amountRaw,
-        priceUsd: Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice))
-            ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice)
-            : null
+        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
     };
 }
 
@@ -5642,6 +5685,77 @@ function extractDexHoldingRows(payload) {
     }
 
     return rows;
+}
+
+async function fetchOkxDefiPlatformSnapshot(walletAddress, chainId, authFlag) {
+    if (!walletAddress || !chainId) {
+        return { totalUsd: null };
+    }
+
+    try {
+        const payload = await okxJsonRequest('POST', '/api/v5/defi/user/asset/platform/list', {
+            body: {
+                walletAddressList: [{ chainId: String(chainId), walletAddress }]
+            },
+            auth: authFlag,
+            expectOkCode: false
+        });
+
+        const data = payload?.data;
+        const walletEntry = Array.isArray(data?.walletIdPlatformList) ? data.walletIdPlatformList[0] : null;
+        const totalAssets = Number(walletEntry?.totalAssets);
+        if (Number.isFinite(totalAssets) && totalAssets > 0) {
+            return { totalUsd: totalAssets };
+        }
+    } catch (error) {
+        console.warn(`[DexHoldings] Platform snapshot failed for ${shortenAddress(walletAddress)} on ${chainId}: ${error.message}`);
+    }
+
+    return { totalUsd: null };
+}
+
+async function fetchOkxDefiBalances(walletAddress, chainId, authFlag) {
+    if (!walletAddress || !chainId) {
+        return { holdings: [], totalUsd: null };
+    }
+
+    const tokenAddressLists = [[], null];
+    for (const tokenAddressList of tokenAddressLists) {
+        try {
+            const payload = await okxJsonRequest('POST', '/api/v5/defi/user/balance-list', {
+                body: {
+                    chainId: String(chainId),
+                    address: walletAddress,
+                    tokenAddressList: Array.isArray(tokenAddressList) ? tokenAddressList : []
+                },
+                auth: authFlag,
+                expectOkCode: false
+            });
+
+            const rows = unwrapOkxData(payload);
+            if (!Array.isArray(rows) || rows.length === 0) {
+                continue;
+            }
+
+            const holdings = rows
+                .map((row) => normalizeDexHolding(row))
+                .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
+
+            const totalUsd = rows.reduce((sum, row) => {
+                const value = Number(row.currencyAmount);
+                return Number.isFinite(value) ? sum + value : sum;
+            }, 0);
+
+            const totalUsdResult = Number.isFinite(totalUsd) && totalUsd > 0 ? totalUsd : null;
+            if (holdings.length > 0 || Number.isFinite(totalUsdResult)) {
+                return { holdings, totalUsd: totalUsdResult };
+            }
+        } catch (error) {
+            console.warn(`[DexHoldings] DeFi balance list failed for ${shortenAddress(walletAddress)} on ${chainId}: ${error.message}`);
+        }
+    }
+
+    return { holdings: [], totalUsd: null };
 }
 
 async function fetchOkxDexBalanceSnapshot(walletAddress) {
@@ -5700,6 +5814,27 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         }
     }
 
+    const authOptions = hasOkxCredentials ? [false, true] : [false];
+
+    // Preferred: OKX DeFi balance + position APIs (v5)
+    for (const authFlag of authOptions) {
+        for (const chainId of chainIds) {
+            const defiBalances = await fetchOkxDefiBalances(normalized, chainId, authFlag);
+            const defiPlatforms = await fetchOkxDefiPlatformSnapshot(normalized, chainId, authFlag);
+
+            const holdings = defiBalances?.holdings || [];
+            const totalUsdCandidates = [
+                defiBalances?.totalUsd,
+                defiPlatforms?.totalUsd
+            ].filter((value) => Number.isFinite(value) && value > 0);
+
+            if (holdings.length > 0 || totalUsdCandidates.length > 0) {
+                const totalUsd = totalUsdCandidates.find((value) => Number.isFinite(value) && value > 0) || null;
+                return { tokens: holdings, totalUsd };
+            }
+        }
+    }
+
     const endpoints = [
         '/api/v6/dex/balance/all-token-balances-by-address',
         '/api/v5/dex/balance/all-token-balances-by-address'
@@ -5709,8 +5844,6 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         '/api/v6/dex/balance/total-value-by-address',
         '/api/v5/dex/balance/total-value-by-address'
     ];
-
-    const authOptions = hasOkxCredentials ? [false, true] : [false];
 
     for (const query of queries) {
         for (const authFlag of authOptions) {
