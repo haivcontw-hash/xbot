@@ -20,6 +20,7 @@ const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '') || `http://localhost:${API_PORT}`;
 const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
 const OKX_BANMAO_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
@@ -632,13 +633,33 @@ function ensureWalletWatcher(walletAddress, seedTokenAddresses = []) {
     return watcher;
 }
 
-function buildWalletActionKeyboard(lang) {
+function buildWalletActionKeyboard(lang, portfolioLinks = []) {
+    const extraRows = [];
+    for (const link of portfolioLinks) {
+        if (!link?.url || !link.address) {
+            continue;
+        }
+        extraRows.push([
+            {
+                text: t(lang, 'wallet_action_portfolio', { wallet: shortenAddress(link.address) }),
+                url: link.url
+            }
+        ]);
+    }
+
     return {
         inline_keyboard: [
             [{ text: t(lang, 'wallet_action_view'), callback_data: 'wallet_overview' }],
-            [{ text: t(lang, 'wallet_action_manage'), callback_data: 'wallet_manage' }]
+            [{ text: t(lang, 'wallet_action_manage'), callback_data: 'wallet_manage' }],
+            ...extraRows
         ]
     };
+}
+
+function buildPortfolioEmbedUrl(walletAddress) {
+    const normalized = normalizeAddressSafe(walletAddress) || walletAddress;
+    const base = PUBLIC_BASE_URL.replace(/\/$/, '');
+    return `${base}/webview/portfolio/${encodeURIComponent(normalized)}`;
 }
 
 async function loadWalletOverviewEntries(chatId) {
@@ -914,6 +935,7 @@ async function buildWalletBalanceText(lang, entries) {
     }
 
     lines.push('', t(lang, 'wallet_balance_refresh_hint'));
+    lines.push(t(lang, 'wallet_portfolio_hint'));
     return lines.join('\n');
 }
 
@@ -6256,6 +6278,46 @@ function startApiServer() {
     app.use(cors());
     app.use(express.json());
 
+    app.get('/webview/portfolio/:wallet', (req, res) => {
+        const normalized = normalizeAddressSafe(req.params.wallet);
+        if (!normalized) {
+            res.status(400).send('Invalid wallet');
+            return;
+        }
+
+        const portfolioUrl = `${OKX_BASE_URL.replace(/\/$/, '')}/portfolio/${normalized}`;
+        const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Xlayer Portfolio Preview</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #0b1021; color: #e5e8f0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    header { padding: 12px 16px; background: #0f162d; border-bottom: 1px solid #1f2a44; display: flex; align-items: center; gap: 12px; }
+    header .title { font-weight: 700; font-size: 14px; letter-spacing: 0.4px; text-transform: uppercase; color: #8ab4ff; }
+    header .addr { font-weight: 600; color: #e5e8f0; font-size: 13px; }
+    iframe { width: 100%; height: calc(100% - 54px); border: none; background: #0b1021; }
+    .fallback { padding: 16px; text-align: center; }
+    .fallback a { color: #8ab4ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">Xlayer - BOT</div>
+    <div class="addr">${normalized}</div>
+  </header>
+  <iframe src="${portfolioUrl}" title="OKX Portfolio"></iframe>
+  <noscript>
+    <div class="fallback">JavaScript is required. <a href="${portfolioUrl}" target="_blank" rel="noopener noreferrer">Open in browser</a>.</div>
+  </noscript>
+</body>
+</html>`;
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+    });
+
     // API cho DApp (Deep Link) - Cần async
     app.post('/api/generate-token', async (req, res) => {
         try {
@@ -6363,7 +6425,8 @@ function startTelegramBot() {
 
             const messageKey = result?.added ? 'register_wallet_saved' : 'register_wallet_exists';
             const message = t(lang, messageKey, { wallet: shortenAddress(parsed.wallet) });
-            await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
+            const portfolioLinks = [{ address: parsed.wallet, url: buildPortfolioEmbedUrl(parsed.wallet) }];
+            await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang, portfolioLinks) });
             console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: auto-detect)`);
         } catch (error) {
             console.error(`[Register] Failed to save token for ${chatId}: ${error.message}`);
@@ -6377,7 +6440,8 @@ function startTelegramBot() {
         try {
             const entries = await loadWalletOverviewEntries(chatId);
             const text = await buildWalletBalanceText(lang, entries);
-            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang) });
+            const portfolioLinks = entries.map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }));
+            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang, portfolioLinks) });
         } catch (error) {
             console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
             const fallback = t(lang, 'wallet_overview_error');
@@ -7331,7 +7395,11 @@ function startTelegramBot() {
                 }
                 const entries = await loadWalletOverviewEntries(chatId);
                 const text = await buildWalletBalanceText(callbackLang, entries);
-                await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(callbackLang) });
+                const portfolioLinks = entries.map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }));
+                await bot.sendMessage(chatId, text, {
+                    parse_mode: 'HTML',
+                    reply_markup: buildWalletActionKeyboard(callbackLang, portfolioLinks)
+                });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
             }
