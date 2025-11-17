@@ -90,6 +90,7 @@ const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_IN
     : 196;
 const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
 const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 0);
+const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 24000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -690,6 +691,14 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         addCandidate(okb, { symbol: 'OKB', decimals: 18 });
     }
 
+    const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
+        lookbackBlocks: OKX_WALLET_LOG_LOOKBACK_BLOCKS,
+        provider
+    });
+    for (const tokenAddress of discoveredTokens) {
+        addCandidate(tokenAddress);
+    }
+
     const results = [];
     for (const candidate of candidates.values()) {
         let rawBalance;
@@ -773,6 +782,57 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     }
 
     return results;
+}
+
+async function discoverWalletTokenContracts(walletAddress, options = {}) {
+    const provider = options.provider || getXlayerProvider() || getXlayerWebsocketProvider();
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!provider || !normalized || typeof provider.getBlockNumber !== 'function' || typeof provider.getLogs !== 'function') {
+        return [];
+    }
+
+    let latestBlock;
+    try {
+        latestBlock = await provider.getBlockNumber();
+    } catch (error) {
+        console.warn(`[WalletLogs] Không lấy được block hiện tại: ${error.message}`);
+        return [];
+    }
+
+    const lookback = Math.max(Number(options.lookbackBlocks) || 0, 0);
+    const fromBlock = latestBlock > lookback ? latestBlock - lookback : 0;
+    let topicWallet;
+    try {
+        topicWallet = ethers.zeroPadValue(normalized, 32);
+    } catch (error) {
+        return [];
+    }
+
+    const filters = [
+        { fromBlock, toBlock: 'latest', topics: [ERC20_TRANSFER_TOPIC, null, topicWallet] },
+        { fromBlock, toBlock: 'latest', topics: [ERC20_TRANSFER_TOPIC, topicWallet] }
+    ];
+
+    const seen = new Set();
+
+    for (const filter of filters) {
+        try {
+            const logs = await provider.getLogs(filter);
+            for (const log of logs || []) {
+                if (!log.address) {
+                    continue;
+                }
+                const addr = log.address.toLowerCase();
+                if (!seen.has(addr)) {
+                    seen.add(addr);
+                }
+            }
+        } catch (error) {
+            console.warn(`[WalletLogs] Không thể quét log cho ${shortenAddress(normalized)}: ${error.message}`);
+        }
+    }
+
+    return Array.from(seen);
 }
 
 async function buildWalletBalanceText(lang, entries) {
