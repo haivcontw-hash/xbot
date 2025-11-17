@@ -93,6 +93,7 @@ const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10
 const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 200);
 const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 50000);
 const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY || 8);
+const WALLET_BALANCE_TIMEOUT = Number(process.env.WALLET_BALANCE_TIMEOUT || 8000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -691,21 +692,21 @@ async function loadWalletOverviewEntries(chatId) {
 
 async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const { registeredTokens = [] } = options;
-    const provider = getXlayerWebsocketProvider() || getXlayerProvider();
     const normalizedWallet = normalizeAddressSafe(walletAddress);
-    if (!normalizedWallet || !provider) {
+    if (!normalizedWallet) {
         return [];
     }
 
-    const candidates = new Map();
-    const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
+    const provider = getXlayerWebsocketProvider() || getXlayerProvider();
     const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
-    const directoryMap = new Map();
-
     const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
+    const directoryMap = new Map();
     for (const token of directoryTokens) {
         directoryMap.set((token.addressLower || token.address?.toLowerCase?.() || '').toLowerCase(), token);
     }
+
+    const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
+    const candidates = new Map();
 
     const addCandidate = (address, meta = {}) => {
         const normalized = normalizeAddressSafe(address);
@@ -725,19 +726,9 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     };
 
-    const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
-        ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
-        : Math.min(200, directoryTokens.length);
-
-    if (directoryTokens.length) {
-        for (const token of directoryTokens.slice(0, limit)) {
-            addCandidate(token.address, { symbol: token.symbol, decimals: token.decimals, name: token.name });
-        }
-    }
-
-    if (Array.isArray(dexHoldings) && dexHoldings.length) {
+    if (Array.isArray(dexHoldings) && dexHoldings.length > 0) {
         for (const holding of dexHoldings) {
-            if (holding.amountRaw && !holding.tokenAddress) {
+            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
                 continue;
             }
             addCandidate(holding.tokenAddress, {
@@ -749,45 +740,52 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     }
 
-    for (const token of registeredTokens) {
-        const tokenAddress = resolveRegisteredTokenAddress(token);
-        addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
-    }
+    if (candidates.size === 0) {
+        const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
+            ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
+            : Math.min(200, directoryTokens.length);
+        for (const token of directoryTokens.slice(0, limit)) {
+            addCandidate(token.address, { symbol: token.symbol, decimals: token.decimals, name: token.name });
+        }
 
-    const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
-    if (watcher) {
-        watcher.tokens.forEach((addr) => addCandidate(addr));
-    }
+        for (const token of registeredTokens) {
+            const tokenAddress = resolveRegisteredTokenAddress(token);
+            addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
+        }
 
-    if (OKX_BANMAO_TOKEN_ADDRESS) {
-        addCandidate(OKX_BANMAO_TOKEN_ADDRESS, { symbol: 'BANMAO', decimals: BANMAO_DECIMALS_DEFAULT });
-    }
-    for (const okb of OKX_OKB_TOKEN_ADDRESSES) {
-        addCandidate(okb, { symbol: 'OKB', decimals: 18 });
-    }
+        const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
+        if (watcher) {
+            watcher.tokens.forEach((addr) => addCandidate(addr));
+        }
 
-    const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
-        lookbackBlocks: OKX_WALLET_LOG_LOOKBACK_BLOCKS,
-        provider
-    });
-    for (const tokenAddress of discoveredTokens) {
-        addCandidate(tokenAddress);
+        if (provider) {
+            const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
+                lookbackBlocks: OKX_WALLET_LOG_LOOKBACK_BLOCKS,
+                provider
+            });
+            for (const tokenAddress of discoveredTokens) {
+                addCandidate(tokenAddress);
+            }
+        }
     }
 
     const candidateList = Array.from(candidates.values());
     const balances = await mapWithConcurrency(candidateList, WALLET_BALANCE_CONCURRENCY, async (candidate) => {
         let rawBalance = candidate.amountRaw || null;
 
-        if (!rawBalance) {
+        if (!rawBalance && provider) {
             try {
                 const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
-                rawBalance = await contract.balanceOf(normalizedWallet);
+                rawBalance = await Promise.race([
+                    contract.balanceOf(normalizedWallet),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('balance_timeout')), WALLET_BALANCE_TIMEOUT))
+                ]);
             } catch (error) {
                 return null;
             }
         }
 
-        if (rawBalance === 0n || rawBalance === '0' || rawBalance === '0x0') {
+        if (!rawBalance || rawBalance === 0n || rawBalance === '0' || rawBalance === '0x0') {
             return null;
         }
 
@@ -800,16 +798,6 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             });
         if (!Number.isFinite(decimals)) {
             decimals = 18;
-        }
-
-        let symbol = candidate.symbol;
-        if (!symbol) {
-            try {
-                const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
-                symbol = await contract.symbol();
-            } catch (error) {
-                symbol = null;
-            }
         }
 
         let amountBigInt;
@@ -833,7 +821,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             numericAmount = null;
         }
 
-        const priceInfo = await getTokenPriceInfo(candidate.address, symbol || candidate.name);
+        const priceInfo = await getTokenPriceInfo(candidate.address, candidate.symbol || candidate.name);
         const valueParts = [];
         if (priceInfo && Number.isFinite(numericAmount) && numericAmount > 0) {
             if (Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
@@ -864,9 +852,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
         return {
             tokenAddress: candidate.address,
-            tokenLabel: symbol || candidate.name || 'Token',
+            tokenLabel: candidate.symbol || candidate.name || 'Token',
             amountText: formattedAmount,
-            valueText: valueParts.length ? valueParts.join(' / ') : null
+            valueText: valueParts.length ? valueParts.join(' / ')
+                : null
         };
     });
 
