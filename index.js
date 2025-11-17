@@ -5536,7 +5536,7 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         'x-layer'
     ].filter(Boolean)));
 
-    const addressKeys = ['address', 'walletAddress'];
+    const baseAddressFields = { address: normalized, walletAddress: normalized };
     const queries = [];
     const pushQuery = (query) => {
         const key = JSON.stringify(query);
@@ -5545,23 +5545,20 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         }
     };
 
-    for (const addressKey of addressKeys) {
-        const addressOnly = {}; // ensure we also try without chain hints
-        addressOnly[addressKey] = normalized;
-        pushQuery(addressOnly);
+    // Always include both address keys to satisfy strict API validation
+    pushQuery({ ...baseAddressFields });
+    pushQuery({ ...baseAddressFields, chainShortName: safeChainShortName });
 
-        pushQuery({ [addressKey]: normalized, chainShortName: safeChainShortName });
+    for (const chainShortName of chainShortNames) {
+        pushQuery({ ...baseAddressFields, chainShortName });
+    }
+
+    for (const chainId of chainIds) {
+        pushQuery({ ...baseAddressFields, chainId });
+        pushQuery({ ...baseAddressFields, chainId, chainShortName: safeChainShortName });
+
         for (const chainShortName of chainShortNames) {
-            pushQuery({ [addressKey]: normalized, chainShortName });
-        }
-
-        for (const chainId of chainIds) {
-            pushQuery({ [addressKey]: normalized, chainId });
-            pushQuery({ [addressKey]: normalized, chainId, chainShortName: safeChainShortName });
-
-            for (const chainShortName of chainShortNames) {
-                pushQuery({ [addressKey]: normalized, chainId, chainShortName });
-            }
+            pushQuery({ ...baseAddressFields, chainId, chainShortName });
         }
     }
 
