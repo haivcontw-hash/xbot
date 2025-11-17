@@ -731,6 +731,75 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     if (!providerHealthy) {
         provider = null;
     }
+
+    // Always prefer OKX DEX holdings first to avoid slow RPC scans.
+    const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
+    if (Array.isArray(dexHoldings) && dexHoldings.length > 0) {
+        const tokens = await mapWithConcurrency(dexHoldings, WALLET_BALANCE_CONCURRENCY, async (holding) => {
+            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
+                return null;
+            }
+
+            const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
+            let amountText = null;
+            let numericAmount = null;
+
+            try {
+                amountText = formatBigIntValue(holding.amountRaw, decimals, {
+                    maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+                });
+                numericAmount = Number(ethers.formatUnits(holding.amountRaw, decimals));
+            } catch (error) {
+                amountText = null;
+                numericAmount = null;
+            }
+
+            if (!amountText || !numericAmount || numericAmount <= 0) {
+                return null;
+            }
+
+            const priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            const valueParts = [];
+
+            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+                const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                });
+                if (usdValue) {
+                    valueParts.push(`${usdValue} USDT`);
+                }
+            }
+
+            const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
+                ? priceInfo.priceOkb
+                : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
+                    ? priceInfo.priceUsd / priceInfo.okbUsd
+                    : null);
+            if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
+                const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
+                    minimumFractionDigits: 4,
+                    maximumFractionDigits: 4
+                });
+                if (okbValue) {
+                    valueParts.push(`${okbValue} OKB`);
+                }
+            }
+
+            return {
+                tokenAddress: holding.tokenAddress,
+                tokenLabel: holding.symbol || holding.name || 'Token',
+                amountText,
+                valueText: valueParts.length ? valueParts.join(' / ') : null
+            };
+        });
+
+        return {
+            tokens: tokens.filter(Boolean),
+            warning: providerHealthy ? null : 'rpc_offline'
+        };
+    }
+
     const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
     const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
     const directoryMap = new Map();
@@ -738,7 +807,6 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         directoryMap.set((token.addressLower || token.address?.toLowerCase?.() || '').toLowerCase(), token);
     }
 
-    const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
     const candidates = new Map();
 
     const addCandidate = (address, meta = {}) => {
@@ -759,24 +827,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     };
 
-    if (Array.isArray(dexHoldings) && dexHoldings.length > 0) {
-        for (const holding of dexHoldings) {
-            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
-                continue;
-            }
-            addCandidate(holding.tokenAddress, {
-                symbol: holding.symbol,
-                decimals: holding.decimals,
-                name: holding.name,
-                amountRaw: holding.amountRaw
-            });
-        }
-    }
-
     if (candidates.size === 0 && provider) {
         const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
             ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
-            : Math.min(200, directoryTokens.length);
+            : Math.min(50, directoryTokens.length);
         for (const token of directoryTokens.slice(0, limit)) {
             addCandidate(token.address, { symbol: token.symbol, decimals: token.decimals, name: token.name });
         }
@@ -793,7 +847,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
         if (provider) {
             const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
-                lookbackBlocks: OKX_WALLET_LOG_LOOKBACK_BLOCKS,
+                lookbackBlocks: Math.min(OKX_WALLET_LOG_LOOKBACK_BLOCKS, 10000),
                 provider
             });
             for (const tokenAddress of discoveredTokens) {
@@ -802,8 +856,8 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     }
 
-    if (candidates.size === 0 && !provider) {
-        return { tokens: [], warning: 'rpc_offline' };
+    if (candidates.size === 0) {
+        return { tokens: [], warning: providerHealthy ? null : 'rpc_offline' };
     }
 
     const candidateList = Array.from(candidates.values());
