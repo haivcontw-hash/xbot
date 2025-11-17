@@ -1070,7 +1070,7 @@ const HELP_COMMAND_DETAILS = {
     checkin: { command: '/checkin', icon: '✅', descKey: 'help_command_checkin' },
     topcheckin: { command: '/topcheckin', icon: '🏆', descKey: 'help_command_topcheckin' },
     admin: { command: '/admin', icon: '🛠️', descKey: 'help_command_admin' },
-    checkinadmin: { command: '/checkinadmin', icon: '🛡️', descKey: 'help_command_checkin_admin' },
+    checkinadmin: { command: '/checkinadmin', icon: '🛡️', descKey: 'help_command_checkin_admin' }
 };
 
 const HELP_GROUP_DETAILS = {
@@ -1110,16 +1110,21 @@ const HELP_GROUP_DETAILS = {
         descKey: 'help_group_checkin_desc',
         commands: ['checkin', 'topcheckin']
     },
-    admin_tools: {
+    admin_root: {
         icon: '🛠️',
-        titleKey: 'help_group_admin_title',
-        descKey: 'help_group_admin_desc',
-        commands: ['admin', 'checkinadmin']
+        titleKey: 'help_group_admin_root_title',
+        descKey: 'help_group_admin_root_desc',
+        commands: ['admin']
+    },
+    admin_checkin: {
+        icon: '🧭',
+        titleKey: 'help_group_admin_checkin_title',
+        descKey: 'help_group_admin_checkin_desc',
+        commands: ['checkinadmin']
     }
 };
 
 const ADMIN_SUBCOMMANDS = [
-    { command: '/checkinadmin', descKey: 'admin_cmd_desc_checkinadmin' },
     { command: '/admin mute [user] [time] [reason]', descKey: 'admin_cmd_desc_mute' },
     { command: '/admin warn [user] [reason]', descKey: 'admin_cmd_desc_warn' },
     { command: '/admin warnings [user]', descKey: 'admin_cmd_desc_warnings' },
@@ -1156,7 +1161,7 @@ const HELP_USER_SECTIONS = [
 const HELP_ADMIN_SECTIONS = [
     {
         titleKey: 'help_section_admin_title',
-        groups: ['admin_tools']
+        groups: ['admin_root', 'admin_checkin']
     }
 ];
 
@@ -1389,11 +1394,17 @@ function buildAdminCommandCheatsheet(lang) {
     if (hint) {
         lines.push(hint);
     }
+
+    lines.push('', t(lang, 'admin_command_admin_header'));
     for (const action of ADMIN_SUBCOMMANDS) {
         lines.push(`${ADMIN_DETAIL_BULLET}${action.command} — ${t(lang, action.descKey)}`);
     }
 
+    lines.push('', t(lang, 'admin_command_checkin_header'));
+    lines.push(`${ADMIN_DETAIL_BULLET}/checkinadmin — ${t(lang, 'admin_cmd_desc_checkinadmin')}`);
+
     const inline_keyboard = [];
+    inline_keyboard.push([{ text: t(lang, 'admin_command_button_admin'), callback_data: 'admin_cmd|about_admin' }]);
     inline_keyboard.push([{ text: t(lang, 'admin_command_button_checkin'), callback_data: 'admin_cmd|checkinadmin' }]);
 
     for (let i = 0; i < ADMIN_SUBCOMMANDS.length; i += 2) {
@@ -7456,6 +7467,10 @@ function startTelegramBot() {
 
             if (query.data.startsWith('admin_cmd|')) {
                 const [, payload] = query.data.split('|');
+                if (payload === 'about_admin') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'admin_command_admin_hint') });
+                    return;
+                }
                 if (payload === 'checkinadmin') {
                     const synthetic = buildSyntheticCommandMessage(query);
                     await handleAdminCommand(synthetic, { mode: 'checkinadmin' });
