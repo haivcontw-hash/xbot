@@ -89,8 +89,9 @@ const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_IN
     ? Number(process.env.OKX_CHAIN_INDEX_FALLBACK)
     : 196;
 const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
-const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 0);
-const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 24000);
+const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 200);
+const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 50000);
+const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY || 8);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -124,6 +125,35 @@ try {
     xlayerProvider = null;
 }
 const walletWatchers = new Map();
+
+function mapWithConcurrency(items, limit, mapper) {
+    const tasks = Math.max(1, Math.min(limit || 1, items.length || 0));
+    const results = new Array(items.length);
+    let cursor = 0;
+
+    const runWorker = async () => {
+        while (true) {
+            const index = cursor;
+            cursor += 1;
+            if (index >= items.length) {
+                return;
+            }
+
+            try {
+                results[index] = await mapper(items[index], index);
+            } catch (error) {
+                results[index] = undefined;
+            }
+        }
+    };
+
+    const pool = [];
+    for (let i = 0; i < tasks; i += 1) {
+        pool.push(runWorker());
+    }
+
+    return Promise.all(pool).then(() => results);
+}
 
 const CHECKIN_MAX_ATTEMPTS = 3;
 const CHECKIN_SCIENCE_PROBABILITY = Math.min(
@@ -648,6 +678,12 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
     const candidates = new Map();
     const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
+    const directoryMap = new Map();
+
+    const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
+    for (const token of directoryTokens) {
+        directoryMap.set((token.addressLower || token.address?.toLowerCase?.() || '').toLowerCase(), token);
+    }
 
     const addCandidate = (address, meta = {}) => {
         const normalized = normalizeAddressSafe(address);
@@ -655,18 +691,21 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             return;
         }
         const lower = normalized.toLowerCase();
+        const directoryMeta = directoryMap.get(lower);
+        const merged = directoryMeta
+            ? { symbol: directoryMeta.symbol, decimals: directoryMeta.decimals, name: directoryMeta.name, ...meta }
+            : meta;
         if (!candidates.has(lower)) {
-            candidates.set(lower, { address: normalized, ...meta });
+            candidates.set(lower, { address: normalized, ...merged });
         } else {
             const existing = candidates.get(lower);
-            candidates.set(lower, { ...existing, ...meta });
+            candidates.set(lower, { ...existing, ...merged });
         }
     };
 
-    const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
     const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
-        ? OKX_WALLET_DIRECTORY_SCAN_LIMIT
-        : directoryTokens.length;
+        ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
+        : Math.min(200, directoryTokens.length);
 
     if (directoryTokens.length) {
         for (const token of directoryTokens.slice(0, limit)) {
@@ -699,18 +738,18 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         addCandidate(tokenAddress);
     }
 
-    const results = [];
-    for (const candidate of candidates.values()) {
+    const candidateList = Array.from(candidates.values());
+    const balances = await mapWithConcurrency(candidateList, WALLET_BALANCE_CONCURRENCY, async (candidate) => {
         let rawBalance;
         try {
             const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
             rawBalance = await contract.balanceOf(normalizedWallet);
         } catch (error) {
-            continue;
+            return null;
         }
 
         if (rawBalance === 0n) {
-            continue;
+            return null;
         }
 
         let decimals = Number.isFinite(candidate.decimals)
@@ -773,15 +812,15 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             }
         }
 
-        results.push({
+        return {
             tokenAddress: candidate.address,
             tokenLabel: symbol || candidate.name || 'Token',
             amountText: formattedAmount,
             valueText: valueParts.length ? valueParts.join(' / ') : null
-        });
-    }
+        };
+    });
 
-    return results;
+    return balances.filter(Boolean);
 }
 
 async function discoverWalletTokenContracts(walletAddress, options = {}) {
@@ -6316,13 +6355,14 @@ function startTelegramBot() {
         }
 
         try {
-            await db.addWalletToUser(chatId, lang, parsed.wallet);
+            const result = await db.addWalletToUser(chatId, lang, parsed.wallet);
             seedWalletWatcher(parsed.wallet, [
                 ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
                 ...OKX_OKB_TOKEN_ADDRESSES
             ]);
 
-            const message = t(lang, 'register_wallet_saved', { wallet: shortenAddress(parsed.wallet) });
+            const messageKey = result?.added ? 'register_wallet_saved' : 'register_wallet_exists';
+            const message = t(lang, messageKey, { wallet: shortenAddress(parsed.wallet) });
             await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
             console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: auto-detect)`);
         } catch (error) {
@@ -6334,9 +6374,15 @@ function startTelegramBot() {
     async function handleMyWalletCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const entries = await loadWalletOverviewEntries(chatId);
-        const text = await buildWalletBalanceText(lang, entries);
-        await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang) });
+        try {
+            const entries = await loadWalletOverviewEntries(chatId);
+            const text = await buildWalletBalanceText(lang, entries);
+            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang) });
+        } catch (error) {
+            console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
+            const fallback = t(lang, 'wallet_overview_error');
+            await sendReply(msg, fallback, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
+        }
     }
 
     async function handleDonateCommand(msg) {
@@ -6583,11 +6629,12 @@ function startTelegramBot() {
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
         const lang = resolveLangCode(msg.from.language_code);
-        const walletAddress = await db.getPendingWallet(token); 
+        const walletAddress = await db.getPendingWallet(token);
         if (walletAddress) {
-            await db.addWalletToUser(chatId, lang, walletAddress);
+            const result = await db.addWalletToUser(chatId, lang, walletAddress);
             await db.deletePendingToken(token);
-            const message = t(lang, 'connect_success', { walletAddress: walletAddress });
+            const messageKey = result?.added ? 'connect_success' : 'register_wallet_exists';
+            const message = t(lang, messageKey, { walletAddress: walletAddress, wallet: shortenAddress(walletAddress) });
             sendReply(msg, message, { parse_mode: "Markdown" });
             console.log(`[BOT] Liên kết (DApp): ${walletAddress} -> ${chatId} (lang: ${lang})`);
         } else {
@@ -8842,7 +8889,7 @@ function startTelegramBot() {
                         return;
                     }
 
-                    await db.addWalletToUser(userId, lang, parsed.wallet);
+                    const result = await db.addWalletToUser(userId, lang, parsed.wallet);
                     seedWalletWatcher(parsed.wallet, [
                         ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
                         ...OKX_OKB_TOKEN_ADDRESSES
@@ -8857,7 +8904,8 @@ function startTelegramBot() {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    await sendEphemeralMessage(userId, t(lang, 'register_help_success_wallet', {
+                    const successKey = result?.added ? 'register_help_success_wallet' : 'register_wallet_exists';
+                    await sendEphemeralMessage(userId, t(lang, successKey, {
                         wallet: shortenAddress(parsed.wallet)
                     }), {}, 20000);
                     registerWizardStates.delete(userId);
