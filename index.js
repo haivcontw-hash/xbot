@@ -1036,6 +1036,29 @@ const HELP_GROUP_DETAILS = {
     }
 };
 
+const ADMIN_SUBCOMMANDS = [
+    { command: '/admin mute [user] [time] [reason]', descKey: 'admin_cmd_desc_mute' },
+    { command: '/admin warn [user] [reason]', descKey: 'admin_cmd_desc_warn' },
+    { command: '/admin warnings [user]', descKey: 'admin_cmd_desc_warnings' },
+    { command: '/admin purge [count]', descKey: 'admin_cmd_desc_purge' },
+    { command: '/admin set_captcha (on/off)', descKey: 'admin_cmd_desc_set_captcha' },
+    { command: '/admin set_rules [message]', descKey: 'admin_cmd_desc_set_rules' },
+    { command: '/admin add_blacklist [word]', descKey: 'admin_cmd_desc_add_blacklist' },
+    { command: '/admin remove_blacklist [word]', descKey: 'admin_cmd_desc_remove_blacklist' },
+    { command: '/admin set_xp [user] [amount]', descKey: 'admin_cmd_desc_set_xp' },
+    { command: '/admin update_info', descKey: 'admin_cmd_desc_update_info' },
+    { command: '/admin status', descKey: 'admin_cmd_desc_status' },
+    { command: '/admin toggle_predict', descKey: 'admin_cmd_desc_toggle_predict' },
+    { command: '/admin set_xp_react (on/off)', descKey: 'admin_cmd_desc_set_xp_react' },
+    { command: '/admin whale', descKey: 'admin_cmd_desc_whale' },
+    { command: '/admin draw [prize] [rules]', descKey: 'admin_cmd_desc_draw' },
+    { command: '/admin review_memes', descKey: 'admin_cmd_desc_review_memes' },
+    { command: '/admin approve [id]', descKey: 'admin_cmd_desc_approve' },
+    { command: '/admin reject [id]', descKey: 'admin_cmd_desc_reject' },
+    { command: '/admin announce [message]', descKey: 'admin_cmd_desc_announce' },
+    { command: '/admin track [address] [name]', descKey: 'admin_cmd_desc_track' }
+];
+
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
@@ -1275,6 +1298,18 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
 
     inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
     return { inline_keyboard };
+}
+
+function buildAdminCommandCheatsheet(lang) {
+    const lines = [t(lang, 'admin_command_list_title')];
+    const hint = t(lang, 'admin_command_list_hint');
+    if (hint) {
+        lines.push(hint);
+    }
+    for (const action of ADMIN_SUBCOMMANDS) {
+        lines.push(`${ADMIN_DETAIL_BULLET}${action.command} — ${t(lang, action.descKey)}`);
+    }
+    return lines.join('\n');
 }
 
 function buildSyntheticCommandMessage(query) {
@@ -6665,6 +6700,18 @@ function startTelegramBot() {
         return null;
     }
 
+    async function sendAdminCommandList(targetChatId, lang, replyToMessageId = null) {
+        try {
+            const cheatsheet = buildAdminCommandCheatsheet(lang);
+            await bot.sendMessage(targetChatId, cheatsheet, {
+                reply_to_message_id: replyToMessageId,
+                allow_sending_without_reply: true
+            });
+        } catch (error) {
+            console.error(`[AdminCommand] Failed to send cheatsheet to ${targetChatId}: ${error.message}`);
+        }
+    }
+
     async function handleAdminActionCommand(msg, rawArgs) {
         const lang = await getLang(msg);
         const chatType = msg.chat.type;
@@ -6995,6 +7042,8 @@ function startTelegramBot() {
         if (chatType === 'private') {
             try {
                 await openAdminHub(userId, { fallbackLang });
+                const lang = await getLang(msg);
+                await sendAdminCommandList(chatId, lang);
             } catch (error) {
                 console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
                 const lang = await getLang(msg);
@@ -7029,6 +7078,7 @@ function startTelegramBot() {
         }
 
         try {
+            await sendAdminCommandList(chatId, replyLang, msg.message_id);
             await openAdminHub(userId, { fallbackLang });
             await sendAdminMenu(userId, chatId, { fallbackLang });
             await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
