@@ -766,9 +766,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
     let provider = getXlayerWebsocketProvider() || getXlayerProvider();
     const providerHealthy = await isProviderHealthy(provider);
-    if (!providerHealthy) {
-        provider = null;
-    }
+    const rpcWarning = providerHealthy ? null : 'rpc_offline';
 
     // Always prefer OKX DEX holdings first to avoid slow RPC scans.
     const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
@@ -834,7 +832,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
         return {
             tokens: tokens.filter(Boolean),
-            warning: providerHealthy ? null : 'rpc_offline'
+            warning: rpcWarning
         };
     }
 
@@ -895,7 +893,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     }
 
     if (candidates.size === 0) {
-        return { tokens: [], warning: providerHealthy ? null : 'rpc_offline' };
+        return { tokens: [], warning: rpcWarning };
     }
 
     const candidateList = Array.from(candidates.values());
@@ -990,7 +988,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
     return {
         tokens: balances.filter(Boolean),
-        warning: providerHealthy ? null : 'rpc_offline'
+        warning: rpcWarning
     };
 }
 
@@ -5651,7 +5649,8 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
 
     try {
         const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
-        const safeChainShortName = (baseQuery.chainShortName || '').replace(/[^a-z0-9-]/gi, '') || 'xlayer';
+        const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
+        const safeChainShortName = normalizeShort(baseQuery.chainShortName) || 'xlayer';
         const chainIds = Array.from(new Set([
             baseQuery.chainId,
             baseQuery.chainIndex,
@@ -5663,12 +5662,11 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
             .map((value) => String(Number(value)));
 
         const chainShortNames = Array.from(new Set([
-            baseQuery.chainShortName,
+            normalizeShort(baseQuery.chainShortName),
             safeChainShortName,
+            normalizeShort(OKX_CHAIN_SHORT_NAME),
             'xlayer',
-            'x-layer',
-            'X Layer',
-            OKX_CHAIN_SHORT_NAME
+            'x-layer'
         ].filter(Boolean)));
 
         const queries = [];
@@ -5680,17 +5678,11 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
         };
 
         for (const chainId of chainIds) {
-            pushQuery({ address: normalized, walletAddress: normalized, chainId });
-            pushQuery({ address: normalized, walletAddress: normalized, chainId, chainIndex: Number(chainId) });
+            pushQuery({ address: normalized, chainId });
+            pushQuery({ address: normalized, chainId, chainShortName: safeChainShortName });
 
             for (const chainShortName of chainShortNames) {
-                pushQuery({
-                    address: normalized,
-                    walletAddress: normalized,
-                    chainId,
-                    chainIndex: Number(chainId),
-                    chainShortName
-                });
+                pushQuery({ address: normalized, chainId, chainShortName });
             }
         }
 
