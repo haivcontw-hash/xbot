@@ -36,6 +36,8 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const XLAYER_RPC_URL = process.env.XLAYER_RPC_URL || 'https://rpc.xlayer.tech';
+const TOKEN_PRICE_CACHE_TTL = Number(process.env.TOKEN_PRICE_CACHE_TTL || 60 * 1000);
 const DEFAULT_COMMUNITY_WALLET = '0x92809f2837f708163d375960063c8a3156fceacb';
 const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || DEFAULT_COMMUNITY_WALLET;
 const DEFAULT_DEAD_WALLET_ADDRESS = '0x000000000000000000000000000000000000dEaD';
@@ -98,6 +100,21 @@ let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
+const tokenPriceCache = new Map();
+const ERC20_MIN_ABI = [
+    'function balanceOf(address account) view returns (uint256)',
+    'function decimals() view returns (uint8)',
+    'function symbol() view returns (string)'
+];
+let xlayerProvider = null;
+try {
+    if (XLAYER_RPC_URL) {
+        xlayerProvider = new ethers.JsonRpcProvider(XLAYER_RPC_URL);
+    }
+} catch (error) {
+    console.error(`[RPC] Không thể khởi tạo RPC Xlayer: ${error.message}`);
+    xlayerProvider = null;
+}
 
 const CHECKIN_MAX_ATTEMPTS = 3;
 const CHECKIN_SCIENCE_PROBABILITY = Math.min(
@@ -431,6 +448,10 @@ function shortenAddress(address) {
     return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
 }
 
+function getXlayerProvider() {
+    return xlayerProvider;
+}
+
 function buildWalletActionKeyboard(lang) {
     return {
         inline_keyboard: [
@@ -459,32 +480,192 @@ async function loadWalletOverviewEntries(chatId) {
     });
 }
 
-function buildWalletOverviewText(lang, entries) {
+async function buildWalletBalanceText(lang, entries) {
     if (!entries || entries.length === 0) {
         return t(lang, 'wallet_overview_empty');
     }
 
-    const lines = [t(lang, 'wallet_overview_title', { count: entries.length.toString() })];
-    for (const entry of entries) {
-        const shortAddr = shortenAddress(entry.address);
-        lines.push('', t(lang, 'wallet_overview_wallet', { wallet: shortAddr }));
-        if (entry.tokens.length === 0) {
+    const lines = [t(lang, 'wallet_balance_title', { count: entries.length.toString() })];
+
+    for (const [index, entry] of entries.entries()) {
+        const shortAddr = escapeHtml(shortenAddress(entry.address));
+        lines.push('', t(lang, 'wallet_balance_wallet', {
+            index: (index + 1).toString(),
+            wallet: shortAddr
+        }));
+
+        if (!entry.tokens || entry.tokens.length === 0) {
             lines.push(t(lang, 'wallet_overview_wallet_no_token'));
             continue;
         }
+
         for (const token of entry.tokens) {
-            const quotes = Array.isArray(token.quoteTargets) && token.quoteTargets.length > 0
-                ? token.quoteTargets.join(', ')
-                : 'USDT';
-            lines.push(t(lang, 'wallet_overview_token_line', {
-                token: token.tokenLabel || token.tokenKey?.toUpperCase() || 'Token',
-                quotes
-            }));
+            const tokenAddress = resolveRegisteredTokenAddress(token);
+            if (!tokenAddress) {
+                lines.push(t(lang, 'wallet_balance_token_missing_address', {
+                    token: escapeHtml(token.tokenLabel || token.tokenKey?.toUpperCase() || 'Token')
+                }));
+                continue;
+            }
+
+            const line = await describeWalletTokenBalance(lang, entry.address, token, tokenAddress);
+            lines.push(line);
         }
     }
 
-    lines.push('', t(lang, 'wallet_overview_footer'));
+    lines.push('', t(lang, 'wallet_balance_refresh_hint'));
     return lines.join('\n');
+}
+
+function resolveKnownTokenAddress(tokenKey) {
+    if (!tokenKey) {
+        return null;
+    }
+    const key = tokenKey.toLowerCase();
+    if (key === 'banmao' && OKX_BANMAO_TOKEN_ADDRESS) {
+        return OKX_BANMAO_TOKEN_ADDRESS;
+    }
+    if (OKX_OKB_SYMBOL_KEYS.includes(key) && OKX_OKB_TOKEN_ADDRESSES.length > 0) {
+        return normalizeOkxConfigAddress(OKX_OKB_TOKEN_ADDRESSES[0]);
+    }
+    return null;
+}
+
+function resolveRegisteredTokenAddress(tokenRecord) {
+    if (!tokenRecord || typeof tokenRecord !== 'object') {
+        return null;
+    }
+    if (tokenRecord.tokenAddress) {
+        return normalizeOkxConfigAddress(tokenRecord.tokenAddress) || tokenRecord.tokenAddress;
+    }
+    return resolveKnownTokenAddress(tokenRecord.tokenKey);
+}
+
+function formatFiatValue(value, options = {}) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return null;
+    }
+    const minimumFractionDigits = Number.isFinite(options.minimumFractionDigits)
+        ? options.minimumFractionDigits
+        : 2;
+    const maximumFractionDigits = Number.isFinite(options.maximumFractionDigits)
+        ? options.maximumFractionDigits
+        : Math.max(minimumFractionDigits, 2);
+    return numeric.toLocaleString('en-US', { minimumFractionDigits, maximumFractionDigits });
+}
+
+async function describeWalletTokenBalance(lang, walletAddress, tokenRecord, tokenAddress) {
+    const provider = getXlayerProvider();
+    const tokenLabel = escapeHtml(tokenRecord.tokenLabel || tokenRecord.tokenKey?.toUpperCase() || 'Token');
+
+    if (!provider) {
+        return t(lang, 'wallet_balance_token_error', { token: tokenLabel });
+    }
+
+    let rawBalance;
+    try {
+        const contract = new ethers.Contract(tokenAddress, ERC20_MIN_ABI, provider);
+        rawBalance = await contract.balanceOf(walletAddress);
+    } catch (error) {
+        console.warn(`[WalletBalance] balanceOf failed for ${tokenAddress} @ ${walletAddress}: ${error.message}`);
+        return t(lang, 'wallet_balance_token_error', { token: tokenLabel });
+    }
+
+    let decimals = await resolveTokenDecimals(tokenAddress, { fallback: 18 });
+    if (!Number.isFinite(decimals)) {
+        decimals = 18;
+    }
+
+    const formattedAmount = formatBigIntValue(rawBalance, decimals, {
+        maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+    });
+    let numericAmount = null;
+    try {
+        numericAmount = Number(ethers.formatUnits(rawBalance, decimals));
+    } catch (error) {
+        numericAmount = null;
+    }
+
+    const priceInfo = await getTokenPriceInfo(tokenAddress, tokenRecord.tokenKey);
+    const valueParts = [];
+    if (priceInfo && Number.isFinite(numericAmount) && numericAmount > 0) {
+        if (Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+            const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+            if (usdValue) {
+                valueParts.push(`${usdValue} USDT`);
+            }
+        }
+
+        const okbUnitPrice = Number.isFinite(priceInfo.priceOkb) && priceInfo.priceOkb > 0
+            ? priceInfo.priceOkb
+            : (Number.isFinite(priceInfo.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo.priceUsd)
+                ? priceInfo.priceUsd / priceInfo.okbUsd
+                : null);
+        if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0) {
+            const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
+                minimumFractionDigits: 4,
+                maximumFractionDigits: 4
+            });
+            if (okbValue) {
+                valueParts.push(`${okbValue} OKB`);
+            }
+        }
+    }
+
+    if (formattedAmount && valueParts.length > 0) {
+        return t(lang, 'wallet_balance_token_value', {
+            token: tokenLabel,
+            amount: escapeHtml(formattedAmount),
+            symbol: escapeHtml(tokenRecord.tokenLabel || tokenRecord.tokenKey?.toUpperCase() || 'Token'),
+            value: valueParts.join(' / ')
+        });
+    }
+
+    if (formattedAmount) {
+        return t(lang, 'wallet_balance_token_amount', {
+            token: tokenLabel,
+            amount: escapeHtml(formattedAmount),
+            symbol: escapeHtml(tokenRecord.tokenLabel || tokenRecord.tokenKey?.toUpperCase() || 'Token')
+        });
+    }
+
+    return t(lang, 'wallet_balance_token_pending', { token: tokenLabel });
+}
+
+async function getTokenPriceInfo(tokenAddress, tokenKey) {
+    const normalized = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
+    if (!normalized) {
+        return null;
+    }
+
+    const cacheKey = normalized.toLowerCase();
+    const now = Date.now();
+    const cached = tokenPriceCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    try {
+        const snapshot = await fetchTokenMarketSnapshot({ tokenAddress: normalized });
+        const value = snapshot
+            ? {
+                priceUsd: Number.isFinite(snapshot.price) ? Number(snapshot.price) : null,
+                priceOkb: Number.isFinite(snapshot.priceOkb) ? Number(snapshot.priceOkb) : null,
+                okbUsd: Number.isFinite(snapshot.okbUsd) ? Number(snapshot.okbUsd) : null,
+                source: snapshot.source || 'OKX'
+            }
+            : null;
+        tokenPriceCache.set(cacheKey, { value, expiresAt: now + TOKEN_PRICE_CACHE_TTL });
+        return value;
+    } catch (error) {
+        console.warn(`[WalletPrice] Failed to load price for ${tokenKey || tokenAddress}: ${error.message}`);
+        tokenPriceCache.set(cacheKey, { value: null, expiresAt: now + 30 * 1000 });
+        return null;
+    }
 }
 
 async function buildUnregisterMenu(lang, chatId) {
@@ -525,7 +706,7 @@ function parseRegisterPayload(rawText) {
     }
 
     const parts = trimmed.split(/\s+/);
-    if (parts.length < 2) {
+    if (parts.length < 1) {
         return null;
     }
 
@@ -534,23 +715,48 @@ function parseRegisterPayload(rawText) {
         return null;
     }
 
-    const tokenRaw = parts[1];
-    const tokenKey = tokenRaw ? tokenRaw.toLowerCase() : null;
-    if (!tokenKey) {
-        return null;
+    const tokens = [];
+    const tokenSegments = [];
+    for (let i = 1; i < parts.length; i += 1) {
+        const chunk = parts[i];
+        if (!chunk) {
+            continue;
+        }
+        chunk.split(/[,\n]+/).forEach((segment) => {
+            const trimmedSegment = segment.trim();
+            if (trimmedSegment) {
+                tokenSegments.push(trimmedSegment);
+            }
+        });
     }
 
-    let tokenAddress = null;
-    if (parts.length >= 3 && /^0x[0-9a-fA-F]{40}$/.test(parts[2])) {
-        tokenAddress = normalizeAddressSafe(parts[2]);
+    let lastEntry = null;
+    for (const segment of tokenSegments) {
+        if (/^0x[0-9a-fA-F]{40}$/.test(segment)) {
+            if (lastEntry && !lastEntry.tokenAddress) {
+                lastEntry.tokenAddress = normalizeAddressSafe(segment);
+            }
+            continue;
+        }
+
+        const match = segment.match(/^([A-Za-z0-9_]+)(?:[:@=](0x[0-9a-fA-F]{40}))?$/);
+        if (match) {
+            const symbol = match[1];
+            const contractAddress = match[2] ? normalizeAddressSafe(match[2]) : null;
+            if (!symbol) {
+                continue;
+            }
+            const entry = {
+                tokenKey: symbol.toLowerCase(),
+                tokenLabel: symbol.toUpperCase(),
+                tokenAddress: contractAddress
+            };
+            tokens.push(entry);
+            lastEntry = entry;
+        }
     }
 
-    return {
-        wallet,
-        tokenKey,
-        tokenLabel: tokenRaw.toUpperCase(),
-        tokenAddress
-    };
+    return { wallet, tokens };
 }
 
 const HELP_COMMAND_DETAILS = {
@@ -4528,7 +4734,58 @@ async function fetchBanmaoMarketSnapshot() {
 }
 
 async function fetchBanmaoMarketSnapshotForChain(chainName) {
-    const query = await buildOkxDexQuery(chainName);
+    if (!OKX_BANMAO_TOKEN_ADDRESS) {
+        throw new Error('Missing OKX_BANMAO_TOKEN_ADDRESS');
+    }
+    return fetchTokenMarketSnapshotForChain({ chainName, tokenAddress: OKX_BANMAO_TOKEN_ADDRESS });
+}
+
+async function fetchTokenMarketSnapshot(options = {}) {
+    const { tokenAddress, chainName } = options;
+    if (!tokenAddress) {
+        return null;
+    }
+
+    const normalized = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
+    if (!normalized) {
+        return null;
+    }
+
+    const errors = [];
+    const chainCandidates = chainName ? [chainName] : getOkxChainShortNameCandidates();
+
+    for (const candidate of chainCandidates) {
+        try {
+            const snapshot = await fetchTokenMarketSnapshotForChain({ chainName: candidate, tokenAddress: normalized });
+            if (snapshot) {
+                return snapshot;
+            }
+        } catch (error) {
+            errors.push(error);
+        }
+    }
+
+    try {
+        const fallbackSnapshot = await fetchTokenMarketSnapshotForChain({ tokenAddress: normalized });
+        if (fallbackSnapshot) {
+            return fallbackSnapshot;
+        }
+    } catch (error) {
+        errors.push(error);
+    }
+
+    if (errors.length > 0) {
+        throw errors[errors.length - 1];
+    }
+
+    return null;
+}
+
+async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
+    if (!tokenAddress) {
+        return null;
+    }
+    const query = await buildOkxDexQuery(chainName, { tokenAddress });
     const chainLabel = query.chainShortName || chainName || '(default)';
     const errors = [];
 
@@ -5741,25 +5998,50 @@ function startTelegramBot() {
 
         const parsed = parseRegisterPayload(payload);
         if (!parsed) {
-            await sendReply(msg, t(lang, 'register_missing_token'), { parse_mode: 'Markdown' });
+            await sendReply(msg, t(lang, 'register_usage'), { parse_mode: 'Markdown' });
             return;
         }
 
         try {
             await db.addWalletToUser(chatId, lang, parsed.wallet);
-            await db.upsertWalletTokenRecord({
-                chatId,
-                walletAddress: parsed.wallet,
-                tokenKey: parsed.tokenKey,
-                tokenLabel: parsed.tokenLabel,
-                tokenAddress: parsed.tokenAddress
-            });
-            const message = t(lang, 'register_token_saved', {
+            const requestedTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0
+                ? parsed.tokens
+                : [{ tokenKey: 'banmao', tokenLabel: 'BANMAO', tokenAddress: OKX_BANMAO_TOKEN_ADDRESS }];
+
+            const seen = new Set();
+            const savedLabels = [];
+            for (const tokenEntry of requestedTokens) {
+                if (!tokenEntry || !tokenEntry.tokenKey) {
+                    continue;
+                }
+                const tokenKey = tokenEntry.tokenKey.toLowerCase();
+                if (!tokenKey || seen.has(tokenKey)) {
+                    continue;
+                }
+                seen.add(tokenKey);
+                const tokenLabel = tokenEntry.tokenLabel || tokenKey.toUpperCase();
+                const tokenAddress = tokenEntry.tokenAddress || resolveKnownTokenAddress(tokenKey);
+                await db.upsertWalletTokenRecord({
+                    chatId,
+                    walletAddress: parsed.wallet,
+                    tokenKey,
+                    tokenLabel,
+                    tokenAddress,
+                    quoteTargets: ['USDT', 'OKB']
+                });
+                savedLabels.push(tokenLabel);
+            }
+
+            const templateKey = savedLabels.length > 1 ? 'register_tokens_saved' : 'register_token_saved';
+            const tokenList = savedLabels.join(', ');
+            const message = t(lang, templateKey, {
                 wallet: shortenAddress(parsed.wallet),
-                token: parsed.tokenLabel
+                token: tokenList,
+                tokens: tokenList,
+                count: savedLabels.length.toString()
             });
             await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
-            console.log(`[BOT] Đăng ký ${parsed.tokenLabel} @ ${parsed.wallet} -> ${chatId}`);
+            console.log(`[BOT] Đăng ký ${tokenList} @ ${parsed.wallet} -> ${chatId}`);
         } catch (error) {
             console.error(`[Register] Failed to save token for ${chatId}: ${error.message}`);
             await sendReply(msg, t(lang, 'register_help_error'), { parse_mode: 'Markdown' });
@@ -5770,7 +6052,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         const entries = await loadWalletOverviewEntries(chatId);
-        const text = buildWalletOverviewText(lang, entries);
+        const text = await buildWalletBalanceText(lang, entries);
         await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(lang) });
     }
 
@@ -6692,7 +6974,7 @@ function startTelegramBot() {
                     return;
                 }
                 const entries = await loadWalletOverviewEntries(chatId);
-                const text = buildWalletOverviewText(callbackLang, entries);
+                const text = await buildWalletBalanceText(callbackLang, entries);
                 await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: buildWalletActionKeyboard(callbackLang) });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
@@ -8215,13 +8497,33 @@ function startTelegramBot() {
                     }
 
                     await db.addWalletToUser(userId, lang, parsed.wallet);
-                    await db.upsertWalletTokenRecord({
-                        chatId: userId,
-                        walletAddress: parsed.wallet,
-                        tokenKey: parsed.tokenKey,
-                        tokenLabel: parsed.tokenLabel,
-                        tokenAddress: parsed.tokenAddress
-                    });
+                    const requestedTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0
+                        ? parsed.tokens
+                        : [{ tokenKey: 'banmao', tokenLabel: 'BANMAO', tokenAddress: OKX_BANMAO_TOKEN_ADDRESS }];
+
+                    const seen = new Set();
+                    const savedLabels = [];
+                    for (const tokenEntry of requestedTokens) {
+                        if (!tokenEntry || !tokenEntry.tokenKey) {
+                            continue;
+                        }
+                        const tokenKey = tokenEntry.tokenKey.toLowerCase();
+                        if (!tokenKey || seen.has(tokenKey)) {
+                            continue;
+                        }
+                        seen.add(tokenKey);
+                        const tokenLabel = tokenEntry.tokenLabel || tokenKey.toUpperCase();
+                        const tokenAddress = tokenEntry.tokenAddress || resolveKnownTokenAddress(tokenKey);
+                        await db.upsertWalletTokenRecord({
+                            chatId: userId,
+                            walletAddress: parsed.wallet,
+                            tokenKey,
+                            tokenLabel,
+                            tokenAddress,
+                            quoteTargets: ['USDT', 'OKB']
+                        });
+                        savedLabels.push(tokenLabel);
+                    }
 
                     if (registerState.promptMessageId) {
                         try {
@@ -8234,7 +8536,7 @@ function startTelegramBot() {
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
                     await sendEphemeralMessage(userId, t(lang, 'register_help_success_token', {
                         wallet: shortenAddress(parsed.wallet),
-                        token: parsed.tokenLabel
+                        token: savedLabels.join(', ')
                     }), {}, 20000);
                     registerWizardStates.delete(userId);
                 } catch (error) {
