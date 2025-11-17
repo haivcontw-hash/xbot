@@ -836,13 +836,6 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         };
     }
 
-    const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
-    const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
-    const directoryMap = new Map();
-    for (const token of directoryTokens) {
-        directoryMap.set((token.addressLower || token.address?.toLowerCase?.() || '').toLowerCase(), token);
-    }
-
     const candidates = new Map();
 
     const addCandidate = (address, meta = {}) => {
@@ -851,44 +844,38 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             return;
         }
         const lower = normalized.toLowerCase();
-        const directoryMeta = directoryMap.get(lower);
-        const merged = directoryMeta
-            ? { symbol: directoryMeta.symbol, decimals: directoryMeta.decimals, name: directoryMeta.name, ...meta }
-            : meta;
         if (!candidates.has(lower)) {
-            candidates.set(lower, { address: normalized, ...merged });
+            candidates.set(lower, { address: normalized, ...meta });
         } else {
             const existing = candidates.get(lower);
-            candidates.set(lower, { ...existing, ...merged });
+            candidates.set(lower, { ...existing, ...meta });
         }
     };
 
-    if (candidates.size === 0 && provider) {
-        const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
-            ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
-            : Math.min(50, directoryTokens.length);
-        for (const token of directoryTokens.slice(0, limit)) {
-            addCandidate(token.address, { symbol: token.symbol, decimals: token.decimals, name: token.name });
-        }
+    for (const token of registeredTokens) {
+        const tokenAddress = resolveRegisteredTokenAddress(token);
+        addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
+    }
 
-        for (const token of registeredTokens) {
-            const tokenAddress = resolveRegisteredTokenAddress(token);
-            addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
-        }
+    for (const token of OKX_OKB_TOKEN_ADDRESSES) {
+        addCandidate(token, { symbol: 'OKB' });
+    }
+    if (OKX_BANMAO_TOKEN_ADDRESS) {
+        addCandidate(OKX_BANMAO_TOKEN_ADDRESS, { symbol: 'BANMAO' });
+    }
 
-        const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
-        if (watcher) {
-            watcher.tokens.forEach((addr) => addCandidate(addr));
-        }
+    const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
+    if (watcher) {
+        watcher.tokens.forEach((addr) => addCandidate(addr));
+    }
 
-        if (provider) {
-            const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
-                lookbackBlocks: Math.min(OKX_WALLET_LOG_LOOKBACK_BLOCKS, 10000),
-                provider
-            });
-            for (const tokenAddress of discoveredTokens) {
-                addCandidate(tokenAddress);
-            }
+    if (provider) {
+        const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
+            lookbackBlocks: Math.min(OKX_WALLET_LOG_LOOKBACK_BLOCKS, 10000),
+            provider
+        });
+        for (const tokenAddress of discoveredTokens) {
+            addCandidate(tokenAddress);
         }
     }
 
@@ -4560,18 +4547,6 @@ async function getBanmaoTokenDecimals(chainName) {
         console.warn(`[BanmaoDecimals] Failed to load token profile: ${error.message}`);
     }
 
-    try {
-        const directory = await fetchOkxTokenDirectory(chainName);
-        const match = directory?.byAddressLower?.get(BANMAO_ADDRESS_LOWER);
-        if (match && Number.isFinite(match.decimals)) {
-            banmaoDecimalsCache = Math.max(0, Math.trunc(match.decimals));
-            banmaoDecimalsFetchedAt = now;
-            return banmaoDecimalsCache;
-        }
-    } catch (error) {
-        console.warn(`[BanmaoDecimals] Failed to load token directory: ${error.message}`);
-    }
-
     return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
 }
 
@@ -4613,18 +4588,6 @@ async function resolveTokenDecimals(tokenAddress, options = {}) {
         }
     } catch (error) {
         console.warn(`[TokenDecimals] Failed to resolve decimals for ${tokenAddress}: ${error.message}`);
-    }
-
-    try {
-        const directory = await fetchOkxTokenDirectory(chainName, { chainIndex });
-        const match = directory?.byAddressLower?.get(lower);
-        if (match && Number.isFinite(match.decimals)) {
-            const normalizedDecimals = Math.max(0, Math.trunc(match.decimals));
-            tokenDecimalsCache.set(lower, { value: normalizedDecimals, expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
-            return normalizedDecimals;
-        }
-    } catch (error) {
-        console.warn(`[TokenDecimals] Failed to query directory for ${tokenAddress}: ${error.message}`);
     }
 
     tokenDecimalsCache.set(lower, { value: fallback, expiresAt: now + (BANMAO_DECIMALS_CACHE_TTL / 2) });
@@ -5353,15 +5316,7 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
     }
 
     if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
-        try {
-            const quoteResult = await fetchTokenQuotePrice({ chainName, tokenAddress });
-            if (quoteResult && Number.isFinite(quoteResult.price)) {
-                priceEntry = quoteResult.raw;
-                source = quoteResult.source;
-            }
-        } catch (error) {
-            errors.push(new Error(`[quotePrice:${chainLabel}] ${error.message}`));
-        }
+        // fallback handled below
     }
 
     const tokenPrices = collectOkxTokenUnitPrices(priceEntry || priceInfoEntry);
@@ -5407,79 +5362,6 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
     };
 }
 
-async function fetchTokenQuotePrice(options = {}) {
-    const { chainName, tokenAddress } = options;
-
-    if (!tokenAddress || !OKX_QUOTE_TOKEN_ADDRESS) {
-        return null;
-    }
-
-    const normalizedAddress = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
-    const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
-    const context = await resolveOkxChainContext(chainName);
-
-    const chainIndex = Number.isFinite(query.chainIndex)
-        ? Number(query.chainIndex)
-        : (Number.isFinite(context?.chainIndex) ? Number(context.chainIndex) : null);
-
-    if (!Number.isFinite(chainIndex)) {
-        throw new Error('Unable to resolve OKX chain index');
-    }
-
-    const amount = await resolveTokenQuoteAmount(chainName, normalizedAddress);
-
-    const requestQuery = {
-        chainIndex,
-        fromTokenAddress: normalizedAddress,
-        toTokenAddress: OKX_QUOTE_TOKEN_ADDRESS,
-        amount,
-        swapMode: 'exactIn',
-        slippagePercent: '1'
-    };
-
-    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/quote', {
-        query: requestQuery
-    });
-
-    const quoteEntry = selectOkxQuoteByLiquidity(unwrapOkxData(payload)) || unwrapOkxFirst(payload);
-    if (!quoteEntry) {
-        return null;
-    }
-
-    const priceInfo = extractOkxQuotePrice(quoteEntry, { requestAmount: amount });
-    if (!Number.isFinite(priceInfo.price) || priceInfo.price <= 0) {
-        return null;
-    }
-
-    const okbUsd = resolveOkbUsdPrice(priceInfo.tokenUnitPrices);
-    const priceOkb = Number.isFinite(priceInfo.price) && Number.isFinite(okbUsd) && okbUsd > 0
-        ? priceInfo.price / okbUsd
-        : null;
-
-    return {
-        price: priceInfo.price,
-        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
-        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
-        chain: query.chainShortName || chainName || 'xlayer',
-        source: 'OKX DEX quote',
-        tokenPrices: priceInfo.tokenUnitPrices,
-        raw: quoteEntry
-    };
-}
-
-async function resolveTokenQuoteAmount(chainName, tokenAddress) {
-    const directory = await fetchOkxTokenDirectory(chainName);
-    const addressLower = (tokenAddress || '').toLowerCase();
-    const meta = directory?.byAddressLower?.get(addressLower) || null;
-    const decimals = Number.isFinite(meta?.decimals) ? Math.max(0, Math.trunc(meta.decimals)) : 18;
-
-    try {
-        return (BigInt(10) ** BigInt(decimals)).toString();
-    } catch (error) {
-        return '1000000000000000000';
-    }
-}
-
 async function fetchBanmaoTokenProfile(options = {}) {
     const { chainName, tokenAddress } = options;
     const query = await buildOkxDexQuery(chainName, { includeToken: false });
@@ -5495,66 +5377,6 @@ async function fetchBanmaoTokenProfile(options = {}) {
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
     return unwrapOkxFirst(payload);
 }
-
-async function fetchOkxTokenDirectory(chainName, options = {}) {
-    const { chainIndex } = options;
-    const query = await buildOkxDexQuery(chainName, {
-        includeToken: false,
-        includeQuote: false,
-        explicitChainIndex: chainIndex
-    });
-
-    const cacheKey = `${query.chainIndex || 'na'}|${(query.chainShortName || '').toLowerCase()}`;
-    const now = Date.now();
-    const cached = okxTokenDirectoryCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-        return cached.value;
-    }
-
-    let payload = null;
-    try {
-        payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', {
-            query,
-            expectOkCode: false
-        });
-    } catch (error) {
-        console.warn(`[OKX] Token directory fetch failed: ${error.message}`);
-    }
-
-    const rows = unwrapOkxData(payload);
-
-    const tokens = [];
-    const byAddressLower = new Map();
-
-    if (Array.isArray(rows)) {
-        for (const row of rows) {
-            const token = normalizeOkxTokenDirectoryToken(row);
-            if (!token) {
-                continue;
-            }
-
-            tokens.push(token);
-            if (!byAddressLower.has(token.addressLower)) {
-                byAddressLower.set(token.addressLower, token);
-            }
-        }
-    }
-
-    const directory = {
-        tokens,
-        byAddressLower,
-        chainIndex: query.chainIndex ?? null,
-        chainShortName: query.chainShortName || null
-    };
-
-    okxTokenDirectoryCache.set(cacheKey, {
-        value: directory,
-        expiresAt: now + OKX_TOKEN_DIRECTORY_TTL
-    });
-
-    return directory;
-}
-
 function decimalToRawBigInt(amount, decimals) {
     if (!Number.isFinite(Number(decimals))) {
         return null;
@@ -5687,77 +5509,6 @@ function extractDexHoldingRows(payload) {
     return rows;
 }
 
-async function fetchOkxDefiPlatformSnapshot(walletAddress, chainId, authFlag) {
-    if (!walletAddress || !chainId) {
-        return { totalUsd: null };
-    }
-
-    try {
-        const payload = await okxJsonRequest('POST', '/api/v5/defi/user/asset/platform/list', {
-            body: {
-                walletAddressList: [{ chainId: String(chainId), walletAddress }]
-            },
-            auth: authFlag,
-            expectOkCode: false
-        });
-
-        const data = payload?.data;
-        const walletEntry = Array.isArray(data?.walletIdPlatformList) ? data.walletIdPlatformList[0] : null;
-        const totalAssets = Number(walletEntry?.totalAssets);
-        if (Number.isFinite(totalAssets) && totalAssets > 0) {
-            return { totalUsd: totalAssets };
-        }
-    } catch (error) {
-        console.warn(`[DexHoldings] Platform snapshot failed for ${shortenAddress(walletAddress)} on ${chainId}: ${error.message}`);
-    }
-
-    return { totalUsd: null };
-}
-
-async function fetchOkxDefiBalances(walletAddress, chainId, authFlag) {
-    if (!walletAddress || !chainId) {
-        return { holdings: [], totalUsd: null };
-    }
-
-    const tokenAddressLists = [[], null];
-    for (const tokenAddressList of tokenAddressLists) {
-        try {
-            const payload = await okxJsonRequest('POST', '/api/v5/defi/user/balance-list', {
-                body: {
-                    chainId: String(chainId),
-                    address: walletAddress,
-                    tokenAddressList: Array.isArray(tokenAddressList) ? tokenAddressList : []
-                },
-                auth: authFlag,
-                expectOkCode: false
-            });
-
-            const rows = unwrapOkxData(payload);
-            if (!Array.isArray(rows) || rows.length === 0) {
-                continue;
-            }
-
-            const holdings = rows
-                .map((row) => normalizeDexHolding(row))
-                .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
-
-            const totalUsd = rows.reduce((sum, row) => {
-                const value = Number(row.currencyAmount);
-                return Number.isFinite(value) ? sum + value : sum;
-            }, 0);
-
-            const totalUsdResult = Number.isFinite(totalUsd) && totalUsd > 0 ? totalUsd : null;
-            if (holdings.length > 0 || Number.isFinite(totalUsdResult)) {
-                return { holdings, totalUsd: totalUsdResult };
-            }
-        } catch (error) {
-            console.warn(`[DexHoldings] DeFi balance list failed for ${shortenAddress(walletAddress)} on ${chainId}: ${error.message}`);
-        }
-    }
-
-    return { holdings: [], totalUsd: null };
-}
-
 async function fetchOkxDexBalanceSnapshot(walletAddress) {
     const normalized = normalizeAddressSafe(walletAddress);
     if (!normalized) {
@@ -5816,33 +5567,13 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
 
     const authOptions = hasOkxCredentials ? [false, true] : [false];
 
-    // Preferred: OKX DeFi balance + position APIs (v5)
-    for (const authFlag of authOptions) {
-        for (const chainId of chainIds) {
-            const defiBalances = await fetchOkxDefiBalances(normalized, chainId, authFlag);
-            const defiPlatforms = await fetchOkxDefiPlatformSnapshot(normalized, chainId, authFlag);
-
-            const holdings = defiBalances?.holdings || [];
-            const totalUsdCandidates = [
-                defiBalances?.totalUsd,
-                defiPlatforms?.totalUsd
-            ].filter((value) => Number.isFinite(value) && value > 0);
-
-            if (holdings.length > 0 || totalUsdCandidates.length > 0) {
-                const totalUsd = totalUsdCandidates.find((value) => Number.isFinite(value) && value > 0) || null;
-                return { tokens: holdings, totalUsd };
-            }
-        }
-    }
-
     const endpoints = [
         '/api/v6/dex/balance/all-token-balances-by-address',
-        '/api/v5/dex/balance/all-token-balances-by-address'
+        '/api/v6/dex/balance/token-balances-by-address'
     ];
 
     const totalValueEndpoints = [
-        '/api/v6/dex/balance/total-value-by-address',
-        '/api/v5/dex/balance/total-value-by-address'
+        '/api/v6/dex/balance/total-value-by-address'
     ];
 
     for (const query of queries) {
@@ -5943,97 +5674,6 @@ async function fetchOkxDexWalletHoldings(walletAddress) {
     if (Array.isArray(balanceSnapshot.tokens) && balanceSnapshot.tokens.length > 0) {
         return balanceSnapshot.tokens;
     }
-
-    try {
-        const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
-        const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
-        const safeChainShortName = normalizeShort(baseQuery.chainShortName) || 'xlayer';
-        const chainIds = Array.from(new Set([
-            baseQuery.chainId,
-            baseQuery.chainIndex,
-            OKX_CHAIN_INDEX,
-            OKX_CHAIN_INDEX_FALLBACK,
-            196
-        ]))
-            .filter((value) => Number.isFinite(Number(value)))
-            .map((value) => String(Number(value)));
-
-        const chainShortNames = Array.from(new Set([
-            normalizeShort(baseQuery.chainShortName),
-            safeChainShortName,
-            normalizeShort(OKX_CHAIN_SHORT_NAME),
-            'xlayer',
-            'x-layer'
-        ].filter(Boolean)));
-
-        const addressKeys = ['address', 'walletAddress'];
-        const queries = [];
-        const pushQuery = (query) => {
-            const key = JSON.stringify(query);
-            if (!queries.some((item) => JSON.stringify(item) === key)) {
-                queries.push(query);
-            }
-        };
-
-        for (const addressKey of addressKeys) {
-            const addressOnly = {};
-            addressOnly[addressKey] = normalized;
-            pushQuery(addressOnly);
-
-            pushQuery({ [addressKey]: normalized, chainShortName: safeChainShortName });
-            for (const chainShortName of chainShortNames) {
-                pushQuery({ [addressKey]: normalized, chainShortName });
-            }
-
-            for (const chainId of chainIds) {
-                pushQuery({ [addressKey]: normalized, chainId });
-                pushQuery({ [addressKey]: normalized, chainId, chainShortName: safeChainShortName });
-
-                for (const chainShortName of chainShortNames) {
-                    pushQuery({ [addressKey]: normalized, chainId, chainShortName });
-                }
-            }
-        }
-
-        const endpoints = [
-            '/api/v6/dex/aggregator/portfolio/token-balance',
-            '/api/v5/dex/aggregator/portfolio/token-balance',
-            '/api/v6/explorer/address/token-balance',
-            '/api/v5/explorer/address/token-balance'
-        ];
-
-        const authOptions = hasOkxCredentials ? [false, true] : [false];
-
-        for (const query of queries) {
-            for (const authFlag of authOptions) {
-                const tasks = endpoints.map((path) =>
-                    okxJsonRequest('GET', path, { query, auth: authFlag, expectOkCode: false })
-                        .then((response) => {
-                            const rows = extractDexHoldingRows(response);
-                            return rows
-                                .map((row) => normalizeDexHolding(row))
-                                .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
-                        })
-                        .catch((error) => {
-                            console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
-                            return [];
-                        })
-                );
-
-                const settled = await Promise.allSettled(tasks);
-                for (let i = 0; i < endpoints.length; i += 1) {
-                    const outcome = settled[i];
-                    const holdings = outcome?.status === 'fulfilled' ? outcome.value : [];
-                    if (Array.isArray(holdings) && holdings.length > 0) {
-                        return holdings;
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        console.warn(`[DexHoldings] Fatal error for ${shortenAddress(normalized)}: ${error.message}`);
-    }
-
     return [];
 }
 
