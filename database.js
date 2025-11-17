@@ -1098,6 +1098,15 @@ async function init() {
         );
     `);
     await dbRun(`
+        CREATE TABLE IF NOT EXISTS wallet_holdings_cache (
+            chatId TEXT NOT NULL,
+            walletAddress TEXT NOT NULL,
+            tokens TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, walletAddress)
+        );
+    `);
+    await dbRun(`
         CREATE TABLE IF NOT EXISTS user_warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chatId TEXT NOT NULL,
@@ -1344,6 +1353,7 @@ async function removeWalletFromUser(chatId, walletAddress) {
     }
     await dbRun('UPDATE users SET wallets = ? WHERE chatId = ?', [JSON.stringify(nextWallets), chatId]);
     await removeWalletTokensForWallet(chatId, walletAddress);
+    await removeWalletHoldingsCache(chatId, walletAddress);
     console.log(`[DB] Đã xóa ví ${walletAddress} khỏi chatId ${chatId}`);
     return true;
 }
@@ -1351,6 +1361,7 @@ async function removeWalletFromUser(chatId, walletAddress) {
 async function removeAllWalletsFromUser(chatId) {
     await dbRun('UPDATE users SET wallets = ? WHERE chatId = ?', ['[]', chatId]);
     await removeAllWalletTokens(chatId);
+    await removeAllWalletHoldingsCache(chatId);
     console.log(`[DB] Đã xóa tất cả ví khỏi chatId ${chatId}`);
     return true;
 }
@@ -1474,6 +1485,61 @@ async function getWalletTokenOverview(chatId) {
     }
 
     return Array.from(grouped.entries()).map(([wallet, tokens]) => ({ walletAddress: wallet, tokens }));
+}
+
+async function saveWalletHoldingsCache(chatId, walletAddress, tokens) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    if (!chatId || !normalizedWallet || !Array.isArray(tokens)) {
+        return false;
+    }
+
+    const payload = JSON.stringify(tokens);
+    const now = Date.now();
+
+    await dbRun(`
+        INSERT INTO wallet_holdings_cache (chatId, walletAddress, tokens, updatedAt)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(chatId, walletAddress)
+        DO UPDATE SET tokens = excluded.tokens, updatedAt = excluded.updatedAt
+    `, [chatId, normalizedWallet, payload, now]);
+    return true;
+}
+
+async function getWalletHoldingsCache(chatId, walletAddress) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    if (!chatId || !normalizedWallet) {
+        return { tokens: [], updatedAt: 0 };
+    }
+
+    const row = await dbGet('SELECT tokens, updatedAt FROM wallet_holdings_cache WHERE chatId = ? AND walletAddress = ?', [
+        chatId,
+        normalizedWallet
+    ]);
+    if (!row || !row.tokens) {
+        return { tokens: [], updatedAt: 0 };
+    }
+
+    return {
+        tokens: safeJsonParse(row.tokens, []),
+        updatedAt: Number(row.updatedAt) || 0
+    };
+}
+
+async function removeWalletHoldingsCache(chatId, walletAddress) {
+    const normalizedWallet = normalizeWalletAddressSafe(walletAddress);
+    if (!chatId || !normalizedWallet) {
+        return false;
+    }
+    await dbRun('DELETE FROM wallet_holdings_cache WHERE chatId = ? AND walletAddress = ?', [chatId, normalizedWallet]);
+    return true;
+}
+
+async function removeAllWalletHoldingsCache(chatId) {
+    if (!chatId) {
+        return false;
+    }
+    await dbRun('DELETE FROM wallet_holdings_cache WHERE chatId = ?', [chatId]);
+    return true;
 }
 
 async function getUsersForWallet(walletAddress) {
@@ -1858,6 +1924,10 @@ module.exports = {
     removeWalletTokensForWallet,
     removeAllWalletTokens,
     getWalletTokenOverview,
+    saveWalletHoldingsCache,
+    getWalletHoldingsCache,
+    removeWalletHoldingsCache,
+    removeAllWalletHoldingsCache,
     getUsersForWallet,
     getUserLanguage,
     getUserLanguageInfo,

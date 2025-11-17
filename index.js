@@ -729,24 +729,36 @@ async function loadWalletOverviewEntries(chatId) {
         seedWalletWatcher(normalized, seeds);
         let tokens = [];
         let warning = null;
+        let cached = false;
 
         try {
-            const live = await fetchLiveWalletTokens(normalized, { registeredTokens });
+            const live = await fetchLiveWalletTokens(normalized, { registeredTokens, chatId });
             tokens = live?.tokens || [];
             warning = live?.warning || null;
+
+            if (tokens.length > 0) {
+                await db.saveWalletHoldingsCache(chatId, normalized, tokens);
+            } else {
+                const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
+                if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
+                    tokens = cachedSnapshot.tokens;
+                    cached = true;
+                    warning = warning || 'wallet_cached';
+                }
+            }
         } catch (error) {
             warning = error?.code || 'wallet_error';
             console.warn(`[WalletOverview] Failed to load ${normalized}: ${error.message}`);
         }
 
-        results.push({ address: normalized, tokens, warning });
+        results.push({ address: normalized, tokens, warning, cached });
     }
 
     return results;
 }
 
 async function fetchLiveWalletTokens(walletAddress, options = {}) {
-    const { registeredTokens = [] } = options;
+    const { registeredTokens = [], chatId = null } = options;
     const normalizedWallet = normalizeAddressSafe(walletAddress);
     if (!normalizedWallet) {
         return { tokens: [], warning: 'wallet_invalid' };
@@ -1049,6 +1061,9 @@ async function buildWalletBalanceText(lang, entries) {
 
         if (entry.warning === 'rpc_offline') {
             lines.push(t(lang, 'wallet_balance_rpc_warning'));
+        }
+        if (entry.warning === 'wallet_cached' || entry.cached) {
+            lines.push(t(lang, 'wallet_balance_cache_warning'));
         }
 
         if (!entry.tokens || entry.tokens.length === 0) {

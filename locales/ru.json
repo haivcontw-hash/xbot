@@ -420,6 +420,7 @@
   "wallet_balance_title": "🔐 Обзор кошельков — {count}",
   "wallet_balance_wallet": "• Кошелёк #{index}: <code>{wallet}</code>",
   "wallet_balance_rpc_warning": "⚠️ RPC Xlayer недоступен; показываем только балансы из DEX.",
+  "wallet_balance_cache_warning": "⚠️ Показаны кешированные балансы: актуальные данные недоступны, значения могут быть устаревшими.",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: загружаем баланс...",

@@ -421,6 +421,7 @@
   "wallet_balance_title": "🔐 지갑 요약 — {count}개",
   "wallet_balance_wallet": "• 지갑 #{index}: <code>{wallet}</code>",
   "wallet_balance_rpc_warning": "⚠️ Xlayer RPC에 연결할 수 없어 DEX 잔액만 표시합니다.",
+  "wallet_balance_cache_warning": "⚠️ 실시간 데이터를 불러올 수 없어 캐시된 잔액을 보여드립니다. 값이 오래되었을 수 있습니다.",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: 잔액을 불러오는 중...",

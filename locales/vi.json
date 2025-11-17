@@ -421,6 +421,7 @@
   "wallet_balance_title": "🔐 Tổng quan ví — {count} ví",
   "wallet_balance_wallet": "• Ví #{index}: <code>{wallet}</code>",
   "wallet_balance_rpc_warning": "⚠️ RPC Xlayer tạm không truy cập được; chỉ hiển thị số dư từ DEX.",
+  "wallet_balance_cache_warning": "⚠️ Đang hiển thị số dư lưu tạm vì chưa lấy được dữ liệu trực tiếp, giá trị có thể đã cũ.",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: đang tải số dư...",
