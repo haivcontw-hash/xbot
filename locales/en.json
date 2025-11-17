@@ -418,6 +418,7 @@
   "wallet_action_portfolio": "🌐 Web view for {wallet}",
   "wallet_balance_title": "🔐 Wallet overview — {count} wallet(s)",
   "wallet_balance_wallet": "• Wallet #{index}: <code>{wallet}</code>",
+  "wallet_balance_rpc_warning": "⚠️ Xlayer RPC is unreachable right now; showing DEX balances only.",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: fetching live balance...",

@@ -418,6 +418,7 @@
   "wallet_action_portfolio": "🌐 Tampilan web untuk {wallet}",
   "wallet_balance_title": "🔐 Ringkasan dompet — {count} dompet",
   "wallet_balance_wallet": "• Dompet #{index}: <code>{wallet}</code>",
+  "wallet_balance_rpc_warning": "⚠️ RPC Xlayer tidak dapat dijangkau; hanya menampilkan saldo dari DEX.",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: sedang mengambil saldo...",

@@ -417,6 +417,7 @@
   "wallet_action_portfolio": "🌐 {wallet} 的网页视图",
   "wallet_balance_title": "🔐 钱包概览 — 共 {count} 个",
   "wallet_balance_wallet": "• 钱包 #{index}: <code>{wallet}</code>",
+  "wallet_balance_rpc_warning": "⚠️ Xlayer RPC 暂时不可用，仅显示 DEX 返回的余额。",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
   "wallet_balance_token_pending": "↳ <b>{token}</b>: 正在获取余额...",

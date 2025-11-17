@@ -94,6 +94,7 @@ const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_
 const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 50000);
 const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY || 8);
 const WALLET_BALANCE_TIMEOUT = Number(process.env.WALLET_BALANCE_TIMEOUT || 8000);
+const WALLET_RPC_HEALTH_TIMEOUT = Number(process.env.WALLET_RPC_HEALTH_TIMEOUT || 4000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -155,6 +156,23 @@ function mapWithConcurrency(items, limit, mapper) {
     }
 
     return Promise.all(pool).then(() => results);
+}
+
+async function isProviderHealthy(provider, timeoutMs = WALLET_RPC_HEALTH_TIMEOUT) {
+    if (!provider || typeof provider.getBlockNumber !== 'function') {
+        return false;
+    }
+
+    try {
+        await Promise.race([
+            provider.getBlockNumber(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('rpc_health_timeout')), timeoutMs))
+        ]);
+        return true;
+    } catch (error) {
+        console.warn(`[RPC] Provider health check failed: ${error.message}`);
+        return false;
+    }
 }
 
 const CHECKIN_MAX_ATTEMPTS = 3;
@@ -683,8 +701,19 @@ async function loadWalletOverviewEntries(chatId) {
             ...OKX_OKB_TOKEN_ADDRESSES
         ];
         seedWalletWatcher(normalized, seeds);
-        const tokens = await fetchLiveWalletTokens(normalized, { registeredTokens });
-        results.push({ address: normalized, tokens });
+        let tokens = [];
+        let warning = null;
+
+        try {
+            const live = await fetchLiveWalletTokens(normalized, { registeredTokens });
+            tokens = live?.tokens || [];
+            warning = live?.warning || null;
+        } catch (error) {
+            warning = error?.code || 'wallet_error';
+            console.warn(`[WalletOverview] Failed to load ${normalized}: ${error.message}`);
+        }
+
+        results.push({ address: normalized, tokens, warning });
     }
 
     return results;
@@ -694,10 +723,14 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const { registeredTokens = [] } = options;
     const normalizedWallet = normalizeAddressSafe(walletAddress);
     if (!normalizedWallet) {
-        return [];
+        return { tokens: [], warning: 'wallet_invalid' };
     }
 
-    const provider = getXlayerWebsocketProvider() || getXlayerProvider();
+    let provider = getXlayerWebsocketProvider() || getXlayerProvider();
+    const providerHealthy = await isProviderHealthy(provider);
+    if (!providerHealthy) {
+        provider = null;
+    }
     const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
     const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
     const directoryMap = new Map();
@@ -740,7 +773,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     }
 
-    if (candidates.size === 0) {
+    if (candidates.size === 0 && provider) {
         const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
             ? Math.min(OKX_WALLET_DIRECTORY_SCAN_LIMIT, directoryTokens.length)
             : Math.min(200, directoryTokens.length);
@@ -767,6 +800,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 addCandidate(tokenAddress);
             }
         }
+    }
+
+    if (candidates.size === 0 && !provider) {
+        return { tokens: [], warning: 'rpc_offline' };
     }
 
     const candidateList = Array.from(candidates.values());
@@ -859,7 +896,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         };
     });
 
-    return balances.filter(Boolean);
+    return {
+        tokens: balances.filter(Boolean),
+        warning: providerHealthy ? null : 'rpc_offline'
+    };
 }
 
 async function discoverWalletTokenContracts(walletAddress, options = {}) {
@@ -926,6 +966,10 @@ async function buildWalletBalanceText(lang, entries) {
             index: (index + 1).toString(),
             wallet: shortAddr
         }));
+
+        if (entry.warning === 'rpc_offline') {
+            lines.push(t(lang, 'wallet_balance_rpc_warning'));
+        }
 
         if (!entry.tokens || entry.tokens.length === 0) {
             lines.push(t(lang, 'wallet_overview_wallet_no_token'));
