@@ -89,7 +89,7 @@ const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_IN
     ? Number(process.env.OKX_CHAIN_INDEX_FALLBACK)
     : 196;
 const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
-const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 60);
+const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 0);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -662,8 +662,13 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     };
 
-    if (directory?.tokens?.length) {
-        for (const token of directory.tokens.slice(0, OKX_WALLET_DIRECTORY_SCAN_LIMIT)) {
+    const directoryTokens = Array.isArray(directory?.tokens) ? directory.tokens : [];
+    const limit = Number.isFinite(OKX_WALLET_DIRECTORY_SCAN_LIMIT) && OKX_WALLET_DIRECTORY_SCAN_LIMIT > 0
+        ? OKX_WALLET_DIRECTORY_SCAN_LIMIT
+        : directoryTokens.length;
+
+    if (directoryTokens.length) {
+        for (const token of directoryTokens.slice(0, limit)) {
             addCandidate(token.address, { symbol: token.symbol, decimals: token.decimals, name: token.name });
         }
     }
@@ -898,9 +903,6 @@ async function buildUnregisterMenu(lang, chatId) {
         const walletAddr = entry.address;
         const shortAddr = shortenAddress(walletAddr);
         inline_keyboard.push([{ text: `🧹 ${shortAddr}`, callback_data: `wallet_remove|wallet|${walletAddr}` }]);
-        for (const token of entry.tokens) {
-            inline_keyboard.push([{ text: `   • ${token.tokenLabel || token.tokenKey}`, callback_data: `wallet_remove|token|${walletAddr}|${token.tokenKey}` }]);
-        }
     }
     inline_keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'wallet_remove|all' }]);
 
@@ -930,48 +932,7 @@ function parseRegisterPayload(rawText) {
         return null;
     }
 
-    const tokens = [];
-    const tokenSegments = [];
-    for (let i = 1; i < parts.length; i += 1) {
-        const chunk = parts[i];
-        if (!chunk) {
-            continue;
-        }
-        chunk.split(/[,\n]+/).forEach((segment) => {
-            const trimmedSegment = segment.trim();
-            if (trimmedSegment) {
-                tokenSegments.push(trimmedSegment);
-            }
-        });
-    }
-
-    let lastEntry = null;
-    for (const segment of tokenSegments) {
-        if (/^0x[0-9a-fA-F]{40}$/.test(segment)) {
-            if (lastEntry && !lastEntry.tokenAddress) {
-                lastEntry.tokenAddress = normalizeAddressSafe(segment);
-            }
-            continue;
-        }
-
-        const match = segment.match(/^([A-Za-z0-9_]+)(?:[:@=](0x[0-9a-fA-F]{40}))?$/);
-        if (match) {
-            const symbol = match[1];
-            const contractAddress = match[2] ? normalizeAddressSafe(match[2]) : null;
-            if (!symbol) {
-                continue;
-            }
-            const entry = {
-                tokenKey: symbol.toLowerCase(),
-                tokenLabel: symbol.toUpperCase(),
-                tokenAddress: contractAddress
-            };
-            tokens.push(entry);
-            lastEntry = entry;
-        }
-    }
-
-    return { wallet, tokens };
+    return { wallet, tokens: [] };
 }
 
 const HELP_COMMAND_DETAILS = {
@@ -1037,6 +998,7 @@ const HELP_GROUP_DETAILS = {
 };
 
 const ADMIN_SUBCOMMANDS = [
+    { command: '/checkinadmin', descKey: 'admin_cmd_desc_checkinadmin' },
     { command: '/admin mute [user] [time] [reason]', descKey: 'admin_cmd_desc_mute' },
     { command: '/admin warn [user] [reason]', descKey: 'admin_cmd_desc_warn' },
     { command: '/admin warnings [user]', descKey: 'admin_cmd_desc_warnings' },
@@ -1309,7 +1271,24 @@ function buildAdminCommandCheatsheet(lang) {
     for (const action of ADMIN_SUBCOMMANDS) {
         lines.push(`${ADMIN_DETAIL_BULLET}${action.command} — ${t(lang, action.descKey)}`);
     }
-    return lines.join('\n');
+
+    const inline_keyboard = [];
+    inline_keyboard.push([{ text: t(lang, 'admin_command_button_checkin'), callback_data: 'admin_cmd|checkinadmin' }]);
+
+    for (let i = 0; i < ADMIN_SUBCOMMANDS.length; i += 2) {
+        const row = [];
+        for (let j = i; j < Math.min(i + 2, ADMIN_SUBCOMMANDS.length); j += 1) {
+            const cmd = ADMIN_SUBCOMMANDS[j];
+            row.push({ text: cmd.command, callback_data: `admin_cmd|${j}` });
+        }
+        if (row.length > 0) {
+            inline_keyboard.push(row);
+        }
+    }
+
+    inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'admin_cmd_close' }]);
+
+    return { text: lines.join('\n'), replyMarkup: { inline_keyboard } };
 }
 
 function buildSyntheticCommandMessage(query) {
@@ -6278,52 +6257,14 @@ function startTelegramBot() {
 
         try {
             await db.addWalletToUser(chatId, lang, parsed.wallet);
-            const requestedTokens = Array.isArray(parsed.tokens) ? parsed.tokens : [];
-
-            const seen = new Set();
-            const savedLabels = [];
-            for (const tokenEntry of requestedTokens) {
-                if (!tokenEntry || !tokenEntry.tokenKey) {
-                    continue;
-                }
-                const tokenKey = tokenEntry.tokenKey.toLowerCase();
-                if (!tokenKey || seen.has(tokenKey)) {
-                    continue;
-                }
-                seen.add(tokenKey);
-                const tokenLabel = tokenEntry.tokenLabel || tokenKey.toUpperCase();
-                const tokenAddress = tokenEntry.tokenAddress || resolveKnownTokenAddress(tokenKey);
-                await db.upsertWalletTokenRecord({
-                    chatId,
-                    walletAddress: parsed.wallet,
-                    tokenKey,
-                    tokenLabel,
-                    tokenAddress,
-                    quoteTargets: ['USDT', 'OKB']
-                });
-                savedLabels.push(tokenLabel);
-            }
-
             seedWalletWatcher(parsed.wallet, [
                 ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
-                ...OKX_OKB_TOKEN_ADDRESSES,
-                ...requestedTokens
-                    .map((token) => resolveRegisteredTokenAddress(token))
-                    .filter(Boolean)
+                ...OKX_OKB_TOKEN_ADDRESSES
             ]);
 
-            const tokenList = savedLabels.join(', ');
-            const templateKey = savedLabels.length === 0
-                ? 'register_wallet_saved'
-                : (savedLabels.length > 1 ? 'register_tokens_saved' : 'register_token_saved');
-            const message = t(lang, templateKey, {
-                wallet: shortenAddress(parsed.wallet),
-                token: tokenList,
-                tokens: tokenList,
-                count: savedLabels.length.toString()
-            });
+            const message = t(lang, 'register_wallet_saved', { wallet: shortenAddress(parsed.wallet) });
             await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
-            console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: ${tokenList || 'auto-detect'})`);
+            console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: auto-detect)`);
         } catch (error) {
             console.error(`[Register] Failed to save token for ${chatId}: ${error.message}`);
             await sendReply(msg, t(lang, 'register_help_error'), { parse_mode: 'Markdown' });
@@ -6703,9 +6644,10 @@ function startTelegramBot() {
     async function sendAdminCommandList(targetChatId, lang, replyToMessageId = null) {
         try {
             const cheatsheet = buildAdminCommandCheatsheet(lang);
-            await bot.sendMessage(targetChatId, cheatsheet, {
+            await bot.sendMessage(targetChatId, cheatsheet.text, {
                 reply_to_message_id: replyToMessageId,
-                allow_sending_without_reply: true
+                allow_sending_without_reply: true,
+                reply_markup: cheatsheet.replyMarkup
             });
         } catch (error) {
             console.error(`[AdminCommand] Failed to send cheatsheet to ${targetChatId}: ${error.message}`);
@@ -7028,7 +6970,8 @@ function startTelegramBot() {
         }
     }
 
-    async function handleAdminCommand(msg) {
+    async function handleAdminCommand(msg, options = {}) {
+        const { mode = 'admin' } = options;
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
         const chatType = msg.chat.type;
@@ -7040,14 +6983,18 @@ function startTelegramBot() {
         const fallbackLang = msg.from?.language_code;
 
         if (chatType === 'private') {
-            try {
-                await openAdminHub(userId, { fallbackLang });
-                const lang = await getLang(msg);
-                await sendAdminCommandList(chatId, lang);
-            } catch (error) {
-                console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
-                const lang = await getLang(msg);
-                await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+            const lang = await getLang(msg);
+            if (mode === 'checkinadmin') {
+                try {
+                    await openAdminHub(userId, { fallbackLang });
+                    await sendAdminMenu(userId, chatId, { fallbackLang });
+                } catch (error) {
+                    console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
+                    await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+                }
+            } else {
+                const cheatsheet = buildAdminCommandCheatsheet(lang);
+                await sendReply(msg, cheatsheet.text, { reply_markup: cheatsheet.replyMarkup });
             }
             return;
         }
@@ -7071,36 +7018,41 @@ function startTelegramBot() {
             return;
         }
 
-        try {
-            await db.ensureCheckinGroup(chatId.toString());
-        } catch (error) {
-            console.error(`[AdminHub] Failed to register group ${chatId}: ${error.message}`);
+        if (mode === 'checkinadmin') {
+            try {
+                await db.ensureCheckinGroup(chatId.toString());
+            } catch (error) {
+                console.error(`[AdminHub] Failed to register group ${chatId}: ${error.message}`);
+            }
+
+            try {
+                await sendAdminCommandList(chatId, replyLang, msg.message_id);
+                await openAdminHub(userId, { fallbackLang });
+                await sendAdminMenu(userId, chatId, { fallbackLang });
+                await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
+                    reply_to_message_id: msg.message_id,
+                    allow_sending_without_reply: true
+                });
+            } catch (error) {
+                console.error(`[AdminHub] Failed to send admin hub for ${userId} in ${chatId}: ${error.message}`);
+                const statusCode = error?.response?.statusCode;
+                const errorKey = statusCode === 403
+                    ? 'checkin_admin_command_dm_error'
+                    : 'checkin_admin_command_error';
+
+                await bot.sendMessage(chatId, t(replyLang, errorKey), {
+                    reply_to_message_id: msg.message_id,
+                    allow_sending_without_reply: true
+                });
+            }
+            return;
         }
 
-        try {
-            await sendAdminCommandList(chatId, replyLang, msg.message_id);
-            await openAdminHub(userId, { fallbackLang });
-            await sendAdminMenu(userId, chatId, { fallbackLang });
-            await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
-                reply_to_message_id: msg.message_id,
-                allow_sending_without_reply: true
-            });
-        } catch (error) {
-            console.error(`[AdminHub] Failed to send admin hub for ${userId} in ${chatId}: ${error.message}`);
-            const statusCode = error?.response?.statusCode;
-            const errorKey = statusCode === 403
-                ? 'checkin_admin_command_dm_error'
-                : 'checkin_admin_command_error';
-
-            await bot.sendMessage(chatId, t(replyLang, errorKey), {
-                reply_to_message_id: msg.message_id,
-                allow_sending_without_reply: true
-            });
-        }
+        await sendAdminCommandList(chatId, replyLang, msg.message_id);
     }
 
     bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
-        await handleAdminCommand(msg);
+        await handleAdminCommand(msg, { mode: 'checkinadmin' });
     });
 
     bot.onText(/^\/admin(?:@[\w_]+)?\s+(.+)/, async (msg, match) => {
@@ -7108,7 +7060,7 @@ function startTelegramBot() {
     });
 
     bot.onText(/^\/admin(?:@[\w_]+)?$/, async (msg) => {
-        await handleAdminCommand(msg);
+        await handleAdminCommand(msg, { mode: 'admin' });
     });
 
     bot.onText(/\/okx402status/, async (msg) => {
@@ -7324,6 +7276,38 @@ function startTelegramBot() {
                 }
 
                 await bot.answerCallbackQuery(queryId, { text: feedback || t(callbackLang, 'unregister_action_done') });
+                return;
+            }
+
+            if (query.data.startsWith('admin_cmd|')) {
+                const [, payload] = query.data.split('|');
+                if (payload === 'checkinadmin') {
+                    const synthetic = buildSyntheticCommandMessage(query);
+                    await handleAdminCommand(synthetic, { mode: 'checkinadmin' });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_menu_opened') });
+                    return;
+                }
+
+                if (payload === 'close' || payload === 'admin_cmd_close') {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore cleanup errors
+                    }
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const index = Number(payload);
+                const detail = Number.isInteger(index) && index >= 0 && index < ADMIN_SUBCOMMANDS.length
+                    ? ADMIN_SUBCOMMANDS[index]
+                    : null;
+                const description = detail ? t(callbackLang, detail.descKey) : null;
+                const label = detail ? detail.command : 'admin';
+                await bot.answerCallbackQuery(queryId, {
+                    text: description ? `${label}: ${description}` : t(callbackLang, 'admin_action_unknown'),
+                    show_alert: Boolean(description && description.length > 45)
+                });
                 return;
             }
 
@@ -8799,33 +8783,10 @@ function startTelegramBot() {
                     }
 
                     await db.addWalletToUser(userId, lang, parsed.wallet);
-                    const requestedTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0
-                        ? parsed.tokens
-                        : [{ tokenKey: 'banmao', tokenLabel: 'BANMAO', tokenAddress: OKX_BANMAO_TOKEN_ADDRESS }];
-
-                    const seen = new Set();
-                    const savedLabels = [];
-                    for (const tokenEntry of requestedTokens) {
-                        if (!tokenEntry || !tokenEntry.tokenKey) {
-                            continue;
-                        }
-                        const tokenKey = tokenEntry.tokenKey.toLowerCase();
-                        if (!tokenKey || seen.has(tokenKey)) {
-                            continue;
-                        }
-                        seen.add(tokenKey);
-                        const tokenLabel = tokenEntry.tokenLabel || tokenKey.toUpperCase();
-                        const tokenAddress = tokenEntry.tokenAddress || resolveKnownTokenAddress(tokenKey);
-                        await db.upsertWalletTokenRecord({
-                            chatId: userId,
-                            walletAddress: parsed.wallet,
-                            tokenKey,
-                            tokenLabel,
-                            tokenAddress,
-                            quoteTargets: ['USDT', 'OKB']
-                        });
-                        savedLabels.push(tokenLabel);
-                    }
+                    seedWalletWatcher(parsed.wallet, [
+                        ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
+                        ...OKX_OKB_TOKEN_ADDRESSES
+                    ]);
 
                     if (registerState.promptMessageId) {
                         try {
@@ -8836,9 +8797,8 @@ function startTelegramBot() {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    await sendEphemeralMessage(userId, t(lang, 'register_help_success_token', {
-                        wallet: shortenAddress(parsed.wallet),
-                        token: savedLabels.join(', ')
+                    await sendEphemeralMessage(userId, t(lang, 'register_help_success_wallet', {
+                        wallet: shortenAddress(parsed.wallet)
                     }), {}, 20000);
                     registerWizardStates.delete(userId);
                 } catch (error) {
