@@ -698,6 +698,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     }
 
     const candidates = new Map();
+    const dexHoldings = await fetchOkxDexWalletHoldings(normalizedWallet);
     const directory = await fetchOkxTokenDirectory(OKX_CHAIN_SHORT_NAME, { chainIndex: OKX_CHAIN_INDEX });
     const directoryMap = new Map();
 
@@ -734,6 +735,20 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         }
     }
 
+    if (Array.isArray(dexHoldings) && dexHoldings.length) {
+        for (const holding of dexHoldings) {
+            if (holding.amountRaw && !holding.tokenAddress) {
+                continue;
+            }
+            addCandidate(holding.tokenAddress, {
+                symbol: holding.symbol,
+                decimals: holding.decimals,
+                name: holding.name,
+                amountRaw: holding.amountRaw
+            });
+        }
+    }
+
     for (const token of registeredTokens) {
         const tokenAddress = resolveRegisteredTokenAddress(token);
         addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
@@ -761,15 +776,18 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
 
     const candidateList = Array.from(candidates.values());
     const balances = await mapWithConcurrency(candidateList, WALLET_BALANCE_CONCURRENCY, async (candidate) => {
-        let rawBalance;
-        try {
-            const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
-            rawBalance = await contract.balanceOf(normalizedWallet);
-        } catch (error) {
-            return null;
+        let rawBalance = candidate.amountRaw || null;
+
+        if (!rawBalance) {
+            try {
+                const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
+                rawBalance = await contract.balanceOf(normalizedWallet);
+            } catch (error) {
+                return null;
+            }
         }
 
-        if (rawBalance === 0n) {
+        if (rawBalance === 0n || rawBalance === '0' || rawBalance === '0x0') {
             return null;
         }
 
@@ -794,12 +812,23 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             }
         }
 
-        const formattedAmount = formatBigIntValue(rawBalance, decimals, {
+        let amountBigInt;
+        try {
+            amountBigInt = typeof rawBalance === 'bigint' ? rawBalance : BigInt(rawBalance);
+        } catch (error) {
+            amountBigInt = null;
+        }
+
+        if (!amountBigInt) {
+            return null;
+        }
+
+        const formattedAmount = formatBigIntValue(amountBigInt, decimals, {
             maximumFractionDigits: Math.min(6, Math.max(2, decimals))
         });
         let numericAmount = null;
         try {
-            numericAmount = Number(ethers.formatUnits(rawBalance, decimals));
+            numericAmount = Number(ethers.formatUnits(amountBigInt, decimals));
         } catch (error) {
             numericAmount = null;
         }
@@ -5312,6 +5341,91 @@ async function fetchOkxTokenDirectory(chainName, options = {}) {
     });
 
     return directory;
+}
+
+function normalizeDexHolding(row) {
+    if (!row) {
+        return null;
+    }
+
+    const tokenAddress = normalizeOkxConfigAddress(
+        row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr
+    );
+
+    if (!tokenAddress) {
+        return null;
+    }
+
+    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals);
+    const symbol = row.tokenSymbol || row.symbol;
+    const name = row.tokenName || row.name;
+    const rawBalance = row.balance || row.tokenBalance || row.amount || row.holdingAmount || row.holding || row.tokenAmount;
+
+    let amountRaw = null;
+    if (rawBalance !== undefined && rawBalance !== null) {
+        try {
+            amountRaw = BigInt(rawBalance);
+        } catch (error) {
+            amountRaw = null;
+        }
+    }
+
+    return {
+        tokenAddress,
+        decimals: Number.isFinite(decimals) ? decimals : undefined,
+        symbol,
+        name,
+        amountRaw
+    };
+}
+
+async function fetchOkxDexWalletHoldings(walletAddress) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!normalized) {
+        return [];
+    }
+
+    const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
+    const queries = [
+        {
+            ...baseQuery,
+            address: normalized,
+            walletAddress: normalized,
+            chainId: baseQuery.chainIndex,
+            chainIndex: baseQuery.chainIndex
+        }
+    ];
+
+    const endpoints = [
+        '/api/v6/dex/aggregator/portfolio/token-balance',
+        '/api/v5/dex/aggregator/portfolio/token-balance',
+        '/api/v6/explorer/address/token-balance',
+        '/api/v5/explorer/address/token-balance'
+    ];
+
+    for (const query of queries) {
+        for (const path of endpoints) {
+            try {
+                const response = await okxJsonRequest('GET', path, { query, auth: false, expectOkCode: false });
+                const rows = unwrapOkxData(response);
+                if (!Array.isArray(rows) || rows.length === 0) {
+                    continue;
+                }
+
+                const holdings = rows
+                    .map((row) => normalizeDexHolding(row))
+                    .filter((item) => item && item.amountRaw && item.amountRaw !== 0n);
+
+                if (holdings.length > 0) {
+                    return holdings;
+                }
+            } catch (error) {
+                console.warn(`[DexHoldings] Failed via ${path}: ${error.message}`);
+            }
+        }
+    }
+
+    return [];
 }
 
 async function fetchOkxSupportedChains() {
