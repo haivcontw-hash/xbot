@@ -871,23 +871,30 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 });
                 numericAmount = Number(ethers.formatUnits(holding.amountRaw ?? holding.rawBalance, decimals));
             } catch (error) {
-                // Fallback: use the decimal coinAmount/balance if raw formatting fails
-                const fallbackAmount = Number(holding.coinAmount || holding.balance);
-                if (Number.isFinite(fallbackAmount) && fallbackAmount > 0) {
-                    numericAmount = fallbackAmount;
-                    amountText = holding.balance || fallbackAmount.toString();
+                // ignore raw formatting errors
+            }
+
+            // Fallbacks when raw balance formatting failed or decimals are missing
+            if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined)) {
+                const fallbackAmount = holding.balance ?? holding.coinAmount;
+                if (fallbackAmount !== undefined && fallbackAmount !== null) {
+                    amountText = String(fallbackAmount);
+                }
+                const numericFallback = Number(fallbackAmount);
+                if (!Number.isFinite(numericAmount) && Number.isFinite(numericFallback)) {
+                    numericAmount = numericFallback;
                 }
             }
 
-            if (!amountText && holding.balance) {
-                amountText = String(holding.balance);
-            }
-            if (!numericAmount && Number.isFinite(Number(holding.balance))) {
-                numericAmount = Number(holding.balance);
+            if (!Number.isFinite(numericAmount)) {
+                const numericFallback = Number(holding.balance ?? holding.coinAmount);
+                if (Number.isFinite(numericFallback)) {
+                    numericAmount = numericFallback;
+                }
             }
 
-            if (!amountText || !Number.isFinite(numericAmount) || numericAmount <= 0) {
-                return null;
+            if (!amountText) {
+                amountText = String(holding.amountRaw ?? holding.rawBalance ?? holding.balance ?? holding.coinAmount ?? '0');
             }
 
             const valueParts = [];
@@ -909,7 +916,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
             }
 
-            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0 && Number.isFinite(numericAmount)) {
                 const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2
