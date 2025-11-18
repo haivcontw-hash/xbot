@@ -813,7 +813,8 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
             const live = await fetchLiveWalletTokens(normalized, {
                 registeredTokens,
                 chatId,
-                chainContext: options.chainContext
+                chainContext: options.chainContext,
+                forceDex: options.forceDex
             });
             tokens = live?.tokens || [];
             warning = live?.warning || null;
@@ -841,7 +842,7 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
 }
 
 async function fetchLiveWalletTokens(walletAddress, options = {}) {
-    const { registeredTokens = [], chatId = null, chainContext = null } = options;
+    const { registeredTokens = [], chatId = null, chainContext = null, forceDex = false } = options;
     const normalizedWallet = normalizeAddressSafe(walletAddress);
     if (!normalizedWallet) {
         return { tokens: [], warning: 'wallet_invalid' };
@@ -851,11 +852,12 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const providerHealthy = await isProviderHealthy(provider);
     const rpcWarning = providerHealthy ? null : 'rpc_offline';
 
-    // Always prefer OKX DEX holdings first to avoid slow RPC scans.
+    // Always prefer OKX DEX holdings first to avoid slow RPC scans and, when requested,
+    // force a live snapshot even if a cached copy exists.
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
-    if (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
-        const tokens = await mapWithConcurrency(dexSnapshot.tokens, WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
+    if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
+        const tokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
+            if (!holding.amountRaw && !holding.rawBalance) {
                 return null;
             }
 
@@ -889,7 +891,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
                 priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
             }
-            if (!priceInfo) {
+            if (!priceInfo && holding.tokenAddress) {
                 priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
             }
 
@@ -7971,7 +7973,11 @@ function startTelegramBot() {
                 const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
                 try {
-                    const entries = await loadWalletOverviewEntries(chatId, { chainContext, forceLive: true });
+                    const entries = await loadWalletOverviewEntries(chatId, {
+                        chainContext,
+                        forceLive: true,
+                        forceDex: true
+                    });
                     const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
