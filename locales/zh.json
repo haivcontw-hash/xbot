@@ -421,6 +421,7 @@
   "wallet_balance_wallet": "• 钱包 #{index}: <code>{wallet}</code>",
   "wallet_balance_rpc_warning": "⚠️ Xlayer RPC 暂时不可用，仅显示 DEX 返回的余额。",
   "wallet_balance_cache_warning": "⚠️ 无法获取实时数据，当前展示缓存余额，数值可能已过期。",
+  "wallet_balance_total_value": "💰 总价值：{value} USD",
   "wallet_balance_chain_line": "链：{chain}",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",

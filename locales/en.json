@@ -422,6 +422,7 @@
   "wallet_balance_wallet": "• Wallet #{index}: <code>{wallet}</code>",
   "wallet_balance_rpc_warning": "⚠️ Xlayer RPC is unreachable right now; showing DEX balances only.",
   "wallet_balance_cache_warning": "⚠️ Showing cached balances because live data is unavailable. Values may be stale.",
+  "wallet_balance_total_value": "💰 Total value: {value} USD",
   "wallet_balance_chain_line": "Chain: {chain}",
   "wallet_balance_token_value": "↳ <b>{token}</b>: {amount} {symbol} ≈ {value}",
   "wallet_balance_token_amount": "↳ <b>{token}</b>: {amount} {symbol}",
