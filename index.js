@@ -5455,6 +5455,7 @@ function normalizeDexHolding(row) {
         symbol,
         name,
         amountRaw,
+        currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
         priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
     };
 }
@@ -5519,129 +5520,75 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
     const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
     const safeChainShortName = normalizeShort(baseQuery.chainShortName) || 'xlayer';
     const chainIdNumbers = Array.from(new Set([
-        baseQuery.chainId,
-        baseQuery.chainIndex,
-        OKX_CHAIN_INDEX,
-        OKX_CHAIN_INDEX_FALLBACK,
+        Number(baseQuery.chainId),
+        Number(baseQuery.chainIndex),
+        Number(OKX_CHAIN_ID),
+        Number(OKX_CHAIN_INDEX),
+        Number(OKX_CHAIN_INDEX_FALLBACK),
         196
-    ]))
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value));
-
+    ].filter((value) => Number.isFinite(value))));
     const chainShortNames = Array.from(new Set([
-        normalizeShort(baseQuery.chainShortName),
         safeChainShortName,
         normalizeShort(OKX_CHAIN_SHORT_NAME),
-        'xlayer',
-        'x-layer'
+        'xlayer'
     ].filter(Boolean)));
 
-    const baseAddressFields = { address: normalized, walletAddress: normalized };
-    const queries = [];
-    const pushQuery = (query) => {
-        const key = JSON.stringify(query);
-        if (!queries.some((item) => JSON.stringify(item) === key)) {
-            queries.push(query);
-        }
-    };
-
     const chainIdList = chainIdNumbers.length > 0 ? chainIdNumbers : [196];
-
-    // Primary: integer chain arrays to satisfy OKX parser
-    pushQuery({ ...baseAddressFields, chains: chainIdList });
-    for (const chainId of chainIdList) {
-        pushQuery({ ...baseAddressFields, chains: [chainId] });
-    }
-
-    // Secondary: include explicit chainId/chainShortName hints
-    for (const chainId of chainIdList) {
-        pushQuery({ ...baseAddressFields, chains: [chainId], chainId });
-        for (const chainShortName of chainShortNames) {
-            pushQuery({ ...baseAddressFields, chains: [chainId], chainId, chainShortName });
-        }
-    }
-
-    // Legacy string variants (some endpoints still accept short names)
-    for (const chainShortName of chainShortNames) {
-        pushQuery({ ...baseAddressFields, chains: [safeChainShortName], chainShortName });
-        pushQuery({ ...baseAddressFields, chains: [safeChainShortName], chainShortName, chainId: chainIdList[0] });
-    }
-
-    const authOptions = hasOkxCredentials ? [false, true] : [false];
-
-    const endpoints = [
-        '/api/v6/dex/balance/all-token-balances-by-address',
-        '/api/v6/dex/balance/token-balances-by-address'
-    ];
-
-    const totalValueEndpoints = [
-        '/api/v6/dex/balance/total-value-by-address'
-    ];
-
-    const requestBalance = async (path, query, authFlag) => {
-        const methods = ['GET', 'POST'];
-
-        for (const method of methods) {
-            try {
-                const response = await okxJsonRequest(method, path, {
-                    query: method === 'GET' ? query : undefined,
-                    body: method === 'POST' ? query : undefined,
-                    auth: authFlag,
-                    expectOkCode: false
-                });
-                const rows = extractDexHoldingRows(response);
-                const holdings = rows
-                    .map((row) => normalizeDexHolding(row))
-                    .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
-                const totalUsd = extractDexTotalValue(response);
-                if (Array.isArray(holdings) && holdings.length > 0) {
-                    return { holdings, totalUsd };
-                }
-            } catch (error) {
-                console.warn(`[DexHoldings] Balance API failed via ${method} ${path}: ${error.message}`);
-            }
-        }
-
-        return { holdings: [], totalUsd: null };
+    const query = {
+        address: normalized,
+        walletAddress: normalized,
+        chains: chainIdList,
+        chainId: chainIdList[0],
+        chainIndex: chainIdList[0],
+        chainShortName: chainShortNames[0]
     };
 
-    for (const query of queries) {
-        for (const authFlag of authOptions) {
-            const tasks = endpoints.map((path) => requestBalance(path, query, authFlag));
+    try {
+        const response = await okxJsonRequest('POST', '/api/v6/dex/balance/all-token-balances-by-address', {
+            body: query,
+            auth: hasOkxCredentials,
+            expectOkCode: false
+        });
 
-            const settled = await Promise.allSettled(tasks);
-            for (let i = 0; i < endpoints.length; i += 1) {
-                const outcome = settled[i];
-                const result = outcome?.status === 'fulfilled' ? outcome.value : { holdings: [], totalUsd: null };
-                if (Array.isArray(result.holdings) && result.holdings.length > 0) {
-                    let totalUsd = result.totalUsd;
-                    if (!Number.isFinite(totalUsd) || totalUsd <= 0) {
-                        totalUsd = await fetchOkxDexTotalValue(query, totalValueEndpoints, authFlag);
-                    }
+        const rows = extractDexHoldingRows(response);
+        const holdings = rows
+            .map((row) => normalizeDexHolding(row))
+            .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
 
-                    return { tokens: result.holdings, totalUsd };
+        const responseTotal = extractDexTotalValue(response);
+        let totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
+
+        if (!Number.isFinite(totalUsd) || totalUsd <= 0) {
+            const derived = holdings.reduce((sum, item) => {
+                if (Number.isFinite(item?.currencyAmount) && item.currencyAmount > 0) {
+                    return sum + item.currencyAmount;
                 }
+                if (item?.amountRaw !== null && item?.decimals !== undefined && Number.isFinite(item?.priceUsd)) {
+                    try {
+                        const amount = Number(ethers.formatUnits(item.amountRaw, item.decimals));
+                        if (Number.isFinite(amount) && amount > 0) {
+                            return sum + amount * item.priceUsd;
+                        }
+                    } catch (error) {
+                        // ignore formatting errors
+                    }
+                }
+                return sum;
+            }, 0);
+
+            if (Number.isFinite(derived) && derived > 0) {
+                totalUsd = derived;
             }
         }
+
+        if (Array.isArray(holdings) && holdings.length > 0) {
+            return { tokens: holdings, totalUsd: Number.isFinite(totalUsd) ? totalUsd : null };
+        }
+    } catch (error) {
+        console.warn(`[DexHoldings] Balance API failed via POST all-token-balances-by-address: ${error.message}`);
     }
 
     return { tokens: [], totalUsd: null };
-}
-
-async function fetchOkxDexTotalValue(query, endpoints, authFlag) {
-    for (const path of endpoints) {
-        try {
-            const response = await okxJsonRequest('GET', path, { query, auth: authFlag, expectOkCode: false });
-            const totalUsd = extractDexTotalValue(response);
-            if (Number.isFinite(totalUsd) && totalUsd > 0) {
-                return totalUsd;
-            }
-        } catch (error) {
-            console.warn(`[DexHoldings] Total value fetch failed via ${path}: ${error.message}`);
-        }
-    }
-
-    return null;
 }
 
 function extractDexTotalValue(payload) {
