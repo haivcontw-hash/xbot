@@ -5518,15 +5518,15 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
     const baseQuery = await buildOkxDexQuery(OKX_CHAIN_SHORT_NAME, { includeToken: false, includeQuote: false });
     const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
     const safeChainShortName = normalizeShort(baseQuery.chainShortName) || 'xlayer';
-    const chainIds = Array.from(new Set([
+    const chainIdNumbers = Array.from(new Set([
         baseQuery.chainId,
         baseQuery.chainIndex,
         OKX_CHAIN_INDEX,
         OKX_CHAIN_INDEX_FALLBACK,
         196
     ]))
-        .filter((value) => Number.isFinite(Number(value)))
-        .map((value) => String(Number(value)));
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
 
     const chainShortNames = Array.from(new Set([
         normalizeShort(baseQuery.chainShortName),
@@ -5545,33 +5545,27 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         }
     };
 
-    const chainVariants = [];
-    if (chainIds.length > 0) {
-        chainVariants.push(chainIds.join(','));
-        for (const chainId of chainIds) {
-            chainVariants.push(chainId);
-        }
+    const chainIdList = chainIdNumbers.length > 0 ? chainIdNumbers : [196];
+
+    // Primary: integer chain arrays to satisfy OKX parser
+    pushQuery({ ...baseAddressFields, chains: chainIdList });
+    for (const chainId of chainIdList) {
+        pushQuery({ ...baseAddressFields, chains: [chainId] });
     }
 
-    if (chainShortNames.length > 0) {
-        chainVariants.push(chainShortNames.join(','));
+    // Secondary: include explicit chainId/chainShortName hints
+    for (const chainId of chainIdList) {
+        pushQuery({ ...baseAddressFields, chains: [chainId], chainId });
         for (const chainShortName of chainShortNames) {
-            chainVariants.push(chainShortName);
+            pushQuery({ ...baseAddressFields, chains: [chainId], chainId, chainShortName });
         }
     }
 
-    if (chainVariants.length === 0) {
-        chainVariants.push(safeChainShortName);
+    // Legacy string variants (some endpoints still accept short names)
+    for (const chainShortName of chainShortNames) {
+        pushQuery({ ...baseAddressFields, chains: [safeChainShortName], chainShortName });
+        pushQuery({ ...baseAddressFields, chains: [safeChainShortName], chainShortName, chainId: chainIdList[0] });
     }
-
-    for (const chains of chainVariants) {
-        pushQuery({ ...baseAddressFields, chains });
-        pushQuery({ ...baseAddressFields, chains, chainShortName: safeChainShortName });
-        pushQuery({ ...baseAddressFields, chains, chainId: chainIds[0] });
-    }
-
-    // Ensure minimal variants always include required chains param
-    pushQuery({ ...baseAddressFields, chains: safeChainShortName, chainShortName: safeChainShortName });
 
     const authOptions = hasOkxCredentials ? [false, true] : [false];
 
