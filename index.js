@@ -857,7 +857,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
     if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
         const tokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            if (!holding.amountRaw && !holding.rawBalance && !holding.coinAmount) {
+            if (!holding.amountRaw && !holding.rawBalance && !holding.coinAmount && !holding.balance) {
                 return null;
             }
 
@@ -871,15 +871,22 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 });
                 numericAmount = Number(ethers.formatUnits(holding.amountRaw ?? holding.rawBalance, decimals));
             } catch (error) {
-                // Fallback: use the decimal coinAmount if raw formatting fails
+                // Fallback: use the decimal coinAmount/balance if raw formatting fails
                 const fallbackAmount = Number(holding.coinAmount || holding.balance);
                 if (Number.isFinite(fallbackAmount) && fallbackAmount > 0) {
                     numericAmount = fallbackAmount;
-                    amountText = fallbackAmount.toString();
+                    amountText = holding.balance || fallbackAmount.toString();
                 }
             }
 
-            if (!amountText || !numericAmount || numericAmount <= 0) {
+            if (!amountText && holding.balance) {
+                amountText = String(holding.balance);
+            }
+            if (!numericAmount && Number.isFinite(Number(holding.balance))) {
+                numericAmount = Number(holding.balance);
+            }
+
+            if (!amountText || !Number.isFinite(numericAmount) || numericAmount <= 0) {
                 return null;
             }
 
@@ -897,6 +904,9 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             }
             if (!priceInfo && holding.tokenAddress) {
                 priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            }
+            if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
+                priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
             }
 
             if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
@@ -5534,7 +5544,7 @@ function normalizeDexHolding(row) {
     const tokenAddressRaw = row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr;
     let tokenAddress = normalizeOkxConfigAddress(tokenAddressRaw);
 
-    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals);
+    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals || row.tokenPrecision);
     const symbol = row.tokenSymbol || row.symbol;
     const name = row.tokenName || row.name;
 
@@ -5555,6 +5565,11 @@ function normalizeDexHolding(row) {
     if (amountRaw === null && firstBalance !== undefined && firstBalance !== null) {
         const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
         amountRaw = decimalToRawBigInt(firstBalance, decimalsForDecimal);
+    }
+
+    if (amountRaw === null && row.balance) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(row.balance, decimalsForDecimal);
     }
 
     if (!tokenAddress) {
