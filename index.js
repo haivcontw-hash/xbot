@@ -5545,40 +5545,33 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         }
     };
 
-    const appendChainVariants = (base) => {
-        pushQuery({ ...base });
-
-        if (chainIds.length > 0) {
-            pushQuery({ ...base, chains: chainIds.join(',') });
-            for (const chainId of chainIds) {
-                pushQuery({ ...base, chains: chainId });
-            }
+    const chainVariants = [];
+    if (chainIds.length > 0) {
+        chainVariants.push(chainIds.join(','));
+        for (const chainId of chainIds) {
+            chainVariants.push(chainId);
         }
-
-        if (chainShortNames.length > 0) {
-            pushQuery({ ...base, chains: chainShortNames.join(',') });
-            for (const chainShortName of chainShortNames) {
-                pushQuery({ ...base, chains: chainShortName });
-            }
-        }
-    };
-
-    // Always include both address keys to satisfy strict API validation
-    appendChainVariants({ ...baseAddressFields });
-    appendChainVariants({ ...baseAddressFields, chainShortName: safeChainShortName });
-
-    for (const chainShortName of chainShortNames) {
-        appendChainVariants({ ...baseAddressFields, chainShortName });
     }
 
-    for (const chainId of chainIds) {
-        appendChainVariants({ ...baseAddressFields, chainId });
-        appendChainVariants({ ...baseAddressFields, chainId, chainShortName: safeChainShortName });
-
+    if (chainShortNames.length > 0) {
+        chainVariants.push(chainShortNames.join(','));
         for (const chainShortName of chainShortNames) {
-            appendChainVariants({ ...baseAddressFields, chainId, chainShortName });
+            chainVariants.push(chainShortName);
         }
     }
+
+    if (chainVariants.length === 0) {
+        chainVariants.push(safeChainShortName);
+    }
+
+    for (const chains of chainVariants) {
+        pushQuery({ ...baseAddressFields, chains });
+        pushQuery({ ...baseAddressFields, chains, chainShortName: safeChainShortName });
+        pushQuery({ ...baseAddressFields, chains, chainId: chainIds[0] });
+    }
+
+    // Ensure minimal variants always include required chains param
+    pushQuery({ ...baseAddressFields, chains: safeChainShortName, chainShortName: safeChainShortName });
 
     const authOptions = hasOkxCredentials ? [false, true] : [false];
 
@@ -5591,23 +5584,36 @@ async function fetchOkxDexBalanceSnapshot(walletAddress) {
         '/api/v6/dex/balance/total-value-by-address'
     ];
 
+    const requestBalance = async (path, query, authFlag) => {
+        const methods = ['GET', 'POST'];
+
+        for (const method of methods) {
+            try {
+                const response = await okxJsonRequest(method, path, {
+                    query: method === 'GET' ? query : undefined,
+                    body: method === 'POST' ? query : undefined,
+                    auth: authFlag,
+                    expectOkCode: false
+                });
+                const rows = extractDexHoldingRows(response);
+                const holdings = rows
+                    .map((row) => normalizeDexHolding(row))
+                    .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
+                const totalUsd = extractDexTotalValue(response);
+                if (Array.isArray(holdings) && holdings.length > 0) {
+                    return { holdings, totalUsd };
+                }
+            } catch (error) {
+                console.warn(`[DexHoldings] Balance API failed via ${method} ${path}: ${error.message}`);
+            }
+        }
+
+        return { holdings: [], totalUsd: null };
+    };
+
     for (const query of queries) {
         for (const authFlag of authOptions) {
-            const tasks = endpoints.map((path) =>
-                okxJsonRequest('GET', path, { query, auth: authFlag, expectOkCode: false })
-                    .then((response) => {
-                        const rows = extractDexHoldingRows(response);
-                        const holdings = rows
-                            .map((row) => normalizeDexHolding(row))
-                            .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
-                        const totalUsd = extractDexTotalValue(response);
-                        return { holdings, totalUsd };
-                    })
-                    .catch((error) => {
-                        console.warn(`[DexHoldings] Balance API failed via ${path}: ${error.message}`);
-                        return { holdings: [], totalUsd: null };
-                    })
-            );
+            const tasks = endpoints.map((path) => requestBalance(path, query, authFlag));
 
             const settled = await Promise.allSettled(tasks);
             for (let i = 0; i < endpoints.length; i += 1) {
