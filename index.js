@@ -5660,10 +5660,26 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         chainShortName
     };
 
+    const logBalanceRequest = (endpoint) => {
+        try {
+            const params = new URLSearchParams();
+            params.set('address', query.address);
+            params.set('walletAddress', query.walletAddress);
+            chainIdList.forEach((id) => params.append('chains', String(id)));
+            params.set('chainId', String(query.chainId));
+            params.set('chainIndex', String(query.chainIndex));
+            params.set('chainShortName', query.chainShortName);
+            console.log(`[DexHoldings] ${endpoint} -> ${params.toString()}`);
+        } catch (error) {
+            // ignore log errors
+        }
+    };
+
     let holdings = [];
     let totalUsd = null;
 
     try {
+        logBalanceRequest('/api/v6/dex/balance/all-token-balances-by-address');
         const response = await okxJsonRequest('GET', '/api/v6/dex/balance/all-token-balances-by-address', {
             query,
             auth: hasOkxCredentials,
@@ -5683,6 +5699,7 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
 
     if (!Number.isFinite(totalUsd)) {
         try {
+            logBalanceRequest('/api/v6/dex/balance/total-value-by-address');
             const totalResponse = await okxJsonRequest('GET', '/api/v6/dex/balance/total-value-by-address', {
                 query,
                 auth: hasOkxCredentials,
