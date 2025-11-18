@@ -20,7 +20,8 @@ const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
-const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '') || `http://localhost:${API_PORT}`;
+const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'xlayer';
 const OKX_BANMAO_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
     '0x16d91d1615FC55B76d5f92365Bd60C069B46ef78';
@@ -36,6 +37,12 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const XLAYER_RPC_URL = process.env.XLAYER_RPC_URL || 'https://rpc.xlayer.tech';
+const XLAYER_WS_URLS = (process.env.XLAYER_WS_URLS || 'wss://xlayerws.okx.com|wss://ws.xlayer.tech')
+    .split(/[|,\s]+/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+const TOKEN_PRICE_CACHE_TTL = Number(process.env.TOKEN_PRICE_CACHE_TTL || 60 * 1000);
 const DEFAULT_COMMUNITY_WALLET = '0x92809f2837f708163d375960063c8a3156fceacb';
 const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || DEFAULT_COMMUNITY_WALLET;
 const DEFAULT_DEAD_WALLET_ADDRESS = '0x000000000000000000000000000000000000dEaD';
@@ -83,6 +90,11 @@ const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_IN
     ? Number(process.env.OKX_CHAIN_INDEX_FALLBACK)
     : 196;
 const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
+const OKX_WALLET_DIRECTORY_SCAN_LIMIT = Number(process.env.OKX_WALLET_DIRECTORY_SCAN_LIMIT || 200);
+const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBACK_BLOCKS || 50000);
+const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY || 8);
+const WALLET_BALANCE_TIMEOUT = Number(process.env.WALLET_BALANCE_TIMEOUT || 8000);
+const WALLET_RPC_HEALTH_TIMEOUT = Number(process.env.WALLET_RPC_HEALTH_TIMEOUT || 4000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -98,6 +110,70 @@ let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
+const tokenPriceCache = new Map();
+const ERC20_MIN_ABI = [
+    'function balanceOf(address account) view returns (uint256)',
+    'function decimals() view returns (uint8)',
+    'function symbol() view returns (string)'
+];
+const ERC20_TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+let xlayerProvider = null;
+let xlayerWebsocketProvider = null;
+try {
+    if (XLAYER_RPC_URL) {
+        xlayerProvider = new ethers.JsonRpcProvider(XLAYER_RPC_URL);
+    }
+} catch (error) {
+    console.error(`[RPC] Không thể khởi tạo RPC Xlayer: ${error.message}`);
+    xlayerProvider = null;
+}
+const walletWatchers = new Map();
+
+function mapWithConcurrency(items, limit, mapper) {
+    const tasks = Math.max(1, Math.min(limit || 1, items.length || 0));
+    const results = new Array(items.length);
+    let cursor = 0;
+
+    const runWorker = async () => {
+        while (true) {
+            const index = cursor;
+            cursor += 1;
+            if (index >= items.length) {
+                return;
+            }
+
+            try {
+                results[index] = await mapper(items[index], index);
+            } catch (error) {
+                results[index] = undefined;
+            }
+        }
+    };
+
+    const pool = [];
+    for (let i = 0; i < tasks; i += 1) {
+        pool.push(runWorker());
+    }
+
+    return Promise.all(pool).then(() => results);
+}
+
+async function isProviderHealthy(provider, timeoutMs = WALLET_RPC_HEALTH_TIMEOUT) {
+    if (!provider || typeof provider.getBlockNumber !== 'function') {
+        return false;
+    }
+
+    try {
+        await Promise.race([
+            provider.getBlockNumber(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('rpc_health_timeout')), timeoutMs))
+        ]);
+        return true;
+    } catch (error) {
+        console.warn(`[RPC] Provider health check failed: ${error.message}`);
+        return false;
+    }
+}
 
 const CHECKIN_MAX_ATTEMPTS = 3;
 const CHECKIN_SCIENCE_PROBABILITY = Math.min(
@@ -412,13 +488,815 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function normalizeAddressSafe(address) {
+    if (!address) {
+        return null;
+    }
+    try {
+        return ethers.getAddress(address);
+    } catch (error) {
+        return null;
+    }
+}
+
+function shortenAddress(address) {
+    if (!address || address.length < 10) {
+        return address || '';
+    }
+    const normalized = normalizeAddressSafe(address) || address;
+    return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
+}
+
+function getXlayerProvider() {
+    return xlayerProvider;
+}
+
+function createXlayerWebsocketProvider() {
+    if (!XLAYER_WS_URLS.length) {
+        return null;
+    }
+
+    for (const url of XLAYER_WS_URLS) {
+        try {
+            const provider = new ethers.WebSocketProvider(url);
+            provider.on('error', (error) => {
+                console.warn(`[WSS] Lỗi kết nối WebSocket ${url}: ${error.message}`);
+            });
+            provider.on('close', () => {
+                console.warn(`[WSS] WebSocket bị đóng: ${url}`);
+                if (xlayerWebsocketProvider === provider) {
+                    xlayerWebsocketProvider = null;
+                }
+            });
+            console.log(`[WSS] Đã kết nối tới ${url}`);
+            return provider;
+        } catch (error) {
+            console.warn(`[WSS] Không thể kết nối ${url}: ${error.message}`);
+        }
+    }
+
+    return null;
+}
+
+function getXlayerWebsocketProvider() {
+    if (xlayerWebsocketProvider) {
+        return xlayerWebsocketProvider;
+    }
+
+    xlayerWebsocketProvider = createXlayerWebsocketProvider();
+    return xlayerWebsocketProvider;
+}
+
+function teardownWalletWatcher(walletAddress) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    const watcher = normalized ? walletWatchers.get(normalized) : null;
+    if (!watcher) {
+        return;
+    }
+
+    if (watcher.provider && watcher.subscriptions) {
+        for (const { filter, handler } of watcher.subscriptions) {
+            try {
+                watcher.provider.off(filter, handler);
+            } catch (error) {
+                // ignore detach errors
+            }
+        }
+    }
+
+    walletWatchers.delete(normalized);
+}
+
+function seedWalletWatcher(walletAddress, tokenAddresses = []) {
+    const normalizedWallet = normalizeAddressSafe(walletAddress);
+    if (!normalizedWallet) {
+        return null;
+    }
+
+    let watcher = walletWatchers.get(normalizedWallet);
+    if (!watcher) {
+        watcher = ensureWalletWatcher(normalizedWallet, tokenAddresses);
+    } else {
+        for (const tokenAddress of tokenAddresses) {
+            const normalizedToken = normalizeAddressSafe(tokenAddress);
+            if (normalizedToken) {
+                watcher.tokens.add(normalizedToken.toLowerCase());
+            }
+        }
+    }
+
+    return watcher;
+}
+
+function ensureWalletWatcher(walletAddress, seedTokenAddresses = []) {
+    const normalizedWallet = normalizeAddressSafe(walletAddress);
+    if (!normalizedWallet) {
+        return null;
+    }
+
+    let watcher = walletWatchers.get(normalizedWallet);
+    if (watcher) {
+        for (const token of seedTokenAddresses) {
+            const normalized = normalizeAddressSafe(token);
+            if (normalized) {
+                watcher.tokens.add(normalized.toLowerCase());
+            }
+        }
+        return watcher;
+    }
+
+    const provider = getXlayerWebsocketProvider() || getXlayerProvider();
+    const tokens = new Set();
+    for (const token of seedTokenAddresses) {
+        const normalized = normalizeAddressSafe(token);
+        if (normalized) {
+            tokens.add(normalized.toLowerCase());
+        }
+    }
+
+    const subscriptions = [];
+    const topicWallet = (() => {
+        try {
+            return ethers.zeroPadValue(normalizedWallet, 32);
+        } catch (error) {
+            return null;
+        }
+    })();
+
+    const handler = (log) => {
+        if (!log || !log.address) {
+            return;
+        }
+        tokens.add(log.address.toLowerCase());
+    };
+
+    if (provider && topicWallet) {
+        const incomingFilter = { topics: [ERC20_TRANSFER_TOPIC, null, topicWallet] };
+        const outgoingFilter = { topics: [ERC20_TRANSFER_TOPIC, topicWallet] };
+        try {
+            provider.on(incomingFilter, handler);
+            subscriptions.push({ filter: incomingFilter, handler });
+        } catch (error) {
+            console.warn(`[WSS] Không thể đăng ký incoming logs cho ${normalizedWallet}: ${error.message}`);
+        }
+        try {
+            provider.on(outgoingFilter, handler);
+            subscriptions.push({ filter: outgoingFilter, handler });
+        } catch (error) {
+            console.warn(`[WSS] Không thể đăng ký outgoing logs cho ${normalizedWallet}: ${error.message}`);
+        }
+    }
+
+    watcher = { wallet: normalizedWallet, tokens, provider, subscriptions };
+    walletWatchers.set(normalizedWallet, watcher);
+    return watcher;
+}
+
+function buildCloseKeyboard(lang, { backCallbackData = null, closeCallbackData = 'ui_close' } = {}) {
+    const closeRow = [];
+    if (backCallbackData) {
+        closeRow.push({ text: t(lang, 'action_back'), callback_data: backCallbackData });
+    }
+    closeRow.push({ text: t(lang, 'action_close'), callback_data: closeCallbackData });
+
+    return { inline_keyboard: [closeRow] };
+}
+
+function appendCloseButton(replyMarkup, lang, options = {}) {
+    const keyboard = replyMarkup?.inline_keyboard ? replyMarkup.inline_keyboard.map((row) => [...row]) : [];
+    const closeRow = [];
+    if (options.backCallbackData) {
+        closeRow.push({ text: t(lang, 'action_back'), callback_data: options.backCallbackData });
+    }
+    closeRow.push({ text: t(lang, 'action_close'), callback_data: options.closeCallbackData || 'ui_close' });
+
+    keyboard.push(closeRow);
+    return { inline_keyboard: keyboard };
+}
+
+function buildWalletActionKeyboard(lang, portfolioLinks = [], options = {}) {
+    const extraRows = [];
+    for (const link of portfolioLinks) {
+        if (!link?.url || !link.address) {
+            continue;
+        }
+        extraRows.push([
+            {
+                text: t(lang, 'wallet_action_portfolio', { wallet: shortenAddress(link.address) }),
+                url: link.url
+            }
+        ]);
+    }
+
+    const inline_keyboard = [
+        [{ text: t(lang, 'wallet_action_view'), callback_data: 'wallet_overview' }],
+        [{ text: t(lang, 'wallet_action_manage'), callback_data: 'wallet_manage' }],
+        ...extraRows
+    ];
+
+    if (options.includeClose !== false) {
+        inline_keyboard.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+    }
+
+    return { inline_keyboard };
+}
+
+function sortChainsForMenu(chains) {
+    if (!Array.isArray(chains)) {
+        return [];
+    }
+    const isXlayer = (entry) => {
+        if (!entry) return false;
+        if (Number(entry.chainId) === 196 || Number(entry.chainIndex) === 196) {
+            return true;
+        }
+        const aliases = entry.aliases || [];
+        return aliases.some((alias) => typeof alias === 'string' && alias.toLowerCase().includes('xlayer'));
+    };
+
+    return [...chains].sort((a, b) => {
+        const aX = isXlayer(a);
+        const bX = isXlayer(b);
+        if (aX !== bX) {
+            return aX ? -1 : 1;
+        }
+        const aId = Number.isFinite(a?.chainId) ? a.chainId : Number.isFinite(a?.chainIndex) ? a.chainIndex : Infinity;
+        const bId = Number.isFinite(b?.chainId) ? b.chainId : Number.isFinite(b?.chainIndex) ? b.chainIndex : Infinity;
+        return aId - bId;
+    });
+}
+
+async function buildWalletChainMenu(lang) {
+    let chains = [];
+    try {
+        chains = await fetchOkxBalanceSupportedChains();
+    } catch (error) {
+        console.warn(`[WalletChains] Failed to load supported chains: ${error.message}`);
+    }
+
+    if (!Array.isArray(chains) || chains.length === 0) {
+        chains = [{ chainId: 196, chainIndex: 196, chainShortName: 'xlayer', chainName: 'X Layer', aliases: ['xlayer'] }];
+    }
+
+    const sorted = sortChainsForMenu(chains);
+    const buttons = sorted.map((entry) => {
+        const label = formatChainLabel(entry) || 'Chain';
+        const chainId = Number(entry.chainId || entry.chainIndex || 196);
+        const chainShort = encodeURIComponent(entry.chainShortName || entry.chainName || 'xlayer');
+        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}` };
+    });
+
+    const inline_keyboard = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        inline_keyboard.push(buttons.slice(i, i + 2));
+    }
+    inline_keyboard.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+
+    return {
+        text: t(lang, 'wallet_chain_prompt'),
+        replyMarkup: { inline_keyboard },
+        chains: sorted
+    };
+}
+
+function buildPortfolioEmbedUrl(walletAddress) {
+    const normalized = normalizeAddressSafe(walletAddress) || walletAddress;
+    const base = PUBLIC_BASE_URL.replace(/\/$/, '');
+    return `${base}/webview/portfolio/${encodeURIComponent(normalized)}`;
+}
+
+function formatChainLabel(entry) {
+    if (!entry) {
+        return null;
+    }
+    const pieces = [];
+    if (entry.chainName) {
+        pieces.push(entry.chainName);
+    }
+    if (entry.chainShortName && entry.chainShortName !== entry.chainName) {
+        pieces.push(entry.chainShortName);
+    }
+    const label = pieces.length > 0 ? pieces.join(' / ') : (entry.chainShortName || entry.chainName || null);
+    const id = entry.chainId || entry.chainIndex;
+    if (label && Number.isFinite(id)) {
+        return `${label} (#${id})`;
+    }
+    return label || (Number.isFinite(id) ? `#${id}` : null);
+}
+
+async function loadWalletOverviewEntries(chatId, options = {}) {
+    const wallets = await db.getWalletsForUser(chatId);
+    const overview = await db.getWalletTokenOverview(chatId);
+    const tokenMap = new Map();
+    for (const entry of overview) {
+        const key = (entry.walletAddress || '').toLowerCase();
+        tokenMap.set(key, Array.isArray(entry.tokens) ? entry.tokens : []);
+    }
+
+    const results = [];
+    for (const wallet of wallets) {
+        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const lower = (normalized || '').toLowerCase();
+        const registeredTokens = tokenMap.get(lower) || [];
+        const seeds = [
+            ...registeredTokens.map((token) => resolveRegisteredTokenAddress(token)).filter(Boolean),
+            ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
+            ...OKX_OKB_TOKEN_ADDRESSES
+        ];
+        seedWalletWatcher(normalized, seeds);
+        let tokens = [];
+        let warning = null;
+        let cached = false;
+        let totalUsd = null;
+
+        try {
+            const live = await fetchLiveWalletTokens(normalized, { registeredTokens, chatId, chainContext: options.chainContext });
+            tokens = live?.tokens || [];
+            warning = live?.warning || null;
+            totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : null;
+
+            if (tokens.length > 0) {
+                await db.saveWalletHoldingsCache(chatId, normalized, tokens);
+            } else {
+                const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
+                if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
+                    tokens = cachedSnapshot.tokens;
+                    cached = true;
+                    warning = warning || 'wallet_cached';
+                }
+            }
+        } catch (error) {
+            warning = error?.code || 'wallet_error';
+            console.warn(`[WalletOverview] Failed to load ${normalized}: ${error.message}`);
+        }
+
+        results.push({ address: normalized, tokens, warning, cached, totalUsd });
+    }
+
+    return results;
+}
+
+async function fetchLiveWalletTokens(walletAddress, options = {}) {
+    const { registeredTokens = [], chatId = null, chainContext = null } = options;
+    const normalizedWallet = normalizeAddressSafe(walletAddress);
+    if (!normalizedWallet) {
+        return { tokens: [], warning: 'wallet_invalid' };
+    }
+
+    let provider = getXlayerWebsocketProvider() || getXlayerProvider();
+    const providerHealthy = await isProviderHealthy(provider);
+    const rpcWarning = providerHealthy ? null : 'rpc_offline';
+
+    // Always prefer OKX DEX holdings first to avoid slow RPC scans.
+    const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
+    if (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
+        const tokens = await mapWithConcurrency(dexSnapshot.tokens, WALLET_BALANCE_CONCURRENCY, async (holding) => {
+            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
+                return null;
+            }
+
+            const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
+            let amountText = null;
+            let numericAmount = null;
+
+            try {
+                amountText = formatBigIntValue(holding.amountRaw, decimals, {
+                    maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+                });
+                numericAmount = Number(ethers.formatUnits(holding.amountRaw, decimals));
+            } catch (error) {
+                amountText = null;
+                numericAmount = null;
+            }
+
+            if (!amountText || !numericAmount || numericAmount <= 0) {
+                return null;
+            }
+
+            const priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            const valueParts = [];
+
+            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+                const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                });
+                if (usdValue) {
+                    valueParts.push(`${usdValue} USDT`);
+                }
+            }
+
+            const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
+                ? priceInfo.priceOkb
+                : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
+                    ? priceInfo.priceUsd / priceInfo.okbUsd
+                    : null);
+            if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
+                const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
+                    minimumFractionDigits: 4,
+                    maximumFractionDigits: 4
+                });
+                if (okbValue) {
+                    valueParts.push(`${okbValue} OKB`);
+                }
+            }
+
+            return {
+                tokenAddress: holding.tokenAddress,
+                tokenLabel: holding.symbol || holding.name || 'Token',
+                amountText,
+                valueText: valueParts.length ? valueParts.join(' / ') : null
+            };
+        });
+
+        return {
+            tokens: tokens.filter(Boolean),
+            warning: rpcWarning,
+            totalUsd: dexSnapshot.totalUsd
+        };
+    }
+
+    const candidates = new Map();
+
+    const addCandidate = (address, meta = {}) => {
+        const normalized = normalizeAddressSafe(address);
+        if (!normalized) {
+            return;
+        }
+        const lower = normalized.toLowerCase();
+        if (!candidates.has(lower)) {
+            candidates.set(lower, { address: normalized, ...meta });
+        } else {
+            const existing = candidates.get(lower);
+            candidates.set(lower, { ...existing, ...meta });
+        }
+    };
+
+    for (const token of registeredTokens) {
+        const tokenAddress = resolveRegisteredTokenAddress(token);
+        addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
+    }
+
+    for (const token of OKX_OKB_TOKEN_ADDRESSES) {
+        addCandidate(token, { symbol: 'OKB' });
+    }
+    if (OKX_BANMAO_TOKEN_ADDRESS) {
+        addCandidate(OKX_BANMAO_TOKEN_ADDRESS, { symbol: 'BANMAO' });
+    }
+
+    const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
+    if (watcher) {
+        watcher.tokens.forEach((addr) => addCandidate(addr));
+    }
+
+    if (provider) {
+        const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
+            lookbackBlocks: Math.min(OKX_WALLET_LOG_LOOKBACK_BLOCKS, 10000),
+            provider
+        });
+        for (const tokenAddress of discoveredTokens) {
+            addCandidate(tokenAddress);
+        }
+    }
+
+    if (candidates.size === 0) {
+        return { tokens: [], warning: rpcWarning };
+    }
+
+    const candidateList = Array.from(candidates.values());
+    const balances = await mapWithConcurrency(candidateList, WALLET_BALANCE_CONCURRENCY, async (candidate) => {
+        let rawBalance = candidate.amountRaw || null;
+
+        if (!rawBalance && provider) {
+            try {
+                const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
+                rawBalance = await Promise.race([
+                    contract.balanceOf(normalizedWallet),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('balance_timeout')), WALLET_BALANCE_TIMEOUT))
+                ]);
+            } catch (error) {
+                return null;
+            }
+        }
+
+        if (!rawBalance || rawBalance === 0n || rawBalance === '0' || rawBalance === '0x0') {
+            return null;
+        }
+
+        let decimals = Number.isFinite(candidate.decimals)
+            ? candidate.decimals
+            : await resolveTokenDecimals(candidate.address, {
+                chainName: OKX_CHAIN_SHORT_NAME,
+                chainIndex: OKX_CHAIN_INDEX,
+                fallback: 18
+            });
+        if (!Number.isFinite(decimals)) {
+            decimals = 18;
+        }
+
+        let amountBigInt;
+        try {
+            amountBigInt = typeof rawBalance === 'bigint' ? rawBalance : BigInt(rawBalance);
+        } catch (error) {
+            amountBigInt = null;
+        }
+
+        if (!amountBigInt) {
+            return null;
+        }
+
+        const formattedAmount = formatBigIntValue(amountBigInt, decimals, {
+            maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+        });
+        let numericAmount = null;
+        try {
+            numericAmount = Number(ethers.formatUnits(amountBigInt, decimals));
+        } catch (error) {
+            numericAmount = null;
+        }
+
+        const priceInfo = await getTokenPriceInfo(candidate.address, candidate.symbol || candidate.name);
+        const valueParts = [];
+        if (priceInfo && Number.isFinite(numericAmount) && numericAmount > 0) {
+            if (Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+                const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                });
+                if (usdValue) {
+                    valueParts.push(`${usdValue} USDT`);
+                }
+            }
+
+            const okbUnitPrice = Number.isFinite(priceInfo.priceOkb) && priceInfo.priceOkb > 0
+                ? priceInfo.priceOkb
+                : (Number.isFinite(priceInfo.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo.priceUsd)
+                    ? priceInfo.priceUsd / priceInfo.okbUsd
+                    : null);
+            if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0) {
+                const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
+                    minimumFractionDigits: 4,
+                    maximumFractionDigits: 4
+                });
+                if (okbValue) {
+                    valueParts.push(`${okbValue} OKB`);
+                }
+            }
+        }
+
+        return {
+            tokenAddress: candidate.address,
+            tokenLabel: candidate.symbol || candidate.name || 'Token',
+            amountText: formattedAmount,
+            valueText: valueParts.length ? valueParts.join(' / ')
+                : null
+        };
+    });
+
+    return {
+        tokens: balances.filter(Boolean),
+        warning: rpcWarning
+    };
+}
+
+async function discoverWalletTokenContracts(walletAddress, options = {}) {
+    const provider = options.provider || getXlayerProvider() || getXlayerWebsocketProvider();
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!provider || !normalized || typeof provider.getBlockNumber !== 'function' || typeof provider.getLogs !== 'function') {
+        return [];
+    }
+
+    let latestBlock;
+    try {
+        latestBlock = await provider.getBlockNumber();
+    } catch (error) {
+        console.warn(`[WalletLogs] Không lấy được block hiện tại: ${error.message}`);
+        return [];
+    }
+
+    const lookback = Math.max(Number(options.lookbackBlocks) || 0, 0);
+    const fromBlock = latestBlock > lookback ? latestBlock - lookback : 0;
+    let topicWallet;
+    try {
+        topicWallet = ethers.zeroPadValue(normalized, 32);
+    } catch (error) {
+        return [];
+    }
+
+    const filters = [
+        { fromBlock, toBlock: 'latest', topics: [ERC20_TRANSFER_TOPIC, null, topicWallet] },
+        { fromBlock, toBlock: 'latest', topics: [ERC20_TRANSFER_TOPIC, topicWallet] }
+    ];
+
+    const seen = new Set();
+
+    for (const filter of filters) {
+        try {
+            const logs = await provider.getLogs(filter);
+            for (const log of logs || []) {
+                if (!log.address) {
+                    continue;
+                }
+                const addr = log.address.toLowerCase();
+                if (!seen.has(addr)) {
+                    seen.add(addr);
+                }
+            }
+        } catch (error) {
+            console.warn(`[WalletLogs] Không thể quét log cho ${shortenAddress(normalized)}: ${error.message}`);
+        }
+    }
+
+    return Array.from(seen);
+}
+
+async function buildWalletBalanceText(lang, entries, options = {}) {
+    if (!entries || entries.length === 0) {
+        return t(lang, 'wallet_overview_empty');
+    }
+
+    const lines = [t(lang, 'wallet_balance_title', { count: entries.length.toString() })];
+
+    if (options.chainLabel) {
+        lines.push(t(lang, 'wallet_balance_chain_line', { chain: options.chainLabel }));
+    }
+
+    for (const [index, entry] of entries.entries()) {
+        const shortAddr = escapeHtml(shortenAddress(entry.address));
+        lines.push('', t(lang, 'wallet_balance_wallet', {
+            index: (index + 1).toString(),
+            wallet: shortAddr
+        }));
+
+        if (entry.warning === 'rpc_offline') {
+            lines.push(t(lang, 'wallet_balance_rpc_warning'));
+        }
+        if (entry.warning === 'wallet_cached' || entry.cached) {
+            lines.push(t(lang, 'wallet_balance_cache_warning'));
+        }
+
+        if (Number.isFinite(entry.totalUsd)) {
+            const totalText = formatFiatValue(entry.totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (totalText) {
+                lines.push(t(lang, 'wallet_balance_total_value', { value: escapeHtml(totalText) }));
+            }
+        }
+
+        if (!entry.tokens || entry.tokens.length === 0) {
+            lines.push(t(lang, 'wallet_overview_wallet_no_token'));
+            continue;
+        }
+
+        for (const token of entry.tokens) {
+            if (token.amountText && token.valueText) {
+                lines.push(t(lang, 'wallet_balance_token_value', {
+                    token: escapeHtml(token.tokenLabel || 'Token'),
+                    amount: escapeHtml(token.amountText),
+                    symbol: escapeHtml(token.tokenLabel || 'Token'),
+                    value: escapeHtml(token.valueText)
+                }));
+            } else if (token.amountText) {
+                lines.push(t(lang, 'wallet_balance_token_amount', {
+                    token: escapeHtml(token.tokenLabel || 'Token'),
+                    amount: escapeHtml(token.amountText),
+                    symbol: escapeHtml(token.tokenLabel || 'Token')
+                }));
+            } else {
+                lines.push(t(lang, 'wallet_balance_token_pending', { token: escapeHtml(token.tokenLabel || 'Token') }));
+            }
+        }
+    }
+
+    lines.push('', t(lang, 'wallet_balance_refresh_hint'));
+    lines.push(t(lang, 'wallet_portfolio_hint'));
+    return lines.join('\n');
+}
+
+function resolveKnownTokenAddress(tokenKey) {
+    if (!tokenKey) {
+        return null;
+    }
+    const key = tokenKey.toLowerCase();
+    if (key === 'banmao' && OKX_BANMAO_TOKEN_ADDRESS) {
+        return OKX_BANMAO_TOKEN_ADDRESS;
+    }
+    if (OKX_OKB_SYMBOL_KEYS.includes(key) && OKX_OKB_TOKEN_ADDRESSES.length > 0) {
+        return normalizeOkxConfigAddress(OKX_OKB_TOKEN_ADDRESSES[0]);
+    }
+    return null;
+}
+
+function resolveRegisteredTokenAddress(tokenRecord) {
+    if (!tokenRecord || typeof tokenRecord !== 'object') {
+        return null;
+    }
+    if (tokenRecord.tokenAddress) {
+        return normalizeOkxConfigAddress(tokenRecord.tokenAddress) || tokenRecord.tokenAddress;
+    }
+    return resolveKnownTokenAddress(tokenRecord.tokenKey);
+}
+
+function formatFiatValue(value, options = {}) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return null;
+    }
+    const minimumFractionDigits = Number.isFinite(options.minimumFractionDigits)
+        ? options.minimumFractionDigits
+        : 2;
+    const maximumFractionDigits = Number.isFinite(options.maximumFractionDigits)
+        ? options.maximumFractionDigits
+        : Math.max(minimumFractionDigits, 2);
+    return numeric.toLocaleString('en-US', { minimumFractionDigits, maximumFractionDigits });
+}
+
+async function getTokenPriceInfo(tokenAddress, tokenKey) {
+    const normalized = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
+    if (!normalized) {
+        return null;
+    }
+
+    const cacheKey = normalized.toLowerCase();
+    const now = Date.now();
+    const cached = tokenPriceCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    try {
+        const snapshot = await fetchTokenMarketSnapshot({ tokenAddress: normalized });
+        const value = snapshot
+            ? {
+                priceUsd: Number.isFinite(snapshot.price) ? Number(snapshot.price) : null,
+                priceOkb: Number.isFinite(snapshot.priceOkb) ? Number(snapshot.priceOkb) : null,
+                okbUsd: Number.isFinite(snapshot.okbUsd) ? Number(snapshot.okbUsd) : null,
+                source: snapshot.source || 'OKX'
+            }
+            : null;
+        tokenPriceCache.set(cacheKey, { value, expiresAt: now + TOKEN_PRICE_CACHE_TTL });
+        return value;
+    } catch (error) {
+        console.warn(`[WalletPrice] Failed to load price for ${tokenKey || tokenAddress}: ${error.message}`);
+        tokenPriceCache.set(cacheKey, { value: null, expiresAt: now + 30 * 1000 });
+        return null;
+    }
+}
+
+async function buildUnregisterMenu(lang, chatId) {
+    const entries = await loadWalletOverviewEntries(chatId);
+    if (!entries || entries.length === 0) {
+        return {
+            text: t(lang, 'unregister_empty'),
+            replyMarkup: null
+        };
+    }
+
+    const lines = [t(lang, 'unregister_header')];
+    const inline_keyboard = [];
+    for (const entry of entries) {
+        const walletAddr = entry.address;
+        const shortAddr = shortenAddress(walletAddr);
+        inline_keyboard.push([{ text: `🧹 ${shortAddr}`, callback_data: `wallet_remove|wallet|${walletAddr}` }]);
+    }
+    inline_keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'wallet_remove|all' }]);
+
+    const replyMarkup = appendCloseButton({ inline_keyboard }, lang, { backCallbackData: 'wallet_overview' });
+
+    return {
+        text: lines.join('\n'),
+        replyMarkup
+    };
+}
+
+function parseRegisterPayload(rawText) {
+    if (!rawText || typeof rawText !== 'string') {
+        return null;
+    }
+
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 1) {
+        return null;
+    }
+
+    const wallet = normalizeAddressSafe(parts[0]);
+    if (!wallet) {
+        return null;
+    }
+
+    return { wallet, tokens: [] };
+}
+
 const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
-    stats: { command: '/stats', icon: '📊', descKey: 'help_command_stats' },
+    rules: { command: '/rules', icon: '📜', descKey: 'help_command_rules' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
-    banmaoprice: { command: '/banmaoprice', icon: '💰', descKey: 'help_command_banmaoprice' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
@@ -427,7 +1305,7 @@ const HELP_COMMAND_DETAILS = {
     checkin: { command: '/checkin', icon: '✅', descKey: 'help_command_checkin' },
     topcheckin: { command: '/topcheckin', icon: '🏆', descKey: 'help_command_topcheckin' },
     admin: { command: '/admin', icon: '🛠️', descKey: 'help_command_admin' },
-    checkinadmin: { command: '/checkinadmin', icon: '🛡️', descKey: 'help_command_checkin_admin' },
+    checkinadmin: { command: '/checkinadmin', icon: '🛡️', descKey: 'help_command_checkin_admin' }
 };
 
 const HELP_GROUP_DETAILS = {
@@ -453,7 +1331,7 @@ const HELP_GROUP_DETAILS = {
         icon: '📈',
         titleKey: 'help_group_insights_title',
         descKey: 'help_group_insights_desc',
-        commands: ['stats', 'banmaoprice', 'okxchains', 'okx402status']
+        commands: ['rules', 'okxchains', 'okx402status']
     },
     support: {
         icon: '🎁',
@@ -467,13 +1345,42 @@ const HELP_GROUP_DETAILS = {
         descKey: 'help_group_checkin_desc',
         commands: ['checkin', 'topcheckin']
     },
-    admin_tools: {
+    admin_root: {
         icon: '🛠️',
-        titleKey: 'help_group_admin_title',
-        descKey: 'help_group_admin_desc',
-        commands: ['admin', 'checkinadmin']
+        titleKey: 'help_group_admin_root_title',
+        descKey: 'help_group_admin_root_desc',
+        commands: ['admin']
+    },
+    admin_checkin: {
+        icon: '🧭',
+        titleKey: 'help_group_admin_checkin_title',
+        descKey: 'help_group_admin_checkin_desc',
+        commands: ['checkinadmin']
     }
 };
+
+const ADMIN_SUBCOMMANDS = [
+    { command: '/admin mute [user] [time] [reason]', descKey: 'admin_cmd_desc_mute' },
+    { command: '/admin warn [user] [reason]', descKey: 'admin_cmd_desc_warn' },
+    { command: '/admin warnings [user]', descKey: 'admin_cmd_desc_warnings' },
+    { command: '/admin purge [count]', descKey: 'admin_cmd_desc_purge' },
+    { command: '/admin set_captcha (on/off)', descKey: 'admin_cmd_desc_set_captcha' },
+    { command: '/admin set_rules [message]', descKey: 'admin_cmd_desc_set_rules' },
+    { command: '/admin add_blacklist [word]', descKey: 'admin_cmd_desc_add_blacklist' },
+    { command: '/admin remove_blacklist [word]', descKey: 'admin_cmd_desc_remove_blacklist' },
+    { command: '/admin set_xp [user] [amount]', descKey: 'admin_cmd_desc_set_xp' },
+    { command: '/admin update_info', descKey: 'admin_cmd_desc_update_info' },
+    { command: '/admin status', descKey: 'admin_cmd_desc_status' },
+    { command: '/admin toggle_predict', descKey: 'admin_cmd_desc_toggle_predict' },
+    { command: '/admin set_xp_react (on/off)', descKey: 'admin_cmd_desc_set_xp_react' },
+    { command: '/admin whale', descKey: 'admin_cmd_desc_whale' },
+    { command: '/admin draw [prize] [rules]', descKey: 'admin_cmd_desc_draw' },
+    { command: '/admin review_memes', descKey: 'admin_cmd_desc_review_memes' },
+    { command: '/admin approve [id]', descKey: 'admin_cmd_desc_approve' },
+    { command: '/admin reject [id]', descKey: 'admin_cmd_desc_reject' },
+    { command: '/admin announce [message]', descKey: 'admin_cmd_desc_announce' },
+    { command: '/admin track [address] [name]', descKey: 'admin_cmd_desc_track' }
+];
 
 const HELP_USER_SECTIONS = [
     {
@@ -489,7 +1396,7 @@ const HELP_USER_SECTIONS = [
 const HELP_ADMIN_SECTIONS = [
     {
         titleKey: 'help_section_admin_title',
-        groups: ['admin_tools']
+        groups: ['admin_root', 'admin_checkin']
     }
 ];
 
@@ -714,6 +1621,41 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
 
     inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
     return { inline_keyboard };
+}
+
+function buildAdminCommandCheatsheet(lang) {
+    const lines = [t(lang, 'admin_command_list_title')];
+    const hint = t(lang, 'admin_command_list_hint');
+    if (hint) {
+        lines.push(hint);
+    }
+
+    lines.push('', t(lang, 'admin_command_admin_header'));
+    for (const action of ADMIN_SUBCOMMANDS) {
+        lines.push(`${ADMIN_DETAIL_BULLET}${action.command} — ${t(lang, action.descKey)}`);
+    }
+
+    lines.push('', t(lang, 'admin_command_checkin_header'));
+    lines.push(`${ADMIN_DETAIL_BULLET}/checkinadmin — ${t(lang, 'admin_cmd_desc_checkinadmin')}`);
+
+    const inline_keyboard = [];
+    inline_keyboard.push([{ text: t(lang, 'admin_command_button_admin'), callback_data: 'admin_cmd|about_admin' }]);
+    inline_keyboard.push([{ text: t(lang, 'admin_command_button_checkin'), callback_data: 'admin_cmd|checkinadmin' }]);
+
+    for (let i = 0; i < ADMIN_SUBCOMMANDS.length; i += 2) {
+        const row = [];
+        for (let j = i; j < Math.min(i + 2, ADMIN_SUBCOMMANDS.length); j += 1) {
+            const cmd = ADMIN_SUBCOMMANDS[j];
+            row.push({ text: cmd.command, callback_data: `admin_cmd|${j}` });
+        }
+        if (row.length > 0) {
+            inline_keyboard.push(row);
+        }
+    }
+
+    inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'admin_cmd_close' }]);
+
+    return { text: lines.join('\n'), replyMarkup: { inline_keyboard } };
 }
 
 function buildSyntheticCommandMessage(query) {
@@ -3696,18 +4638,6 @@ async function getBanmaoTokenDecimals(chainName) {
         console.warn(`[BanmaoDecimals] Failed to load token profile: ${error.message}`);
     }
 
-    try {
-        const directory = await fetchOkxTokenDirectory(chainName);
-        const match = directory?.byAddressLower?.get(BANMAO_ADDRESS_LOWER);
-        if (match && Number.isFinite(match.decimals)) {
-            banmaoDecimalsCache = Math.max(0, Math.trunc(match.decimals));
-            banmaoDecimalsFetchedAt = now;
-            return banmaoDecimalsCache;
-        }
-    } catch (error) {
-        console.warn(`[BanmaoDecimals] Failed to load token directory: ${error.message}`);
-    }
-
     return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
 }
 
@@ -3751,18 +4681,6 @@ async function resolveTokenDecimals(tokenAddress, options = {}) {
         console.warn(`[TokenDecimals] Failed to resolve decimals for ${tokenAddress}: ${error.message}`);
     }
 
-    try {
-        const directory = await fetchOkxTokenDirectory(chainName, { chainIndex });
-        const match = directory?.byAddressLower?.get(lower);
-        if (match && Number.isFinite(match.decimals)) {
-            const normalizedDecimals = Math.max(0, Math.trunc(match.decimals));
-            tokenDecimalsCache.set(lower, { value: normalizedDecimals, expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
-            return normalizedDecimals;
-        }
-    } catch (error) {
-        console.warn(`[TokenDecimals] Failed to query directory for ${tokenAddress}: ${error.message}`);
-    }
-
     tokenDecimalsCache.set(lower, { value: fallback, expiresAt: now + (BANMAO_DECIMALS_CACHE_TTL / 2) });
     return fallback;
 }
@@ -3799,6 +4717,30 @@ function parseBigIntValue(value) {
     }
 
     return null;
+}
+
+function formatBigIntValue(value, decimals = 18, options = {}) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    let bigIntValue;
+    try {
+        bigIntValue = BigInt(value);
+    } catch (error) {
+        return null;
+    }
+
+    let safeDecimals = Number(decimals);
+    if (!Number.isFinite(safeDecimals) || safeDecimals < 0) {
+        safeDecimals = 18;
+    }
+
+    try {
+        return ethers.formatUnits(bigIntValue, safeDecimals, options);
+    } catch (error) {
+        return null;
+    }
 }
 
 function extractOkxTokenUnitPrice(token) {
@@ -4388,7 +5330,58 @@ async function fetchBanmaoMarketSnapshot() {
 }
 
 async function fetchBanmaoMarketSnapshotForChain(chainName) {
-    const query = await buildOkxDexQuery(chainName);
+    if (!OKX_BANMAO_TOKEN_ADDRESS) {
+        throw new Error('Missing OKX_BANMAO_TOKEN_ADDRESS');
+    }
+    return fetchTokenMarketSnapshotForChain({ chainName, tokenAddress: OKX_BANMAO_TOKEN_ADDRESS });
+}
+
+async function fetchTokenMarketSnapshot(options = {}) {
+    const { tokenAddress, chainName } = options;
+    if (!tokenAddress) {
+        return null;
+    }
+
+    const normalized = normalizeOkxConfigAddress(tokenAddress) || tokenAddress;
+    if (!normalized) {
+        return null;
+    }
+
+    const errors = [];
+    const chainCandidates = chainName ? [chainName] : getOkxChainShortNameCandidates();
+
+    for (const candidate of chainCandidates) {
+        try {
+            const snapshot = await fetchTokenMarketSnapshotForChain({ chainName: candidate, tokenAddress: normalized });
+            if (snapshot) {
+                return snapshot;
+            }
+        } catch (error) {
+            errors.push(error);
+        }
+    }
+
+    try {
+        const fallbackSnapshot = await fetchTokenMarketSnapshotForChain({ tokenAddress: normalized });
+        if (fallbackSnapshot) {
+            return fallbackSnapshot;
+        }
+    } catch (error) {
+        errors.push(error);
+    }
+
+    if (errors.length > 0) {
+        throw errors[errors.length - 1];
+    }
+
+    return null;
+}
+
+async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
+    if (!tokenAddress) {
+        return null;
+    }
+    const query = await buildOkxDexQuery(chainName, { tokenAddress });
     const chainLabel = query.chainShortName || chainName || '(default)';
     const errors = [];
 
@@ -4414,13 +5407,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
     }
 
     if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
-        try {
-            const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/tokenPrice', { query });
-            priceEntry = unwrapOkxFirst(payload);
-            source = 'OKX DEX tokenPrice';
-        } catch (error) {
-            errors.push(new Error(`[tokenPrice:${chainLabel}] ${error.message}`));
-        }
+        // fallback handled below
     }
 
     const tokenPrices = collectOkxTokenUnitPrices(priceEntry || priceInfoEntry);
@@ -4481,55 +5468,278 @@ async function fetchBanmaoTokenProfile(options = {}) {
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
     return unwrapOkxFirst(payload);
 }
-
-async function fetchOkxTokenDirectory(chainName, options = {}) {
-    const { chainIndex } = options;
-    const query = await buildOkxDexQuery(chainName, {
-        includeToken: false,
-        includeQuote: false,
-        explicitChainIndex: chainIndex
-    });
-
-    const cacheKey = `${query.chainIndex || 'na'}|${(query.chainShortName || '').toLowerCase()}`;
-    const now = Date.now();
-    const cached = okxTokenDirectoryCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-        return cached.value;
+function decimalToRawBigInt(amount, decimals) {
+    if (!Number.isFinite(Number(decimals))) {
+        return null;
     }
 
-    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', { query });
-    const rows = unwrapOkxData(payload);
+    if (amount === undefined || amount === null) {
+        return null;
+    }
 
-    const tokens = [];
-    const byAddressLower = new Map();
+    const amountStr = String(amount).trim();
+    if (!amountStr) {
+        return null;
+    }
 
-    if (Array.isArray(rows)) {
-        for (const row of rows) {
-            const token = normalizeOkxTokenDirectoryToken(row);
-            if (!token) {
+    const decimalsInt = Number(decimals);
+    const [intPart, fracPartRaw = ''] = amountStr.split('.');
+    const fracPart = fracPartRaw.slice(0, Math.max(0, decimalsInt));
+    const paddedFrac = fracPart.padEnd(Math.max(0, decimalsInt), '0');
+    const combined = `${intPart || '0'}${paddedFrac}`.replace(/^0+(?=\d)/, '');
+
+    try {
+        return BigInt(combined || '0');
+    } catch (error) {
+        return null;
+    }
+}
+
+function normalizeDexHolding(row) {
+    if (!row) {
+        return null;
+    }
+
+    const tokenAddress = normalizeOkxConfigAddress(
+        row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr
+    );
+
+    if (!tokenAddress) {
+        return null;
+    }
+
+    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals);
+    const symbol = row.tokenSymbol || row.symbol;
+    const name = row.tokenName || row.name;
+    const rawBalance = row.balance || row.tokenBalance || row.amount || row.holdingAmount || row.holding || row.tokenAmount;
+
+    let amountRaw = null;
+    if (rawBalance !== undefined && rawBalance !== null) {
+        try {
+            amountRaw = BigInt(rawBalance);
+        } catch (error) {
+            amountRaw = null;
+        }
+    } else if (row.coinAmount !== undefined && row.coinAmount !== null && Number.isFinite(decimals)) {
+        amountRaw = decimalToRawBigInt(row.coinAmount, decimals);
+    }
+
+    const currencyAmount = Number(row.currencyAmount);
+    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice))
+        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice)
+        : null;
+
+    if ((!Number.isFinite(priceUsd) || priceUsd === null) && amountRaw !== null && Number.isFinite(decimals) && Number.isFinite(currencyAmount) && currencyAmount > 0) {
+        try {
+            const amountNumeric = Number(ethers.formatUnits(amountRaw, decimals));
+            if (Number.isFinite(amountNumeric) && amountNumeric > 0) {
+                priceUsd = currencyAmount / amountNumeric;
+            }
+        } catch (error) {
+            // ignore price derivation errors
+        }
+    }
+
+    return {
+        tokenAddress,
+        decimals: Number.isFinite(decimals) ? decimals : undefined,
+        symbol,
+        name,
+        amountRaw,
+        currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
+        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
+    };
+}
+
+function extractDexHoldingRows(payload) {
+    const rows = [];
+    if (!payload || typeof payload !== 'object') {
+        return rows;
+    }
+
+    const direct = unwrapOkxData(payload);
+    if (Array.isArray(direct)) {
+        for (const item of direct) {
+            if (!item) {
                 continue;
             }
+            if (Array.isArray(item.tokenBalance)) {
+                rows.push(...item.tokenBalance);
+            }
+            if (Array.isArray(item.tokenBalances)) {
+                rows.push(...item.tokenBalances);
+            }
+            if (Array.isArray(item.balanceList)) {
+                rows.push(...item.balanceList);
+            }
+            if (Array.isArray(item.balances)) {
+                rows.push(...item.balances);
+            }
+            if (Array.isArray(item.list)) {
+                rows.push(...item.list);
+            }
+            rows.push(item);
+        }
+    }
 
-            tokens.push(token);
-            if (!byAddressLower.has(token.addressLower)) {
-                byAddressLower.set(token.addressLower, token);
+    const nested = payload.data && typeof payload.data === 'object' ? payload.data : null;
+    if (nested) {
+        const candidates = [
+            nested.tokenBalance,
+            nested.tokenBalances,
+            nested.balanceList,
+            nested.balances,
+            nested.list
+        ];
+        for (const candidate of candidates) {
+            if (Array.isArray(candidate)) {
+                rows.push(...candidate);
             }
         }
     }
 
-    const directory = {
-        tokens,
-        byAddressLower,
-        chainIndex: query.chainIndex ?? null,
-        chainShortName: query.chainShortName || null
+    return rows;
+}
+
+async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!normalized) {
+        return { tokens: [], totalUsd: null };
+    }
+
+    const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
+    const chainShortName = normalizeShort(options.chainContext?.chainShortName) || normalizeShort(OKX_CHAIN_SHORT_NAME) || 'xlayer';
+    const chainIdNumbers = Array.from(new Set([
+        Number(options.chainContext?.chainId),
+        Number(options.chainContext?.chainIndex),
+        ...(Array.isArray(options.chainContext?.chains) ? options.chainContext.chains : []),
+        Number(OKX_CHAIN_INDEX_FALLBACK),
+        196
+    ].filter((value) => Number.isFinite(value))));
+    const chainIdList = chainIdNumbers.length > 0 ? chainIdNumbers : [196];
+
+    const query = {
+        address: normalized,
+        walletAddress: normalized,
+        chains: chainIdList,
+        chainId: chainIdList[0],
+        chainIndex: chainIdList[0],
+        chainShortName
     };
 
-    okxTokenDirectoryCache.set(cacheKey, {
-        value: directory,
-        expiresAt: now + OKX_TOKEN_DIRECTORY_TTL
-    });
+    let holdings = [];
+    let totalUsd = null;
 
-    return directory;
+    try {
+        const response = await okxJsonRequest('GET', '/api/v6/dex/balance/all-token-balances-by-address', {
+            query,
+            auth: hasOkxCredentials,
+            expectOkCode: false
+        });
+
+        const rows = extractDexHoldingRows(response);
+        holdings = rows
+            .map((row) => normalizeDexHolding(row))
+            .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
+
+        const responseTotal = extractDexTotalValue(response);
+        totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
+    } catch (error) {
+        console.warn(`[DexHoldings] Balance API failed via GET all-token-balances-by-address: ${error.message}`);
+    }
+
+    if (!Number.isFinite(totalUsd)) {
+        try {
+            const totalResponse = await okxJsonRequest('GET', '/api/v6/dex/balance/total-value-by-address', {
+                query,
+                auth: hasOkxCredentials,
+                expectOkCode: false
+            });
+            const derivedTotal = extractDexTotalValue(totalResponse);
+            if (Number.isFinite(derivedTotal)) {
+                totalUsd = derivedTotal;
+            }
+        } catch (error) {
+            console.warn(`[DexHoldings] Total value API failed via GET total-value-by-address: ${error.message}`);
+        }
+    }
+
+    if (!Number.isFinite(totalUsd) && Array.isArray(holdings) && holdings.length > 0) {
+        const derived = holdings.reduce((sum, item) => {
+            if (Number.isFinite(item?.currencyAmount) && item.currencyAmount > 0) {
+                return sum + item.currencyAmount;
+            }
+            if (item?.amountRaw !== null && item?.decimals !== undefined && Number.isFinite(item?.priceUsd)) {
+                try {
+                    const amount = Number(ethers.formatUnits(item.amountRaw, item.decimals));
+                    if (Number.isFinite(amount) && amount > 0) {
+                        return sum + amount * item.priceUsd;
+                    }
+                } catch (error) {
+                    // ignore formatting errors
+                }
+            }
+            return sum;
+        }, 0);
+
+        if (Number.isFinite(derived) && derived > 0) {
+            totalUsd = derived;
+        }
+    }
+
+    if (Array.isArray(holdings) && holdings.length > 0) {
+        return { tokens: holdings, totalUsd: Number.isFinite(totalUsd) ? totalUsd : null };
+    }
+
+    return { tokens: [], totalUsd: Number.isFinite(totalUsd) ? totalUsd : null };
+}
+
+function extractDexTotalValue(payload) {
+    const candidates = [];
+    const data = unwrapOkxFirst(payload) || (payload && typeof payload === 'object' ? payload.data : null);
+
+    const pushCandidate = (value) => {
+        if (value === undefined || value === null) {
+            return;
+        }
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) {
+            candidates.push(numeric);
+        }
+    };
+
+    if (data && typeof data === 'object') {
+        pushCandidate(data.totalValue);
+        pushCandidate(data.totalValueByAddress);
+        pushCandidate(data.totalValueByToken);
+        pushCandidate(data.totalBalance);
+        pushCandidate(data.totalUsdBalance);
+        pushCandidate(data.totalUsdValue);
+        pushCandidate(data.totalFiatValue);
+    }
+
+    pushCandidate(payload?.totalValue);
+    pushCandidate(payload?.totalValueByAddress);
+    pushCandidate(payload?.totalValueByToken);
+    pushCandidate(payload?.totalBalance);
+    pushCandidate(payload?.totalUsdBalance);
+    pushCandidate(payload?.totalUsdValue);
+    pushCandidate(payload?.totalFiatValue);
+
+    return candidates.find((value) => Number.isFinite(value) && value > 0) || null;
+}
+
+async function fetchOkxDexWalletHoldings(walletAddress, options = {}) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!normalized) {
+        return { tokens: [], totalUsd: null };
+    }
+
+    const balanceSnapshot = await fetchOkxDexBalanceSnapshot(normalized, options);
+    if (Array.isArray(balanceSnapshot.tokens) && balanceSnapshot.tokens.length > 0) {
+        return { tokens: balanceSnapshot.tokens, totalUsd: balanceSnapshot.totalUsd };
+    }
+    return { tokens: [], totalUsd: balanceSnapshot.totalUsd || null };
 }
 
 async function fetchOkxSupportedChains() {
@@ -4591,6 +5801,15 @@ async function fetchOkxSupportedChains() {
         aggregator: formatList(directory?.aggregator || []),
         market: formatList(directory?.market || [])
     };
+}
+
+async function fetchOkxBalanceSupportedChains() {
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/balance/supported/chain', { query: {}, expectOkCode: false });
+    const raw = unwrapOkxData(payload) || [];
+    const normalized = raw
+        .map((entry) => normalizeOkxChainEntry(entry))
+        .filter(Boolean);
+    return dedupeOkxChainEntries(normalized);
 }
 
 async function fetchOkx402Supported() {
@@ -4997,7 +6216,7 @@ async function resolveOkxChainContext(chainName) {
     }
 
     if (!match) {
-        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'xlayer';
         const fallbackKeys = collectChainSearchKeys(fallbackShortName);
         match = {
             chainShortName: fallbackShortName,
@@ -5064,7 +6283,7 @@ async function buildOkxDexQuery(chainName, options = {}) {
     }
 
     if (!query.chainShortName) {
-        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'xlayer';
     }
 
     if (!Number.isFinite(query.chainIndex)) {
@@ -5072,6 +6291,14 @@ async function buildOkxDexQuery(chainName, options = {}) {
             query.chainIndex = Number(OKX_CHAIN_INDEX);
         } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
             query.chainIndex = OKX_CHAIN_INDEX_FALLBACK;
+        }
+    }
+
+    if (!Number.isFinite(query.chainId)) {
+        if (Number.isFinite(query.chainIndex)) {
+            query.chainId = Number(query.chainIndex);
+        } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
+            query.chainId = Number(OKX_CHAIN_INDEX_FALLBACK);
         }
     }
 
@@ -5105,6 +6332,14 @@ async function okxJsonRequest(method, path, options = {}) {
     if (query && typeof query === 'object') {
         for (const [key, value] of Object.entries(query)) {
             if (value === undefined || value === null || value === '') {
+                continue;
+            }
+            if (Array.isArray(value)) {
+                const filtered = value.filter((item) => item !== undefined && item !== null && item !== '');
+                if (filtered.length === 0) {
+                    continue;
+                }
+                filtered.forEach((item) => url.searchParams.append(key, String(item)));
                 continue;
             }
             url.searchParams.set(key, String(value));
@@ -5507,6 +6742,46 @@ function startApiServer() {
     app.use(cors());
     app.use(express.json());
 
+    app.get('/webview/portfolio/:wallet', (req, res) => {
+        const normalized = normalizeAddressSafe(req.params.wallet);
+        if (!normalized) {
+            res.status(400).send('Invalid wallet');
+            return;
+        }
+
+        const portfolioUrl = `${OKX_BASE_URL.replace(/\/$/, '')}/portfolio/${normalized}`;
+        const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Xlayer Portfolio Preview</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #0b1021; color: #e5e8f0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    header { padding: 12px 16px; background: #0f162d; border-bottom: 1px solid #1f2a44; display: flex; align-items: center; gap: 12px; }
+    header .title { font-weight: 700; font-size: 14px; letter-spacing: 0.4px; text-transform: uppercase; color: #8ab4ff; }
+    header .addr { font-weight: 600; color: #e5e8f0; font-size: 13px; }
+    iframe { width: 100%; height: calc(100% - 54px); border: none; background: #0b1021; }
+    .fallback { padding: 16px; text-align: center; }
+    .fallback a { color: #8ab4ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">Xlayer - BOT</div>
+    <div class="addr">${normalized}</div>
+  </header>
+  <iframe src="${portfolioUrl}" title="OKX Portfolio"></iframe>
+  <noscript>
+    <div class="fallback">JavaScript is required. <a href="${portfolioUrl}" target="_blank" rel="noopener noreferrer">Open in browser</a>.</div>
+  </noscript>
+</body>
+</html>`;
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+    });
+
     // API cho DApp (Deep Link) - Cần async
     app.post('/api/generate-token', async (req, res) => {
         try {
@@ -5591,75 +6866,55 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: 'Markdown' });
     }
 
-    async function handleRegisterWithAddress(msg, address) {
+    async function handleRegisterCommand(msg, payload) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
+        if (!payload || !payload.trim()) {
+            await sendReply(msg, t(lang, 'register_usage'), { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
+            return;
+        }
+
+        const parsed = parseRegisterPayload(payload);
+        if (!parsed) {
+            await sendReply(msg, t(lang, 'register_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
         try {
-            const normalizedAddr = ethers.getAddress(address);
-            await db.addWalletToUser(chatId, lang, normalizedAddr);
-            const message = t(lang, 'register_success', { walletAddress: normalizedAddr });
-            sendReply(msg, message, { parse_mode: 'Markdown' });
-            console.log(`[BOT] Thêm ví (Manual): ${normalizedAddr} -> ${chatId} (lang: ${lang})`);
+            const result = await db.addWalletToUser(chatId, lang, parsed.wallet);
+            seedWalletWatcher(parsed.wallet, [
+                ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
+                ...OKX_OKB_TOKEN_ADDRESSES
+            ]);
+
+            const messageKey = result?.added ? 'register_wallet_saved' : 'register_wallet_exists';
+            const message = t(lang, messageKey, { wallet: shortenAddress(parsed.wallet) });
+            const portfolioLinks = [{ address: parsed.wallet, url: buildPortfolioEmbedUrl(parsed.wallet) }];
+            await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang, portfolioLinks) });
+            console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: auto-detect)`);
         } catch (error) {
-            const message = t(lang, 'register_invalid_address');
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            console.error(`[Register] Failed to save token for ${chatId}: ${error.message}`);
+            await sendReply(msg, t(lang, 'register_help_error'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
         }
     }
 
     async function handleMyWalletCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length > 0) {
-            let message = t(lang, 'mywallet_list_header', { count: wallets.length }) + '\n\n';
-            wallets.forEach((wallet) => { message += `• \`${wallet}\`\n`; });
-            message += `\n${t(lang, 'mywallet_list_footer')}`;
-            sendReply(msg, message, { parse_mode: 'Markdown' });
-        } else {
-            sendReply(msg, t(lang, 'mywallet_not_linked'), { parse_mode: 'Markdown' });
+        try {
+            const menu = await buildWalletChainMenu(lang);
+            await sendReply(msg, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+        } catch (error) {
+            console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
+            const fallback = t(lang, 'wallet_overview_error');
+            await sendReply(msg, fallback, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang) });
         }
-    }
-
-    async function handleStatsCommand(msg) {
-        const chatId = msg.chat.id.toString();
-        const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'stats_no_wallet'));
-            return;
-        }
-
-        const totalStats = { games: 0, wins: 0, losses: 0, draws: 0, totalWon: 0, totalLost: 0 };
-        for (const wallet of wallets) {
-            const stats = await db.getStats(wallet);
-            totalStats.games += stats.games;
-            totalStats.wins += stats.wins;
-            totalStats.losses += stats.losses;
-            totalStats.draws += stats.draws;
-            totalStats.totalWon += stats.totalWon;
-            totalStats.totalLost += stats.totalLost;
-        }
-
-        if (totalStats.games === 0) {
-            sendReply(msg, t(lang, 'stats_no_games'));
-            return;
-        }
-
-        const winRate = totalStats.games > 0 ? (totalStats.wins / totalStats.games * 100).toFixed(0) : 0;
-        const netProfit = totalStats.totalWon - totalStats.totalLost;
-        let message = t(lang, 'stats_header', { wallets: wallets.length, games: totalStats.games }) + '\n\n';
-        message += `• ${t(lang, 'stats_line_1', { wins: totalStats.wins, losses: totalStats.losses, draws: totalStats.draws })}\n`;
-        message += `• ${t(lang, 'stats_line_2', { rate: winRate })}\n`;
-        message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
-        message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
-        message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        sendReply(msg, message, { parse_mode: 'Markdown' });
     }
 
     async function handleDonateCommand(msg) {
         const lang = await getLang(msg);
         const text = buildDonateMessage(lang);
-        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: buildCloseKeyboard(lang) });
     }
 
     async function handleOkxChainsCommand(msg) {
@@ -5683,10 +6938,10 @@ function startTelegramBot() {
                 marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
             ];
 
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
         } catch (error) {
             console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
-            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
         }
     }
 
@@ -5700,11 +6955,33 @@ function startTelegramBot() {
                     ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
                     : t(lang, 'okx402_not_supported')
             ];
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
         } catch (error) {
             console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
-            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
+            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
         }
+    }
+
+    async function handleRulesCommand(msg) {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
+        if (!isGroupChat) {
+            await sendReply(msg, t(lang, 'rules_private_hint'));
+            return;
+        }
+
+        const rules = await db.getGroupRules(chatId);
+        if (!rules) {
+            await sendReply(msg, t(lang, 'rules_not_configured'));
+            return;
+        }
+
+        const text = [t(lang, 'rules_title'), '', rules].join('\n');
+        await sendReply(msg, text, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: t(lang, 'rules_button_close'), callback_data: 'rules_close' }]] }
+        });
     }
 
     async function handleBanmaoPriceCommand(msg) {
@@ -5803,19 +7080,10 @@ function startTelegramBot() {
     async function handleUnregisterCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const wallets = await db.getWalletsForUser(chatId);
-        if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'mywallet_not_linked'));
-            return;
-        }
-
-        const keyboard = wallets.map((wallet) => {
-            const shortWallet = `${wallet.substring(0, 5)}...${wallet.substring(wallet.length - 4)}`;
-            return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
-        });
-        keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        sendReply(msg, t(lang, 'unregister_header'), {
-            reply_markup: { inline_keyboard: keyboard }
+        const menu = await buildUnregisterMenu(lang, chatId);
+        await sendReply(msg, menu.text, {
+            parse_mode: 'HTML',
+            reply_markup: menu.replyMarkup || undefined
         });
     }
 
@@ -5887,11 +7155,12 @@ function startTelegramBot() {
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
         const lang = resolveLangCode(msg.from.language_code);
-        const walletAddress = await db.getPendingWallet(token); 
+        const walletAddress = await db.getPendingWallet(token);
         if (walletAddress) {
-            await db.addWalletToUser(chatId, lang, walletAddress);
+            const result = await db.addWalletToUser(chatId, lang, walletAddress);
             await db.deletePendingToken(token);
-            const message = t(lang, 'connect_success', { walletAddress: walletAddress });
+            const messageKey = result?.added ? 'connect_success' : 'register_wallet_exists';
+            const message = t(lang, messageKey, { walletAddress: walletAddress, wallet: shortenAddress(walletAddress) });
             sendReply(msg, message, { parse_mode: "Markdown" });
             console.log(`[BOT] Liên kết (DApp): ${walletAddress} -> ${chatId} (lang: ${lang})`);
         } else {
@@ -5907,19 +7176,14 @@ function startTelegramBot() {
     });
 
     // COMMAND: /register - Cần async
-    bot.onText(/\/register (.+)/, async (msg, match) => {
-        const address = match[1];
-        await handleRegisterWithAddress(msg, address);
+    bot.onText(/^\/register(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        const payload = match[1];
+        await handleRegisterCommand(msg, payload);
     });
 
     // COMMAND: /mywallet - Cần async
     bot.onText(/\/mywallet/, async (msg) => {
         await handleMyWalletCommand(msg);
-    });
-
-    // COMMAND: /stats - Cần async
-    bot.onText(/\/stats/, async (msg) => {
-        await handleStatsCommand(msg);
     });
 
     // COMMAND: /donate - Cần async
@@ -5976,7 +7240,371 @@ function startTelegramBot() {
         await handleOkxChainsCommand(msg);
     });
 
-    async function handleAdminCommand(msg) {
+    function parseDurationText(value) {
+        if (!value) {
+            return null;
+        }
+        const match = String(value).trim().match(/^(\d+)([smhd])$/i);
+        if (!match) {
+            return null;
+        }
+        const amount = Number(match[1]);
+        const unit = match[2].toLowerCase();
+        const map = { s: 1, m: 60, h: 3600, d: 86400 };
+        const multiplier = map[unit];
+        if (!multiplier) {
+            return null;
+        }
+        return amount * multiplier;
+    }
+
+    function resolveCommandTarget(msg, explicitArg) {
+        if (msg.reply_to_message?.from?.id) {
+            const targetUser = msg.reply_to_message.from;
+            return {
+                id: targetUser.id,
+                name: targetUser.first_name || targetUser.username || String(targetUser.id)
+            };
+        }
+
+        if (explicitArg && /^\d+$/.test(explicitArg)) {
+            return { id: Number(explicitArg), name: explicitArg };
+        }
+
+        return null;
+    }
+
+    async function sendAdminCommandList(targetChatId, lang, replyToMessageId = null) {
+        try {
+            const cheatsheet = buildAdminCommandCheatsheet(lang);
+            await bot.sendMessage(targetChatId, cheatsheet.text, {
+                reply_to_message_id: replyToMessageId,
+                allow_sending_without_reply: true,
+                reply_markup: cheatsheet.replyMarkup
+            });
+        } catch (error) {
+            console.error(`[AdminCommand] Failed to send cheatsheet to ${targetChatId}: ${error.message}`);
+        }
+    }
+
+    async function handleAdminActionCommand(msg, rawArgs) {
+        const lang = await getLang(msg);
+        const chatType = msg.chat.type;
+        if (!['group', 'supergroup'].includes(chatType)) {
+            await sendReply(msg, t(lang, 'admin_action_group_only'));
+            return;
+        }
+
+        const chatId = msg.chat.id.toString();
+        const adminId = msg.from?.id;
+        if (!adminId) {
+            return;
+        }
+
+        const isAdmin = await isGroupAdmin(chatId, adminId);
+        if (!isAdmin) {
+            await sendReply(msg, t(lang, 'admin_action_no_permission'));
+            return;
+        }
+
+        const args = (rawArgs || '').trim();
+        if (!args) {
+            await sendReply(msg, t(lang, 'admin_action_missing_args'));
+            return;
+        }
+
+        const [action, ...restParts] = args.split(/\s+/);
+        const command = action.toLowerCase();
+        const rest = [...restParts];
+        const defaultReplyOptions = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
+
+        const sendFeedback = async (text) => {
+            if (text) {
+                await bot.sendMessage(chatId, text, { ...defaultReplyOptions, parse_mode: 'Markdown' });
+            }
+        };
+
+        try {
+            switch (command) {
+                case 'mute': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_mute_invalid'));
+                        break;
+                    }
+                    const durationArg = rest.shift();
+                    const seconds = parseDurationText(durationArg) || 600;
+                    const untilDate = Math.floor(Date.now() / 1000) + seconds;
+                    const permissions = {
+                        can_send_messages: false,
+                        can_send_media_messages: false,
+                        can_send_polls: false,
+                        can_send_other_messages: false,
+                        can_add_web_page_previews: false,
+                        can_change_info: false,
+                        can_invite_users: false,
+                        can_pin_messages: false
+                    };
+                    await bot.restrictChatMember(chatId, target.id, { permissions, until_date: untilDate });
+                    await sendFeedback(t(lang, 'admin_mute_success', {
+                        user: target.name,
+                        minutes: Math.ceil(seconds / 60).toString()
+                    }));
+                    break;
+                }
+                case 'warn': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_warn_invalid'));
+                        break;
+                    }
+                    const reason = rest.join(' ') || t(lang, 'admin_warn_default_reason');
+                    await db.addWarning({
+                        chatId,
+                        targetUserId: target.id,
+                        targetUsername: msg.reply_to_message?.from?.username || null,
+                        reason,
+                        createdBy: adminId
+                    });
+                    const warnings = await db.getWarnings(chatId, target.id);
+                    await sendFeedback(t(lang, 'admin_warn_success', {
+                        user: target.name,
+                        count: warnings.length.toString(),
+                        reason
+                    }));
+                    break;
+                }
+                case 'warnings': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    if (!target) {
+                        await sendFeedback(t(lang, 'admin_warn_invalid'));
+                        break;
+                    }
+                    const warnings = await db.getWarnings(chatId, target.id);
+                    if (!warnings.length) {
+                        await sendFeedback(t(lang, 'admin_warnings_none', { user: target.name }));
+                        break;
+                    }
+                    const lines = warnings.map((warning, index) => {
+                        const time = new Date(Number(warning.createdAt || 0)).toLocaleString();
+                        return `${index + 1}. ${warning.reason || '—'} (${time})`;
+                    });
+                    await sendFeedback([t(lang, 'admin_warnings_header', { user: target.name }), ...lines].join('\n'));
+                    break;
+                }
+                case 'purge': {
+                    let count = parseInt(rest.shift(), 10);
+                    if (!Number.isFinite(count) || count <= 0) {
+                        count = 10;
+                    }
+                    count = Math.min(count, 100);
+                    let deleted = 0;
+                    const baseId = msg.reply_to_message?.message_id ?? msg.message_id;
+                    for (let i = 0; i < count; i += 1) {
+                        const targetMessageId = baseId - i - (msg.reply_to_message ? 0 : 1);
+                        if (targetMessageId <= 0) {
+                            break;
+                        }
+                        try {
+                            await bot.deleteMessage(chatId, targetMessageId);
+                            deleted += 1;
+                        } catch (error) {
+                            break;
+                        }
+                    }
+                    try {
+                        await bot.deleteMessage(chatId, msg.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                    await sendFeedback(t(lang, 'admin_purge_done', { count: deleted.toString() }));
+                    break;
+                }
+                case 'set_captcha': {
+                    const nextState = (rest.shift() || '').toLowerCase() === 'on';
+                    await db.updateGroupBotSettings(chatId, { captchaEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_captcha_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'set_rules': {
+                    const text = rest.join(' ') || msg.reply_to_message?.text;
+                    if (!text) {
+                        await sendFeedback(t(lang, 'admin_rules_missing'));
+                        break;
+                    }
+                    await db.setGroupRules(chatId, text, adminId);
+                    await sendFeedback(t(lang, 'admin_rules_updated'));
+                    break;
+                }
+                case 'add_blacklist': {
+                    const word = rest.join(' ');
+                    if (!word) {
+                        await sendFeedback(t(lang, 'admin_blacklist_missing'));
+                        break;
+                    }
+                    await db.addBlacklistWord(chatId, word);
+                    await sendFeedback(t(lang, 'admin_blacklist_added', { word }));
+                    break;
+                }
+                case 'remove_blacklist': {
+                    const word = rest.join(' ');
+                    if (!word) {
+                        await sendFeedback(t(lang, 'admin_blacklist_missing'));
+                        break;
+                    }
+                    await db.removeBlacklistWord(chatId, word);
+                    await sendFeedback(t(lang, 'admin_blacklist_removed', { word }));
+                    break;
+                }
+                case 'set_xp': {
+                    const targetArg = msg.reply_to_message ? null : rest.shift();
+                    const target = resolveCommandTarget(msg, targetArg);
+                    const amountArg = rest.shift();
+                    if (!target || !amountArg) {
+                        await sendFeedback(t(lang, 'admin_set_xp_invalid'));
+                        break;
+                    }
+                    const amount = Number(amountArg);
+                    if (!Number.isFinite(amount)) {
+                        await sendFeedback(t(lang, 'admin_set_xp_invalid'));
+                        break;
+                    }
+                    await db.setMemberXp(chatId, target.id, amount);
+                    await sendFeedback(t(lang, 'admin_set_xp_success', {
+                        user: target.name,
+                        amount: amount.toString()
+                    }));
+                    break;
+                }
+                case 'update_info': {
+                    await db.updateGroupBotSettings(chatId, { infoRefreshedAt: Date.now() });
+                    await sendFeedback(t(lang, 'admin_update_info_done'));
+                    break;
+                }
+                case 'status': {
+                    const settings = await db.getGroupBotSettings(chatId);
+                    const lines = [
+                        t(lang, 'admin_status_header', { chat: msg.chat.title || chatId }),
+                        t(lang, 'admin_status_line', { label: 'Captcha', value: settings.captchaEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Predict', value: settings.predictEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'XP React', value: settings.xpReactEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Whale Alerts', value: settings.whaleWatchEnabled ? 'ON' : 'OFF' }),
+                        t(lang, 'admin_status_line', { label: 'Tracked Wallets', value: (settings.trackedWallets?.length || 0).toString() })
+                    ];
+                    await sendFeedback(lines.join('\n'));
+                    break;
+                }
+                case 'toggle_predict': {
+                    const desired = (rest.shift() || '').toLowerCase();
+                    const settings = await db.getGroupBotSettings(chatId);
+                    let nextState = !settings.predictEnabled;
+                    if (desired === 'on') {
+                        nextState = true;
+                    } else if (desired === 'off') {
+                        nextState = false;
+                    }
+                    await db.updateGroupBotSettings(chatId, { predictEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_predict_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'set_xp_react': {
+                    const nextState = (rest.shift() || '').toLowerCase() === 'on';
+                    await db.updateGroupBotSettings(chatId, { xpReactEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_xp_react_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'whale': {
+                    const desired = (rest.shift() || '').toLowerCase();
+                    const settings = await db.getGroupBotSettings(chatId);
+                    let nextState = !settings.whaleWatchEnabled;
+                    if (desired === 'on') {
+                        nextState = true;
+                    } else if (desired === 'off') {
+                        nextState = false;
+                    }
+                    await db.updateGroupBotSettings(chatId, { whaleWatchEnabled: nextState });
+                    await sendFeedback(t(lang, 'admin_whale_status', { status: nextState ? 'ON' : 'OFF' }));
+                    break;
+                }
+                case 'draw': {
+                    const prize = rest.shift();
+                    const rules = rest.join(' ');
+                    if (!prize) {
+                        await sendFeedback(t(lang, 'admin_draw_invalid'));
+                        break;
+                    }
+                    const candidates = await db.getTopCheckins(chatId, 50, 'points');
+                    if (!candidates.length) {
+                        await sendFeedback(t(lang, 'admin_draw_no_candidates'));
+                        break;
+                    }
+                    const winner = candidates[Math.floor(Math.random() * candidates.length)];
+                    await sendFeedback(t(lang, 'admin_draw_result', { prize, winner: winner.userId, rules: rules || '—' }));
+                    break;
+                }
+                case 'review_memes': {
+                    const memes = await db.getPendingMemes(chatId);
+                    if (!memes.length) {
+                        await sendFeedback(t(lang, 'admin_review_memes_empty'));
+                        break;
+                    }
+                    const lines = memes.map((meme) => `#${meme.id} - ${meme.content.slice(0, 80)}`);
+                    await sendFeedback([t(lang, 'admin_review_memes_header'), ...lines].join('\n'));
+                    break;
+                }
+                case 'approve':
+                case 'reject': {
+                    const memeId = rest.shift();
+                    if (!memeId) {
+                        await sendFeedback(t(lang, 'admin_meme_invalid'));
+                        break;
+                    }
+                    const status = command === 'approve' ? 'approved' : 'rejected';
+                    await db.updateMemeStatus(memeId, status);
+                    await sendFeedback(t(lang, 'admin_review_memes_updated', { id: memeId, status }));
+                    break;
+                }
+                case 'announce': {
+                    const announcement = rest.join(' ') || msg.reply_to_message?.text;
+                    if (!announcement) {
+                        await sendFeedback(t(lang, 'admin_announce_missing'));
+                        break;
+                    }
+                    await bot.sendMessage(chatId, t(lang, 'admin_announce_prefix', { message: announcement }), { allow_sending_without_reply: true });
+                    await sendFeedback(t(lang, 'admin_announce_sent'));
+                    break;
+                }
+                case 'track': {
+                    const address = rest.shift();
+                    const label = rest.join(' ') || 'Tracked Wallet';
+                    const normalized = normalizeAddressSafe(address);
+                    if (!normalized) {
+                        await sendFeedback(t(lang, 'admin_track_invalid'));
+                        break;
+                    }
+                    const settings = await db.getGroupBotSettings(chatId);
+                    const list = Array.isArray(settings.trackedWallets) ? settings.trackedWallets : [];
+                    const nextList = list.filter((entry) => entry.address?.toLowerCase() !== normalized.toLowerCase());
+                    nextList.push({ address: normalized, name: label });
+                    await db.updateGroupBotSettings(chatId, { trackedWallets: nextList });
+                    await sendFeedback(t(lang, 'admin_track_added', { wallet: shortenAddress(normalized), name: label }));
+                    break;
+                }
+                default:
+                    await sendFeedback(t(lang, 'admin_action_unknown'));
+                    break;
+            }
+        } catch (error) {
+            console.error(`[AdminCommand] Failed to execute ${command}: ${error.message}`);
+            await sendFeedback(t(lang, 'admin_action_error'));
+        }
+    }
+
+    async function handleAdminCommand(msg, options = {}) {
+        const { mode = 'admin' } = options;
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
         const chatType = msg.chat.type;
@@ -5988,12 +7616,18 @@ function startTelegramBot() {
         const fallbackLang = msg.from?.language_code;
 
         if (chatType === 'private') {
-            try {
-                await openAdminHub(userId, { fallbackLang });
-            } catch (error) {
-                console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
-                const lang = await getLang(msg);
-                await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+            const lang = await getLang(msg);
+            if (mode === 'checkinadmin') {
+                try {
+                    await openAdminHub(userId, { fallbackLang });
+                    await sendAdminMenu(userId, chatId, { fallbackLang });
+                } catch (error) {
+                    console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
+                    await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+                }
+            } else {
+                const cheatsheet = buildAdminCommandCheatsheet(lang);
+                await sendReply(msg, cheatsheet.text, { reply_markup: cheatsheet.replyMarkup });
             }
             return;
         }
@@ -6017,47 +7651,57 @@ function startTelegramBot() {
             return;
         }
 
-        try {
-            await db.ensureCheckinGroup(chatId.toString());
-        } catch (error) {
-            console.error(`[AdminHub] Failed to register group ${chatId}: ${error.message}`);
+        if (mode === 'checkinadmin') {
+            try {
+                await db.ensureCheckinGroup(chatId.toString());
+            } catch (error) {
+                console.error(`[AdminHub] Failed to register group ${chatId}: ${error.message}`);
+            }
+
+            try {
+                await sendAdminCommandList(chatId, replyLang, msg.message_id);
+                await openAdminHub(userId, { fallbackLang });
+                await sendAdminMenu(userId, chatId, { fallbackLang });
+                await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
+                    reply_to_message_id: msg.message_id,
+                    allow_sending_without_reply: true
+                });
+            } catch (error) {
+                console.error(`[AdminHub] Failed to send admin hub for ${userId} in ${chatId}: ${error.message}`);
+                const statusCode = error?.response?.statusCode;
+                const errorKey = statusCode === 403
+                    ? 'checkin_admin_command_dm_error'
+                    : 'checkin_admin_command_error';
+
+                await bot.sendMessage(chatId, t(replyLang, errorKey), {
+                    reply_to_message_id: msg.message_id,
+                    allow_sending_without_reply: true
+                });
+            }
+            return;
         }
 
-        try {
-            await openAdminHub(userId, { fallbackLang });
-            await sendAdminMenu(userId, chatId, { fallbackLang });
-            await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
-                reply_to_message_id: msg.message_id,
-                allow_sending_without_reply: true
-            });
-        } catch (error) {
-            console.error(`[AdminHub] Failed to send admin hub for ${userId} in ${chatId}: ${error.message}`);
-            const statusCode = error?.response?.statusCode;
-            const errorKey = statusCode === 403
-                ? 'checkin_admin_command_dm_error'
-                : 'checkin_admin_command_error';
-
-            await bot.sendMessage(chatId, t(replyLang, errorKey), {
-                reply_to_message_id: msg.message_id,
-                allow_sending_without_reply: true
-            });
-        }
+        await sendAdminCommandList(chatId, replyLang, msg.message_id);
     }
 
     bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
-        await handleAdminCommand(msg);
+        await handleAdminCommand(msg, { mode: 'checkinadmin' });
+    });
+
+    bot.onText(/^\/admin(?:@[\w_]+)?\s+(.+)/, async (msg, match) => {
+        await handleAdminActionCommand(msg, match[1]);
     });
 
     bot.onText(/^\/admin(?:@[\w_]+)?$/, async (msg) => {
-        await handleAdminCommand(msg);
+        await handleAdminCommand(msg, { mode: 'admin' });
     });
 
     bot.onText(/\/okx402status/, async (msg) => {
         await handleOkx402StatusCommand(msg);
     });
 
-    bot.onText(/\/banmaoprice/, async (msg) => {
-        await handleBanmaoPriceCommand(msg);
+    bot.onText(/\/rules/, async (msg) => {
+        await handleRulesCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
@@ -6106,19 +7750,14 @@ function startTelegramBot() {
             await handleMyWalletCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
-        stats: async (query, lang) => {
+        rules: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
-            await handleStatsCommand(synthetic);
+            await handleRulesCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         donate: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleDonateCommand(synthetic);
-            return { message: t(lang, 'help_action_executed') };
-        },
-        banmaoprice: async (query, lang) => {
-            const synthetic = buildSyntheticCommandMessage(query);
-            await handleBanmaoPriceCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         okxchains: async (query, lang) => {
@@ -6199,6 +7838,220 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'ui_close') {
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore cleanup errors
+                    }
+                }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data === 'rules_close') {
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore cleanup errors
+                    }
+                }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data === 'wallet_overview' || query.data === 'wallet_chain_menu') {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                try {
+                    const menu = await buildWalletChainMenu(callbackLang);
+                    const options = {
+                        chat_id: chatId,
+                        message_id: query.message?.message_id,
+                        parse_mode: 'HTML',
+                        reply_markup: menu.replyMarkup
+                    };
+
+                    if (options.message_id) {
+                        await bot.editMessageText(menu.text, options);
+                    } else {
+                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[WalletChains] Failed to render chain menu: ${error.message}`);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_overview_error'), show_alert: true });
+                }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_chain|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const parts = query.data.split('|');
+                const chainId = Number(parts[1]);
+                const chainShort = parts[2] ? decodeURIComponent(parts[2]) : null;
+                let chainEntry = null;
+                try {
+                    const chains = await fetchOkxBalanceSupportedChains();
+                    chainEntry = chains.find((entry) => Number(entry.chainId) === chainId
+                        || Number(entry.chainIndex) === chainId
+                        || (chainShort && entry.chainShortName === chainShort));
+                } catch (error) {
+                    console.warn(`[WalletChains] Failed to load chains for selection: ${error.message}`);
+                }
+
+                const chainContext = chainEntry || {
+                    chainId: Number.isFinite(chainId) ? chainId : 196,
+                    chainIndex: Number.isFinite(chainId) ? chainId : 196,
+                    chainShortName: chainShort || 'xlayer',
+                    aliases: chainShort ? [chainShort] : ['xlayer']
+                };
+                const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
+
+                try {
+                    const entries = await loadWalletOverviewEntries(chatId, { chainContext });
+                    const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
+                    const portfolioRows = entries
+                        .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
+                        .filter((row) => row.address && row.url)
+                        .map((row) => [{ text: t(callbackLang, 'wallet_action_portfolio', { wallet: shortenAddress(row.address) }), url: row.url }]);
+                    const replyMarkup = appendCloseButton(
+                        portfolioRows.length ? { inline_keyboard: portfolioRows } : null,
+                        callbackLang,
+                        { backCallbackData: 'wallet_chain_menu' }
+                    );
+
+                    if (query.message?.message_id) {
+                        await bot.editMessageText(text, {
+                            chat_id: chatId,
+                            message_id: query.message.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: replyMarkup
+                        });
+                    } else {
+                        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: replyMarkup });
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_chain_error'), show_alert: true });
+                }
+                return;
+            }
+
+            if (query.data === 'wallet_manage') {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const menu = await buildUnregisterMenu(callbackLang, chatId);
+                const options = {
+                    chat_id: chatId,
+                    message_id: query.message?.message_id,
+                    parse_mode: 'HTML',
+                    reply_markup: menu.replyMarkup || appendCloseButton(null, callbackLang, { backCallbackData: 'wallet_overview' })
+                };
+
+                try {
+                    if (options.message_id) {
+                        await bot.editMessageText(menu.text, options);
+                    } else {
+                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: options.reply_markup });
+                    }
+                } catch (error) {
+                    await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: options.reply_markup });
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_manage_opened') });
+                return;
+            }
+
+            if (query.data.startsWith('wallet_remove|')) {
+                if (!chatId || !query.message?.message_id) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const [, scope, wallet, tokenKey] = query.data.split('|');
+                let feedback = null;
+                if (scope === 'all') {
+                    const existingWallets = await db.getWalletsForUser(chatId);
+                    await db.removeAllWalletsFromUser(chatId);
+                    for (const w of existingWallets) {
+                        teardownWalletWatcher(w);
+                    }
+                    feedback = t(callbackLang, 'unregister_all_success');
+                } else if (scope === 'wallet' && wallet) {
+                    await db.removeWalletFromUser(chatId, wallet);
+                    teardownWalletWatcher(wallet);
+                    feedback = t(callbackLang, 'unregister_wallet_removed', { wallet: shortenAddress(wallet) });
+                } else if (scope === 'token' && wallet && tokenKey) {
+                    await db.removeWalletTokenRecord(chatId, wallet, tokenKey);
+                    feedback = t(callbackLang, 'unregister_token_removed', {
+                        wallet: shortenAddress(wallet),
+                        token: tokenKey.toUpperCase()
+                    });
+                }
+
+                const menu = await buildUnregisterMenu(callbackLang, chatId);
+                try {
+                    await bot.editMessageText(menu.text, {
+                        chat_id: query.message.chat.id,
+                        message_id: query.message.message_id,
+                        parse_mode: 'HTML',
+                        reply_markup: menu.replyMarkup || undefined
+                    });
+                } catch (error) {
+                    // ignore edit errors
+                }
+
+                await bot.answerCallbackQuery(queryId, { text: feedback || t(callbackLang, 'unregister_action_done') });
+                return;
+            }
+
+            if (query.data.startsWith('admin_cmd|')) {
+                const [, payload] = query.data.split('|');
+                if (payload === 'about_admin') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'admin_command_admin_hint') });
+                    return;
+                }
+                if (payload === 'checkinadmin') {
+                    const synthetic = buildSyntheticCommandMessage(query);
+                    await handleAdminCommand(synthetic, { mode: 'checkinadmin' });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_menu_opened') });
+                    return;
+                }
+
+                if (payload === 'close' || payload === 'admin_cmd_close') {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore cleanup errors
+                    }
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const index = Number(payload);
+                const detail = Number.isInteger(index) && index >= 0 && index < ADMIN_SUBCOMMANDS.length
+                    ? ADMIN_SUBCOMMANDS[index]
+                    : null;
+                const description = detail ? t(callbackLang, detail.descKey) : null;
+                const label = detail ? detail.command : 'admin';
+                await bot.answerCallbackQuery(queryId, {
+                    text: description ? `${label}: ${description}` : t(callbackLang, 'admin_action_unknown'),
+                    show_alert: Boolean(description && description.length > 45)
+                });
+                return;
+            }
+
             if (query.data === 'help_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -7635,25 +9488,6 @@ function startTelegramBot() {
                 bot.answerCallbackQuery(queryId, { text: message });
             }
 
-            else if (query.data.startsWith('delete_')) {
-                if (!chatId || !query.message?.message_id) {
-                    await bot.answerCallbackQuery(queryId);
-                    return;
-                }
-
-                const walletToDelete = query.data.substring(7);
-                if (walletToDelete === 'all') {
-                    await db.removeAllWalletsFromUser(chatId);
-                    const message = t(lang, 'unregister_all_success'); // Dùng lang đã lưu
-                    bot.editMessageText(message, { chat_id: chatId, message_id: query.message.message_id });
-                    bot.answerCallbackQuery(queryId, { text: message });
-                } else {
-                    await db.removeWalletFromUser(chatId, walletToDelete);
-                    const message = t(lang, 'unregister_one_success', { wallet: walletToDelete }); // Dùng lang đã lưu
-                    bot.editMessageText(message, { chat_id: chatId, message_id: query.message.message_id });
-                    bot.answerCallbackQuery(queryId, { text: message });
-                }
-            }
         } catch (error) {
             console.error("Lỗi khi xử lý callback_query:", error);
             bot.answerCallbackQuery(queryId, { text: "Error!" });
@@ -7683,8 +9517,17 @@ function startTelegramBot() {
                 }
 
                 try {
-                    const normalized = ethers.getAddress(rawText);
-                    await db.addWalletToUser(userId, lang, normalized);
+                    const parsed = parseRegisterPayload(rawText);
+                    if (!parsed) {
+                        await sendEphemeralMessage(userId, t(lang, 'register_help_invalid'));
+                        return;
+                    }
+
+                    const result = await db.addWalletToUser(userId, lang, parsed.wallet);
+                    seedWalletWatcher(parsed.wallet, [
+                        ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
+                        ...OKX_OKB_TOKEN_ADDRESSES
+                    ]);
 
                     if (registerState.promptMessageId) {
                         try {
@@ -7695,15 +9538,14 @@ function startTelegramBot() {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    await sendEphemeralMessage(userId, t(lang, 'register_help_success', { wallet: normalized }), {}, 20000);
+                    const successKey = result?.added ? 'register_help_success_wallet' : 'register_wallet_exists';
+                    await sendEphemeralMessage(userId, t(lang, successKey, {
+                        wallet: shortenAddress(parsed.wallet)
+                    }), {}, 20000);
                     registerWizardStates.delete(userId);
                 } catch (error) {
-                    if (error && error.code === 'INVALID_ARGUMENT') {
-                        await sendEphemeralMessage(userId, t(lang, 'register_help_invalid'));
-                    } else {
-                        console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
-                        await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
-                    }
+                    console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
+                    await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
                 }
                 return;
             }
