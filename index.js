@@ -873,8 +873,21 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 return null;
             }
 
-            const priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
             const valueParts = [];
+            if (Number.isFinite(holding.currencyAmount) && holding.currencyAmount > 0) {
+                const usdValue = formatFiatValue(holding.currencyAmount, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                if (usdValue) {
+                    valueParts.push(`${usdValue} USDT`);
+                }
+            }
+
+            let priceInfo = null;
+            if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
+                priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
+            }
+            if (!priceInfo) {
+                priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            }
 
             if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
                 const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
@@ -5500,18 +5513,20 @@ function normalizeDexHolding(row) {
         return null;
     }
 
-    const tokenAddress = normalizeOkxConfigAddress(
-        row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr
-    );
-
-    if (!tokenAddress) {
-        return null;
-    }
+    const firstBalance = row.rawBalance
+        ?? row.balance
+        ?? row.tokenBalance
+        ?? row.amount
+        ?? row.holdingAmount
+        ?? row.holding
+        ?? row.tokenAmount;
+    const rawBalance = firstBalance;
+    const tokenAddressRaw = row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr;
+    let tokenAddress = normalizeOkxConfigAddress(tokenAddressRaw);
 
     const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals);
     const symbol = row.tokenSymbol || row.symbol;
     const name = row.tokenName || row.name;
-    const rawBalance = row.balance || row.tokenBalance || row.amount || row.holdingAmount || row.holding || row.tokenAmount;
 
     let amountRaw = null;
     if (rawBalance !== undefined && rawBalance !== null) {
@@ -5520,13 +5535,27 @@ function normalizeDexHolding(row) {
         } catch (error) {
             amountRaw = null;
         }
-    } else if (row.coinAmount !== undefined && row.coinAmount !== null && Number.isFinite(decimals)) {
-        amountRaw = decimalToRawBigInt(row.coinAmount, decimals);
+    }
+
+    if (amountRaw === null && row.coinAmount !== undefined && row.coinAmount !== null) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(row.coinAmount, decimalsForDecimal);
+    }
+
+    if (amountRaw === null && firstBalance !== undefined && firstBalance !== null) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(firstBalance, decimalsForDecimal);
+    }
+
+    if (!tokenAddress) {
+        const chainId = row.chainIndex || row.chainId || row.chain || 'unknown';
+        const symbolKey = (symbol || name || 'token').toString().toLowerCase().replace(/[^a-z0-9]+/gi, '-');
+        tokenAddress = `native:${chainId}:${symbolKey || 'token'}`;
     }
 
     const currencyAmount = Number(row.currencyAmount);
-    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice))
-        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice)
+    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice))
+        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice)
         : null;
 
     if ((!Number.isFinite(priceUsd) || priceUsd === null) && amountRaw !== null && Number.isFinite(decimals) && Number.isFinite(currencyAmount) && currencyAmount > 0) {
@@ -5569,6 +5598,9 @@ function extractDexHoldingRows(payload) {
             if (Array.isArray(item.tokenBalances)) {
                 rows.push(...item.tokenBalances);
             }
+            if (Array.isArray(item.tokenAssets)) {
+                rows.push(...item.tokenAssets);
+            }
             if (Array.isArray(item.balanceList)) {
                 rows.push(...item.balanceList);
             }
@@ -5587,6 +5619,7 @@ function extractDexHoldingRows(payload) {
         const candidates = [
             nested.tokenBalance,
             nested.tokenBalances,
+            nested.tokenAssets,
             nested.balanceList,
             nested.balances,
             nested.list
