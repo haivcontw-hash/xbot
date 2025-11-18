@@ -810,14 +810,18 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
         let totalUsd = null;
 
         try {
-            const live = await fetchLiveWalletTokens(normalized, { registeredTokens, chatId, chainContext: options.chainContext });
+            const live = await fetchLiveWalletTokens(normalized, {
+                registeredTokens,
+                chatId,
+                chainContext: options.chainContext
+            });
             tokens = live?.tokens || [];
             warning = live?.warning || null;
             totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : null;
 
             if (tokens.length > 0) {
                 await db.saveWalletHoldingsCache(chatId, normalized, tokens);
-            } else {
+            } else if (!options.forceLive) {
                 const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
                 if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
                     tokens = cachedSnapshot.tokens;
@@ -7967,7 +7971,7 @@ function startTelegramBot() {
                 const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
                 try {
-                    const entries = await loadWalletOverviewEntries(chatId, { chainContext });
+                    const entries = await loadWalletOverviewEntries(chatId, { chainContext, forceLive: true });
                     const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
