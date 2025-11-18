@@ -5631,8 +5631,8 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
     let totalUsd = null;
 
     try {
-        const response = await okxJsonRequest('POST', '/api/v6/dex/balance/all-token-balances-by-address', {
-            body: query,
+        const response = await okxJsonRequest('GET', '/api/v6/dex/balance/all-token-balances-by-address', {
+            query,
             auth: hasOkxCredentials,
             expectOkCode: false
         });
@@ -5645,13 +5645,13 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         const responseTotal = extractDexTotalValue(response);
         totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
     } catch (error) {
-        console.warn(`[DexHoldings] Balance API failed via POST all-token-balances-by-address: ${error.message}`);
+        console.warn(`[DexHoldings] Balance API failed via GET all-token-balances-by-address: ${error.message}`);
     }
 
     if (!Number.isFinite(totalUsd)) {
         try {
-            const totalResponse = await okxJsonRequest('POST', '/api/v6/dex/balance/total-value-by-address', {
-                body: query,
+            const totalResponse = await okxJsonRequest('GET', '/api/v6/dex/balance/total-value-by-address', {
+                query,
                 auth: hasOkxCredentials,
                 expectOkCode: false
             });
@@ -5660,7 +5660,7 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
                 totalUsd = derivedTotal;
             }
         } catch (error) {
-            console.warn(`[DexHoldings] Total value API failed via POST total-value-by-address: ${error.message}`);
+            console.warn(`[DexHoldings] Total value API failed via GET total-value-by-address: ${error.message}`);
         }
     }
 
@@ -6332,6 +6332,14 @@ async function okxJsonRequest(method, path, options = {}) {
     if (query && typeof query === 'object') {
         for (const [key, value] of Object.entries(query)) {
             if (value === undefined || value === null || value === '') {
+                continue;
+            }
+            if (Array.isArray(value)) {
+                const filtered = value.filter((item) => item !== undefined && item !== null && item !== '');
+                if (filtered.length === 0) {
+                    continue;
+                }
+                filtered.forEach((item) => url.searchParams.append(key, String(item)));
                 continue;
             }
             url.searchParams.set(key, String(value));
