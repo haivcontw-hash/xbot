@@ -857,7 +857,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
     if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
         const tokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            if (!holding.amountRaw && !holding.rawBalance) {
+            if (!holding.amountRaw && !holding.rawBalance && !holding.coinAmount) {
                 return null;
             }
 
@@ -866,13 +866,17 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             let numericAmount = null;
 
             try {
-                amountText = formatBigIntValue(holding.amountRaw, decimals, {
+                amountText = formatBigIntValue(holding.amountRaw ?? holding.rawBalance, decimals, {
                     maximumFractionDigits: Math.min(6, Math.max(2, decimals))
                 });
-                numericAmount = Number(ethers.formatUnits(holding.amountRaw, decimals));
+                numericAmount = Number(ethers.formatUnits(holding.amountRaw ?? holding.rawBalance, decimals));
             } catch (error) {
-                amountText = null;
-                numericAmount = null;
+                // Fallback: use the decimal coinAmount if raw formatting fails
+                const fallbackAmount = Number(holding.coinAmount || holding.balance);
+                if (Number.isFinite(fallbackAmount) && fallbackAmount > 0) {
+                    numericAmount = fallbackAmount;
+                    amountText = fallbackAmount.toString();
+                }
             }
 
             if (!amountText || !numericAmount || numericAmount <= 0) {
@@ -7964,21 +7968,21 @@ function startTelegramBot() {
                     console.warn(`[WalletChains] Failed to load chains for selection: ${error.message}`);
                 }
 
-                const chainContext = chainEntry || {
-                    chainId: Number.isFinite(chainId) ? chainId : 196,
-                    chainIndex: Number.isFinite(chainId) ? chainId : 196,
-                    chainShortName: chainShort || 'xlayer',
-                    aliases: chainShort ? [chainShort] : ['xlayer']
-                };
-                const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
+            const chainContext = chainEntry || {
+                chainId: Number.isFinite(chainId) ? chainId : 196,
+                chainIndex: Number.isFinite(chainId) ? chainId : 196,
+                chainShortName: chainShort || 'xlayer',
+                aliases: chainShort ? [chainShort] : ['xlayer']
+            };
+            const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
-                try {
-                    const entries = await loadWalletOverviewEntries(chatId, {
-                        chainContext,
-                        forceLive: true,
-                        forceDex: true
-                    });
-                    const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
+            try {
+                const entries = await loadWalletOverviewEntries(chatId, {
+                    chainContext,
+                    forceLive: true,
+                    forceDex: true
+                });
+                const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
                         .filter((row) => row.address && row.url)
@@ -8008,10 +8012,24 @@ function startTelegramBot() {
                         await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: replyMarkup });
                     }
 
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                    try {
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                    } catch (ackError) {
+                        console.warn(`[WalletChains] Callback ack failed: ${ackError.message}`);
+                    }
                 } catch (error) {
                     console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_chain_error'), show_alert: true });
+                    const fallback = t(callbackLang, 'wallet_overview_wallet_no_token');
+                    try {
+                        await bot.sendMessage(chatId, fallback, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang, { backCallbackData: 'wallet_chain_menu' }) });
+                    } catch (sendError) {
+                        console.warn(`[WalletChains] Fallback send failed: ${sendError.message}`);
+                    }
+                    try {
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_chain_error'), show_alert: true });
+                    } catch (ackError) {
+                        console.warn(`[WalletChains] Callback ack error after failure: ${ackError.message}`);
+                    }
                 }
                 return;
             }
