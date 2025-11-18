@@ -7962,16 +7962,25 @@ function startTelegramBot() {
                         { backCallbackData: 'wallet_chain_menu' }
                     );
 
+                    let rendered = false;
                     if (query.message?.message_id) {
-                        await bot.editMessageText(text, {
-                            chat_id: chatId,
-                            message_id: query.message.message_id,
-                            parse_mode: 'HTML',
-                            reply_markup: replyMarkup
-                        });
-                    } else {
+                        try {
+                            await bot.editMessageText(text, {
+                                chat_id: chatId,
+                                message_id: query.message.message_id,
+                                parse_mode: 'HTML',
+                                reply_markup: replyMarkup
+                            });
+                            rendered = true;
+                        } catch (editError) {
+                            console.warn(`[WalletChains] editMessageText failed, retrying with sendMessage: ${editError.message}`);
+                        }
+                    }
+
+                    if (!rendered) {
                         await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: replyMarkup });
                     }
+
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
                     console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
