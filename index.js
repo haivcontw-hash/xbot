@@ -1858,31 +1858,51 @@ function applyWalletTokenHistoricalPriceWindow(query) {
 }
 
 async function fetchWalletTokenHistoricalPriceFallback(query, targetPeriod) {
-    try {
-        const fallbackQuery = buildWalletTokenHistoricalPriceFallbackQuery(query);
-        const payload = await callOkxDexEndpoint('/api/v6/dex/market/historical-candles', fallbackQuery, {
-            method: 'POST',
-            auth: hasOkxCredentials,
-            allowFallback: true
-        });
+    const fallbackQuery = buildWalletTokenHistoricalPriceFallbackQuery(query);
+    const barVariants = buildOkxCandleBarFallbackVariants(fallbackQuery.bar);
 
-        const entries = unwrapOkxData(payload) || [];
-        const normalizedEntries = convertWalletTokenCandlesToHistoryEntries(entries);
-        const resampledEntries = resampleWalletTokenHistoryEntries(normalizedEntries, targetPeriod);
-        if (resampledEntries.length === 0) {
-            return null;
+    for (const barVariant of barVariants) {
+        const attemptQuery = { ...fallbackQuery };
+        if (barVariant) {
+            attemptQuery.bar = barVariant;
+        } else {
+            delete attemptQuery.bar;
         }
 
-        return { data: resampledEntries };
-    } catch (error) {
-        console.warn(`[WalletToken] Failed to fetch historical price fallback: ${error.message}`);
-        return null;
+        try {
+            const payload = await callOkxDexEndpoint('/api/v6/dex/market/historical-candles', attemptQuery, {
+                method: 'POST',
+                auth: hasOkxCredentials,
+                allowFallback: true
+            });
+
+            const entries = unwrapOkxData(payload) || [];
+            const normalizedEntries = convertWalletTokenCandlesToHistoryEntries(entries);
+            const resampledEntries = resampleWalletTokenHistoryEntries(normalizedEntries, targetPeriod);
+            if (resampledEntries.length === 0) {
+                continue;
+            }
+
+            return { data: resampledEntries };
+        } catch (error) {
+            if (!isOkxBarParameterError(error)) {
+                console.warn(`[WalletToken] Failed to fetch historical price fallback: ${error.message}`);
+                return null;
+            }
+
+            console.warn(`[WalletToken] Candle fallback rejected bar "${attemptQuery.bar}": ${error.message}`);
+        }
     }
+
+    console.warn('[WalletToken] Candle fallback exhausted all bar variants without data');
+    return null;
 }
 
 function buildWalletTokenHistoricalPriceFallbackQuery(query) {
     const fallback = { ...query };
     delete fallback.cursor;
+    delete fallback.begin;
+    delete fallback.end;
     delete fallback.period;
     if (!fallback.bar) {
         fallback.bar = WALLET_TOKEN_HISTORY_FALLBACK_BAR;
@@ -1895,6 +1915,46 @@ function buildWalletTokenHistoricalPriceFallbackQuery(query) {
         fallback.limit = WALLET_TOKEN_HISTORY_FALLBACK_LIMIT;
     }
     return fallback;
+}
+
+function buildOkxCandleBarFallbackVariants(bar) {
+    const variants = [];
+    const addVariant = (value) => {
+        if (!value) {
+            return;
+        }
+        const normalized = String(value).trim();
+        if (!normalized) {
+            return;
+        }
+        if (!variants.includes(normalized)) {
+            variants.push(normalized);
+        }
+    };
+
+    const preferred = normalizeOkxCandleBar(bar, WALLET_TOKEN_HISTORY_FALLBACK_BAR)
+        || WALLET_TOKEN_HISTORY_FALLBACK_BAR
+        || null;
+    if (preferred) {
+        addVariant(preferred);
+        addVariant(preferred.toUpperCase());
+        addVariant(preferred.toLowerCase());
+    }
+
+    if (!variants.length) {
+        variants.push(null);
+    }
+
+    return variants;
+}
+
+function isOkxBarParameterError(error) {
+    if (!error || !error.message) {
+        return false;
+    }
+
+    const message = String(error.message).toLowerCase();
+    return message.includes('parameter bar error');
 }
 
 function normalizeWalletTokenHistoryLimit(value) {
