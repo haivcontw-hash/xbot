@@ -443,6 +443,7 @@
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",
   "wallet_dex_token_balance": "📊 보유량: {balance}",
   "wallet_dex_token_value": "💰 가치: {value}",
+  "wallet_dex_token_total_value": "🧮 총 가치: {total}",
   "wallet_dex_token_value_unknown": "—",
   "wallet_dex_token_contract": "📄 컨트랙트: {contract}",
   "wallet_dex_token_risk": "⚠️ 위험: {risk}",

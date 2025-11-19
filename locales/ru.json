@@ -442,6 +442,7 @@
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",
   "wallet_dex_token_balance": "📊 Баланс: {balance}",
   "wallet_dex_token_value": "💰 Стоимость: {value}",
+  "wallet_dex_token_total_value": "🧮 Итоговая стоимость: {total}",
   "wallet_dex_token_value_unknown": "—",
   "wallet_dex_token_contract": "📄 Контракт: {contract}",
   "wallet_dex_token_risk": "⚠️ Риск: {risk}",

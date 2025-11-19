@@ -443,6 +443,7 @@
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",
   "wallet_dex_token_balance": "📊 Balance: {balance}",
   "wallet_dex_token_value": "💰 Value: {value}",
+  "wallet_dex_token_total_value": "🧮 Total value: {total}",
   "wallet_dex_token_value_unknown": "—",
   "wallet_dex_token_contract": "📄 Contract: {contract}",
   "wallet_dex_token_risk": "⚠️ Risk: {risk}",
