@@ -128,8 +128,7 @@ const WALLET_TOKEN_ACTIONS = [
         key: 'historical_price',
         labelKey: 'wallet_token_action_historical_price',
         path: '/api/v6/dex/index/historical-price',
-        method: 'POST',
-        bodyType: 'array'
+        method: 'GET'
     },
     { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles', method: 'POST' },
     { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles', method: 'POST' },
@@ -1706,6 +1705,17 @@ function isOkxMethodNotAllowedError(error) {
     }
 
     return false;
+}
+
+function isTelegramMessageNotModifiedError(error) {
+    if (!error) {
+        return false;
+    }
+
+    const description = error?.response?.body?.description || error?.message || '';
+    return typeof description === 'string'
+        ? description.toLowerCase().includes('message is not modified')
+        : false;
 }
 
 async function callOkxDexEndpoint(path, query, options = {}) {
@@ -9162,14 +9172,25 @@ function startTelegramBot() {
                 try {
                     const actionResult = await buildWalletTokenActionResult(actionKey, context, callbackLang);
                     const menu = buildWalletTokenMenu(context, callbackLang, { actionResult });
+                    let rendered = false;
                     if (query.message?.message_id) {
-                        await bot.editMessageText(menu.text, {
-                            chat_id: chatId,
-                            message_id: query.message.message_id,
-                            parse_mode: 'HTML',
-                            reply_markup: menu.replyMarkup
-                        });
-                    } else {
+                        try {
+                            await bot.editMessageText(menu.text, {
+                                chat_id: chatId,
+                                message_id: query.message.message_id,
+                                parse_mode: 'HTML',
+                                reply_markup: menu.replyMarkup
+                            });
+                            rendered = true;
+                        } catch (editError) {
+                            if (!isTelegramMessageNotModifiedError(editError)) {
+                                throw editError;
+                            }
+                            rendered = true;
+                        }
+                    }
+
+                    if (!rendered) {
                         await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
                     }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
