@@ -154,6 +154,18 @@ const WALLET_TOKEN_HISTORY_FALLBACK_LIMIT = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_FALLBACK_LIMIT || 10);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10;
 })();
+const WALLET_TOKEN_HISTORY_DEFAULT_PERIOD = process.env.WALLET_TOKEN_HISTORY_DEFAULT_PERIOD || '1d';
+const WALLET_TOKEN_HISTORY_MAX_LIMIT = (() => {
+    const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_LIMIT || 200);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 200;
+})();
+const WALLET_TOKEN_HISTORY_PERIOD_MS = {
+    '1m': 60 * 1000,
+    '5m': 5 * 60 * 1000,
+    '30m': 30 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000
+};
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -1648,7 +1660,7 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     let handler = null;
     switch (actionKey) {
         case 'historical_price':
-            query.limit = query.limit || 10;
+            applyWalletTokenHistoricalPriceIntervalDefaults(query);
             handler = () => fetchWalletTokenHistoricalPricePayload(query, config);
             break;
         case 'candles':
@@ -1764,6 +1776,40 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
     return lastPayload || { data: [] };
 }
 
+function applyWalletTokenHistoricalPriceIntervalDefaults(query) {
+    if (!query) {
+        return;
+    }
+
+    const normalizedLimit = normalizeWalletTokenHistoryLimit(query.limit);
+    query.limit = normalizedLimit;
+
+    const normalizedPeriod = normalizeWalletTokenHistoryPeriod(query.period);
+    if (normalizedPeriod) {
+        query.period = normalizedPeriod;
+    }
+
+    if (hasWalletTokenHistoryExplicitRange(query)) {
+        return;
+    }
+
+    const periodMs = normalizedPeriod ? WALLET_TOKEN_HISTORY_PERIOD_MS[normalizedPeriod] : null;
+    if (!periodMs) {
+        return;
+    }
+
+    const now = Date.now();
+    const alignedEnd = Math.floor(now / periodMs) * periodMs;
+    const windowMs = Math.max(periodMs, normalizedLimit * periodMs);
+    const begin = Math.max(0, alignedEnd - windowMs);
+
+    query.end = String(alignedEnd);
+    query.begin = String(begin);
+    if ('cursor' in query) {
+        delete query.cursor;
+    }
+}
+
 async function fetchWalletTokenHistoricalPriceFallback(query) {
     try {
         const fallbackQuery = buildWalletTokenHistoricalPriceFallbackQuery(query);
@@ -1796,6 +1842,42 @@ function buildWalletTokenHistoricalPriceFallbackQuery(query) {
         fallback.limit = WALLET_TOKEN_HISTORY_FALLBACK_LIMIT;
     }
     return fallback;
+}
+
+function normalizeWalletTokenHistoryLimit(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return Math.min(10, WALLET_TOKEN_HISTORY_MAX_LIMIT);
+    }
+    return Math.min(Math.floor(numeric), WALLET_TOKEN_HISTORY_MAX_LIMIT);
+}
+
+function normalizeWalletTokenHistoryPeriod(value) {
+    const fallback = WALLET_TOKEN_HISTORY_PERIOD_MS[WALLET_TOKEN_HISTORY_DEFAULT_PERIOD]
+        ? WALLET_TOKEN_HISTORY_DEFAULT_PERIOD
+        : '1d';
+    if (value === undefined || value === null) {
+        return fallback;
+    }
+    const text = String(value).trim();
+    if (!text) {
+        return fallback;
+    }
+    if (WALLET_TOKEN_HISTORY_PERIOD_MS[text]) {
+        return text;
+    }
+    return fallback;
+}
+
+function hasWalletTokenHistoryExplicitRange(query) {
+    if (!query) {
+        return false;
+    }
+    const begin = query.begin;
+    const end = query.end;
+    const hasBegin = begin !== undefined && begin !== null && String(begin).trim();
+    const hasEnd = end !== undefined && end !== null && String(end).trim();
+    return Boolean(hasBegin || hasEnd);
 }
 
 function convertWalletTokenCandlesToHistoryEntries(entries) {
