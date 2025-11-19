@@ -98,6 +98,9 @@ const WALLET_RPC_HEALTH_TIMEOUT = Number(process.env.WALLET_RPC_HEALTH_TIMEOUT |
 const WALLET_CHAIN_CALLBACK_TTL = Number(process.env.WALLET_CHAIN_CALLBACK_TTL || 10 * 60 * 1000);
 const WALLET_TOKEN_CALLBACK_TTL = Number(process.env.WALLET_TOKEN_CALLBACK_TTL || 5 * 60 * 1000);
 const WALLET_TOKEN_BUTTON_LIMIT = Number(process.env.WALLET_TOKEN_BUTTON_LIMIT || 6);
+const COPY_BUTTON_LIMIT = Number(process.env.COPY_BUTTON_LIMIT || 24);
+const COPY_PAYLOAD_TTL = Number(process.env.COPY_PAYLOAD_TTL || 10 * 60 * 1000);
+const COPY_PAYLOAD_MAX_LENGTH = Number(process.env.COPY_PAYLOAD_MAX_LENGTH || 512);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -141,6 +144,7 @@ const OKX_DEX_DEFAULT_RETRY_DELAY_MS = (() => {
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 400;
 })();
 const walletTokenActionCache = new Map();
+const copyPayloadStore = new Map();
 const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
@@ -671,6 +675,19 @@ function shortenAddress(address) {
     return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
 }
 
+function formatCopyableValueHtml(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    const text = String(value).trim();
+    if (!text) {
+        return null;
+    }
+    const encoded = encodeURIComponent(text);
+    const code = `<code>${escapeHtml(text)}</code>`;
+    return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
+}
+
 function getXlayerProvider() {
     return xlayerProvider;
 }
@@ -988,6 +1005,49 @@ function resolveWalletTokenContext(token, { extend = false } = {}) {
     }
 
     return entry.context;
+}
+
+function pruneCopyPayloads() {
+    const now = Date.now();
+    for (const [key, entry] of copyPayloadStore.entries()) {
+        if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+            copyPayloadStore.delete(key);
+        }
+    }
+}
+
+function registerCopyPayload(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    const text = String(value).trim();
+    if (!text) {
+        return null;
+    }
+    const limited = text.slice(0, COPY_PAYLOAD_MAX_LENGTH);
+
+    pruneCopyPayloads();
+    const token = crypto.randomBytes(4).toString('hex');
+    copyPayloadStore.set(token, {
+        value: limited,
+        expiresAt: Date.now() + COPY_PAYLOAD_TTL
+    });
+    return token;
+}
+
+function resolveCopyPayload(token) {
+    pruneCopyPayloads();
+    const entry = copyPayloadStore.get(token);
+    if (!entry) {
+        return null;
+    }
+    if (!Number.isFinite(entry.expiresAt) || entry.expiresAt <= Date.now()) {
+        copyPayloadStore.delete(token);
+        return null;
+    }
+    copyPayloadStore.delete(token);
+    return entry.value;
 }
 
 async function buildWalletChainMenu(lang, walletAddress) {
@@ -1506,7 +1566,7 @@ function resolveTokenContractAddress(token) {
 function buildWalletDexOverviewText(lang, walletAddress, overview, options = {}) {
     const normalizedWallet = normalizeAddressSafe(walletAddress) || walletAddress;
     const walletHtml = normalizedWallet
-        ? `<code>${escapeHtml(normalizedWallet)}</code>`
+        ? formatCopyableValueHtml(normalizedWallet)
         : t(lang, 'wallet_balance_contract_unknown');
     const lines = [t(lang, 'wallet_dex_overview_title', { wallet: walletHtml })];
     lines.push(t(lang, 'wallet_dex_wallet_line', { wallet: walletHtml }));
@@ -1541,16 +1601,8 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             || token.contractAddress
             || token.token
             || null;
-        let contractHtml = null;
-        if (contractRaw) {
-            const cleaned = String(contractRaw).replace(/^native:/, '');
-            if (cleaned) {
-                contractHtml = `<code>${escapeHtml(cleaned)}</code>`;
-            }
-        }
-        if (!contractHtml) {
-            contractHtml = t(lang, 'wallet_balance_contract_unknown');
-        }
+        const contractHtml = formatCopyableValueHtml(String(contractRaw || '').replace(/^native:/, ''))
+            || t(lang, 'wallet_balance_contract_unknown');
 
         lines.push('');
         lines.push(t(lang, 'wallet_dex_token_header', {
@@ -1630,12 +1682,12 @@ function buildWalletTokenMenu(context, lang, options = {}) {
     const token = context?.token || {};
     const meta = describeDexTokenValue(token, lang);
     const walletHtml = context?.wallet
-        ? `<code>${escapeHtml(context.wallet)}</code>`
+        ? formatCopyableValueHtml(context.wallet)
         : t(lang, 'wallet_balance_contract_unknown');
     const chainLabel = context?.chainLabel || formatDexChainLabel(context?.chainContext || token, lang);
     const contractAddress = resolveTokenContractAddress(token);
     const contractHtml = contractAddress
-        ? `<code>${escapeHtml(contractAddress)}</code>`
+        ? formatCopyableValueHtml(contractAddress)
         : t(lang, 'wallet_balance_contract_unknown');
     const lines = [
         t(lang, 'wallet_token_menu_title', { symbol: escapeHtml(meta.symbolLabel || 'Token') }),
@@ -1676,7 +1728,7 @@ function buildWalletTokenMenu(context, lang, options = {}) {
                 lines.push(t(lang, 'wallet_token_action_list_header', { label: escapeHtml(listLabel) }));
             }
             entries.forEach((entry) => {
-                lines.push(`• ${escapeHtml(String(entry))}`);
+                lines.push(`• ${String(entry)}`);
             });
         } else if (metrics.length === 0) {
             lines.push(t(lang, 'wallet_token_action_result_empty'));
@@ -1687,11 +1739,40 @@ function buildWalletTokenMenu(context, lang, options = {}) {
     const chunks = splitTelegramMessageText(text);
     const primaryText = chunks.shift() || '';
 
+    const copyTargets = buildWalletTokenCopyTargets(context, options.actionResult);
+
     return {
         text: primaryText,
-        replyMarkup: buildWalletTokenActionKeyboard(context, lang),
+        replyMarkup: buildWalletTokenActionKeyboard(context, lang, { copyTargets }),
         extraTexts: chunks
     };
+}
+
+function buildWalletTokenCopyTargets(context, actionResult) {
+    const targets = [];
+    const seen = new Set();
+
+    const pushTarget = (value, type = 'address', hint = null) => {
+        if (value === undefined || value === null) return;
+        const normalized = normalizeAddressSafe(value) || String(value).trim();
+        if (!normalized) return;
+        const key = `${type}:${normalized}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        targets.push({ value: normalized, type, hint });
+    };
+
+    pushTarget(context?.wallet, 'wallet');
+    const contract = resolveTokenContractAddress(context?.token);
+    pushTarget(contract, 'contract');
+
+    if (actionResult && Array.isArray(actionResult.copyTargets)) {
+        for (const target of actionResult.copyTargets) {
+            pushTarget(target?.value, target?.type || 'address', target?.hint || null);
+        }
+    }
+
+    return targets;
 }
 
 function splitTelegramMessageText(text, limit = TELEGRAM_MESSAGE_SAFE_LENGTH) {
@@ -1751,9 +1832,29 @@ async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
     }
 }
 
-function buildWalletTokenActionKeyboard(context, lang) {
+function buildWalletTokenActionKeyboard(context, lang, options = {}) {
     const rows = [];
     const tokenId = context?.tokenCallbackId;
+    const copyTargets = limitCopyTargets(Array.isArray(options.copyTargets) ? options.copyTargets : []);
+
+    if (copyTargets.length > 0) {
+        let copyRow = [];
+        for (const target of copyTargets) {
+            const label = formatCopyButtonLabel(target, lang);
+            const token = registerCopyPayload(target.value);
+            if (!label || !token) {
+                continue;
+            }
+            copyRow.push({ text: label, callback_data: `copy_text|${token}` });
+            if (copyRow.length === 2) {
+                rows.push(copyRow);
+                copyRow = [];
+            }
+        }
+        if (copyRow.length > 0) {
+            rows.push(copyRow);
+        }
+    }
 
     if (tokenId) {
         let currentRow = [];
@@ -1779,6 +1880,23 @@ function buildWalletTokenActionKeyboard(context, lang) {
 
     rows.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
     return { inline_keyboard: rows };
+}
+
+function limitCopyTargets(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) {
+        return [];
+    }
+    const max = Number.isFinite(COPY_BUTTON_LIMIT) && COPY_BUTTON_LIMIT > 0 ? COPY_BUTTON_LIMIT : 24;
+    return targets.slice(0, max);
+}
+
+function formatCopyButtonLabel(target, lang) {
+    if (!target || !target.value) {
+        return null;
+    }
+    const hint = target.hint || null;
+    const baseLabel = hint || shortenAddress(target.value);
+    return t(lang, 'copy_button_label', { label: baseLabel || t(lang, 'copy_button_fallback_label') });
 }
 
 async function buildWalletTokenActionResult(actionKey, context, lang) {
@@ -2575,11 +2693,28 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
         actionLabel,
         metrics: [],
         listEntries: [],
-        listLabel: null
+        listLabel: null,
+        copyTargets: []
     };
 
     const entries = unwrapOkxData(payload) || [];
     const primaryEntry = unwrapOkxFirst(payload) || (entries.length > 0 ? entries[0] : null);
+    const copySeen = new Set();
+    const pushCopyTarget = (value, type = 'address', hint = null) => {
+        if (value === undefined || value === null) {
+            return;
+        }
+        const normalized = normalizeAddressSafe(value) || String(value).trim();
+        if (!normalized) {
+            return;
+        }
+        const key = `${type}:${normalized}`;
+        if (copySeen.has(key)) {
+            return;
+        }
+        copySeen.add(key);
+        result.copyTargets.push({ value: normalized, type, hint });
+    };
 
     switch (actionKey) {
         case 'current_price': {
@@ -2682,10 +2817,37 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
             break;
         }
         case 'latest_price': {
-            result.listEntries = entries
-                .slice(0, WALLET_TOKEN_TRADE_LIMIT)
-                .map((entry, idx) => formatWalletTokenTradeEntry(entry, idx))
-                .filter(Boolean);
+            const formattedTrades = [];
+            const maxTrades = Math.min(WALLET_TOKEN_TRADE_LIMIT, entries.length);
+            for (let i = 0; i < maxTrades; i += 1) {
+                const entry = entries[i];
+                const formatted = formatWalletTokenTradeEntry(entry, i);
+                if (formatted) {
+                    formattedTrades.push(formatted);
+                }
+                const maker = entry?.maker
+                    || entry?.makerAddress
+                    || entry?.buyerAddress
+                    || entry?.buyer
+                    || entry?.from
+                    || entry?.fromAddress
+                    || entry?.addressFrom
+                    || entry?.traderAddress
+                    || entry?.userAddress;
+                const taker = entry?.taker
+                    || entry?.takerAddress
+                    || entry?.sellerAddress
+                    || entry?.seller
+                    || entry?.to
+                    || entry?.toAddress
+                    || entry?.addressTo
+                    || entry?.counterpartyAddress;
+                const txHash = entry?.txHash || entry?.transactionHash || entry?.hash || entry?.txid;
+                pushCopyTarget(maker, 'wallet', `#${i + 1} from`);
+                pushCopyTarget(taker, 'wallet', `#${i + 1} to`);
+                pushCopyTarget(txHash, 'tx', `Tx #${i + 1}`);
+            }
+            result.listEntries = formattedTrades;
             result.listLabel = t(lang, 'wallet_token_action_latest_price_list_label', {
                 count: WALLET_TOKEN_TRADE_LIMIT
             }) || actionLabel;
@@ -2702,10 +2864,21 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
             if (Number.isFinite(total)) {
                 result.metrics.push({ label: '👥 Total holders', value: total });
             }
-            result.listEntries = entries
-                .slice(0, WALLET_TOKEN_HOLDER_LIMIT)
-                .map((entry, idx) => formatWalletTokenHolderEntry(entry, idx))
-                .filter(Boolean);
+            const formattedHolders = [];
+            const holderLimit = Math.min(WALLET_TOKEN_HOLDER_LIMIT, entries.length);
+            for (let i = 0; i < holderLimit; i += 1) {
+                const entry = entries[i];
+                const formatted = formatWalletTokenHolderEntry(entry, i);
+                if (formatted) {
+                    formattedHolders.push(formatted);
+                }
+                const address = entry?.address
+                    || entry?.walletAddress
+                    || entry?.holderAddress
+                    || entry?.holderWalletAddress;
+                pushCopyTarget(address, 'wallet', `#${i + 1}`);
+            }
+            result.listEntries = formattedHolders;
             result.listLabel = t(lang, 'wallet_token_action_holder_list_label', {
                 count: WALLET_TOKEN_HOLDER_LIMIT
             }) || actionLabel;
@@ -3228,14 +3401,15 @@ function formatWalletTokenHolderEntry(row, index = 0) {
     const address =
         row.address || row.walletAddress || row.holderAddress || row.holderWalletAddress;
     const normalizedAddress = normalizeAddressSafe(address) || address;
+    const addressHtml = normalizedAddress ? formatCopyableValueHtml(normalizedAddress) : null;
     const amount = row.amount || row.balance || row.quantity || row.holdAmount || row.holding;
     const percent = pickOkxNumeric(row, ['percentage', 'percent', 'ratio', 'share']);
     const usdValue = pickOkxNumeric(row, ['usdValue', 'valueUsd', 'holdingValueUsd', 'usd']);
     const lines = [];
     const rank = index + 1;
     lines.push('—'.repeat(28));
-    if (normalizedAddress) {
-        lines.push(`🏦 #${rank} — ${normalizedAddress}`);
+    if (addressHtml) {
+        lines.push(`🏦 #${rank} — ${addressHtml}`);
     } else {
         lines.push(`🏦 #${rank} — Wallet`);
     }
@@ -3318,12 +3492,14 @@ function formatWalletTokenTradeEntry(row, index = 0) {
 
     const normalizedMaker = normalizeAddressSafe(maker) || maker;
     const normalizedTaker = normalizeAddressSafe(taker) || taker;
+    const makerHtml = normalizedMaker ? formatCopyableValueHtml(normalizedMaker) : null;
+    const takerHtml = normalizedTaker ? formatCopyableValueHtml(normalizedTaker) : null;
     const addressParts = [];
-    if (normalizedMaker) {
-        addressParts.push(`👤 From: ${normalizedMaker}`);
+    if (makerHtml) {
+        addressParts.push(`👤 From: ${makerHtml}`);
     }
-    if (normalizedTaker) {
-        addressParts.push(`🎯 To: ${normalizedTaker}`);
+    if (takerHtml) {
+        addressParts.push(`🎯 To: ${takerHtml}`);
     }
 
     const txHash = row.txHash || row.transactionHash || row.hash || row.txid;
@@ -3342,7 +3518,8 @@ function formatWalletTokenTradeEntry(row, index = 0) {
                 parts.push(`Amt ${infoAmount}`);
             }
             if (infoAddress) {
-                parts.push(`Contract ${infoAddress}`);
+                const contractHtml = formatCopyableValueHtml(infoAddress) || infoAddress;
+                parts.push(`Contract ${contractHtml}`);
             }
             if (parts.length > 0) {
                 changeLines.push(`   • ${parts.join(' | ')}`);
@@ -3358,9 +3535,9 @@ function formatWalletTokenTradeEntry(row, index = 0) {
         lines.push(addressParts.join(' / '));
     }
     if (txHashUrl) {
-        lines.push(`🔗 Tx: ${txHashUrl}`);
+        lines.push(`🔗 Tx: ${formatCopyableValueHtml(txHashUrl) || txHashUrl}`);
     } else if (txHash) {
-        lines.push(`🔗 Tx: ${txHash}`);
+        lines.push(`🔗 Tx: ${formatCopyableValueHtml(txHash) || txHash}`);
     }
     if (changeLines.length > 0) {
         lines.push(...changeLines.map((line) => line.replace('•', '📦')));
@@ -10283,6 +10460,20 @@ function startTelegramBot() {
                     }
                 }
                 await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data.startsWith('copy_text|')) {
+                const token = query.data.split('|')[1];
+                const value = resolveCopyPayload(token);
+                if (!value) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'copy_action_missing'), show_alert: true });
+                    return;
+                }
+                if (chatId) {
+                    await bot.sendMessage(chatId, `<code>${escapeHtml(value)}</code>`, { parse_mode: 'HTML' });
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'copy_action_ready') });
                 return;
             }
 
