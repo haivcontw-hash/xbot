@@ -116,6 +116,14 @@ const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
+const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
+    const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
+})();
+const WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES = (() => {
+    const value = Number(process.env.WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES || 2);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 2;
+})();
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -1610,7 +1618,7 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     switch (actionKey) {
         case 'historical_price':
             query.limit = query.limit || 10;
-            break;
+            return fetchWalletTokenHistoricalPricePayload(query, config);
         case 'candles':
             query.bar = query.bar || '1m';
             query.limit = query.limit || 10;
@@ -1637,6 +1645,52 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
         allowFallback: true,
         bodyType: config.bodyType
     });
+}
+
+async function fetchWalletTokenHistoricalPricePayload(query, config) {
+    const combinedEntries = [];
+    let cursor = query.cursor !== undefined ? query.cursor : null;
+    let lastPayload = null;
+
+    for (let page = 0; page < WALLET_TOKEN_HISTORY_MAX_PAGES; page += 1) {
+        const requestQuery = { ...query };
+        if (cursor !== undefined && cursor !== null && String(cursor).trim()) {
+            requestQuery.cursor = cursor;
+        } else {
+            delete requestQuery.cursor;
+        }
+
+        const payload = await callOkxDexEndpoint(config.path, requestQuery, {
+            method: config.method || 'GET',
+            auth: hasOkxCredentials,
+            allowFallback: true,
+            bodyType: config.bodyType
+        });
+
+        lastPayload = payload;
+        const pageEntries = unwrapOkxData(payload) || [];
+        if (pageEntries.length === 0) {
+            break;
+        }
+
+        combinedEntries.push(...pageEntries);
+
+        const flattenedEntries = expandWalletTokenHistoryEntries(combinedEntries);
+        const uniquePriceCount = countDistinctWalletTokenHistoryPrices(flattenedEntries);
+        const nextCursor = extractOkxPayloadCursor(payload);
+
+        if (uniquePriceCount >= WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES || !nextCursor || nextCursor === cursor) {
+            break;
+        }
+
+        cursor = nextCursor;
+    }
+
+    if (combinedEntries.length > 0) {
+        return { data: combinedEntries };
+    }
+
+    return lastPayload || { data: [] };
 }
 
 function buildOkxTokenQueryFromContext(context, overrides = {}) {
@@ -1759,6 +1813,54 @@ async function callOkxDexEndpoint(path, query, options = {}) {
 
     if (lastError) {
         throw lastError;
+    }
+
+    return null;
+}
+
+function extractOkxPayloadCursor(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const candidates = [];
+    if (payload.cursor !== undefined && payload.cursor !== null) {
+        candidates.push(payload.cursor);
+    }
+    if (payload.nextCursor !== undefined && payload.nextCursor !== null) {
+        candidates.push(payload.nextCursor);
+    }
+
+    const directData = payload.data;
+    if (Array.isArray(directData)) {
+        for (const entry of directData) {
+            if (entry && entry.cursor !== undefined && entry.cursor !== null) {
+                candidates.push(entry.cursor);
+                break;
+            }
+        }
+    } else if (directData && typeof directData === 'object') {
+        if (directData.cursor !== undefined && directData.cursor !== null) {
+            candidates.push(directData.cursor);
+        }
+        if (Array.isArray(directData.data)) {
+            for (const entry of directData.data) {
+                if (entry && entry.cursor !== undefined && entry.cursor !== null) {
+                    candidates.push(entry.cursor);
+                    break;
+                }
+            }
+        }
+    }
+
+    for (const candidate of candidates) {
+        if (candidate === undefined || candidate === null) {
+            continue;
+        }
+        const normalized = String(candidate).trim();
+        if (normalized) {
+            return normalized;
+        }
     }
 
     return null;
@@ -2061,6 +2163,22 @@ function getWalletTokenHistoryPriceText(row) {
     }
 
     return null;
+}
+
+function countDistinctWalletTokenHistoryPrices(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return 0;
+    }
+
+    const seen = new Set();
+    for (const entry of entries) {
+        const priceText = getWalletTokenHistoryPriceText(entry);
+        if (priceText !== null) {
+            seen.add(priceText);
+        }
+    }
+
+    return seen.size;
 }
 
 function formatWalletTokenHistoryEntry(row, previousRow, lang) {
