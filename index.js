@@ -199,23 +199,34 @@ const OKX_CANDLE_BAR_MAP = {
     '15m': '15m',
     '30m': '30m',
     '1h': '1H',
+    '1hour': '1H',
     '2h': '2H',
     '4h': '4H',
     '6h': '6H',
     '12h': '12H',
     '1d': '1D',
+    '1day': '1D',
+    '24h': '1D',
     '2d': '2D',
+    '2day': '2D',
     '3d': '3D',
     '7d': '7D',
     '14d': '14D',
     '30d': '30D',
+    '30day': '30D',
     '60d': '60D',
+    '60day': '60D',
     '90d': '90D',
+    '90day': '90D',
     '1w': '1W',
     '1mo': '1M',
     '1mth': '1M',
     '1month': '1M'
 };
+const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
+    const value = Number(process.env.TELEGRAM_MESSAGE_SAFE_LENGTH || 3900);
+    return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
+})();
 const WALLET_TOKEN_HOLDER_LIMIT = 100;
 const WALLET_TOKEN_TRADE_LIMIT = 100;
 const WALLET_TOKEN_CANDLE_DAY_SPAN = 30;
@@ -1652,10 +1663,72 @@ function buildWalletTokenMenu(context, lang, options = {}) {
         }
     }
 
+    const text = lines.join('\n');
+    const chunks = splitTelegramMessageText(text);
+    const primaryText = chunks.shift() || '';
+
     return {
-        text: lines.join('\n'),
-        replyMarkup: buildWalletTokenActionKeyboard(context, lang)
+        text: primaryText,
+        replyMarkup: buildWalletTokenActionKeyboard(context, lang),
+        extraTexts: chunks
     };
+}
+
+function splitTelegramMessageText(text, limit = TELEGRAM_MESSAGE_SAFE_LENGTH) {
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : TELEGRAM_MESSAGE_SAFE_LENGTH;
+    if (!text) {
+        return [''];
+    }
+
+    const lines = String(text).split('\n');
+    const chunks = [];
+    let current = '';
+
+    const pushCurrent = () => {
+        if (current) {
+            chunks.push(current);
+            current = '';
+        }
+    };
+
+    for (const line of lines) {
+        const candidate = current ? `${current}\n${line}` : line;
+        if (candidate.length > safeLimit) {
+            pushCurrent();
+            if (line.length > safeLimit) {
+                for (let offset = 0; offset < line.length; offset += safeLimit) {
+                    chunks.push(line.slice(offset, offset + safeLimit));
+                }
+            } else {
+                current = line;
+            }
+            continue;
+        }
+        current = candidate;
+    }
+
+    pushCurrent();
+
+    return chunks.length > 0 ? chunks : [''];
+}
+
+async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
+    if (!botInstance || !chatId || !Array.isArray(extraTexts) || extraTexts.length === 0) {
+        return;
+    }
+
+    for (const chunk of extraTexts) {
+        const text = typeof chunk === 'string' ? chunk : '';
+        if (!text || !text.trim()) {
+            continue;
+        }
+        try {
+            await botInstance.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        } catch (error) {
+            console.warn(`[WalletToken] Failed to send extra chunk: ${error.message}`);
+            break;
+        }
+    }
 }
 
 function buildWalletTokenActionKeyboard(context, lang) {
@@ -1945,9 +2018,24 @@ function buildOkxCandleBarFallbackVariants(bar) {
         addVariant(preferred);
         addVariant(preferred.toUpperCase());
         addVariant(preferred.toLowerCase());
+
+        const match = preferred.match(/^(\d+)([A-Za-z]+)/);
+        if (match) {
+            const [, amount, unit] = match;
+            const lowerUnit = unit.toLowerCase();
+            if (lowerUnit === 'd') {
+                addVariant(`${amount}day`);
+                addVariant(`${amount}Day`);
+                addVariant(`${amount}DAY`);
+            }
+            if (lowerUnit === 'h') {
+                addVariant(`${amount}hour`);
+                addVariant(`${amount}Hour`);
+            }
+        }
     }
 
-    if (!variants.length) {
+    if (!variants.includes(null)) {
         variants.push(null);
     }
 
@@ -10212,7 +10300,10 @@ function startTelegramBot() {
 
                     if (!rendered) {
                         await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        rendered = true;
                     }
+
+                    await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
                     console.error(`[WalletToken] Failed to run ${actionKey}: ${error.message}`);
@@ -10239,6 +10330,7 @@ function startTelegramBot() {
 
                 const menu = buildWalletTokenMenu(context, callbackLang);
                 await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
             }
