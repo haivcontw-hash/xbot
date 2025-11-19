@@ -5657,8 +5657,11 @@ function normalizeDexHolding(row) {
     }
 
     const currencyAmount = Number(row.currencyAmount);
-    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice))
-        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice)
+    const tokenPriceRaw = row.tokenPrice !== undefined && row.tokenPrice !== null
+        ? String(row.tokenPrice)
+        : null;
+    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || tokenPriceRaw))
+        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || tokenPriceRaw)
         : null;
 
     if ((!Number.isFinite(priceUsd) || priceUsd === null) && amountRaw !== null && Number.isFinite(decimals) && Number.isFinite(currencyAmount) && currencyAmount > 0) {
@@ -5684,6 +5687,7 @@ function normalizeDexHolding(row) {
         amountRaw,
         currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
         priceUsd: Number.isFinite(priceUsd) ? priceUsd : null,
+        tokenPrice: tokenPriceRaw,
         chainIndex: row.chainIndex || row.chainId || row.chain || row.chain_id,
         walletAddress: row.address || row.walletAddress,
         isRiskToken: Boolean(row.isRiskToken)
