@@ -5855,8 +5855,7 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         return { tokens: [], totalUsd: null };
     }
 
-    const normalizeShort = (value) => (value || '').toLowerCase().replace(/[^a-z0-9-]/gi, '');
-    const chainShortName = normalizeShort(options.chainContext?.chainShortName) || normalizeShort(OKX_CHAIN_SHORT_NAME) || 'xlayer';
+    const chainShortName = (options.chainContext?.chainShortName || OKX_CHAIN_SHORT_NAME || 'xlayer').trim();
     const chainIdNumbers = Array.from(new Set([
         Number(options.chainContext?.chainId),
         Number(options.chainContext?.chainIndex),
