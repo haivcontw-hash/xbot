@@ -117,15 +117,15 @@ const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
 const WALLET_TOKEN_ACTIONS = [
-    { key: 'current_price', labelKey: 'wallet_token_action_current_price', path: '/api/v6/dex/index/current-price' },
-    { key: 'historical_price', labelKey: 'wallet_token_action_historical_price', path: '/api/v6/dex/index/historical-price' },
-    { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles' },
-    { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles' },
-    { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/price' },
-    { key: 'price_info', labelKey: 'wallet_token_action_price_info', path: '/api/v6/dex/market/price-info' },
-    { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info' },
-    { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder' },
-    { key: 'trades', labelKey: 'wallet_token_action_trades', path: '/api/v6/dex/market/trades' }
+    { key: 'current_price', labelKey: 'wallet_token_action_current_price', path: '/api/v6/dex/index/current-price', method: 'POST' },
+    { key: 'historical_price', labelKey: 'wallet_token_action_historical_price', path: '/api/v6/dex/index/historical-price', method: 'POST' },
+    { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles', method: 'POST' },
+    { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles', method: 'POST' },
+    { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/price', method: 'POST' },
+    { key: 'price_info', labelKey: 'wallet_token_action_price_info', path: '/api/v6/dex/market/price-info', method: 'POST' },
+    { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST' },
+    { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'POST' },
+    { key: 'trades', labelKey: 'wallet_token_action_trades', path: '/api/v6/dex/market/trades', method: 'POST' }
 ];
 const WALLET_TOKEN_ACTION_LOOKUP = WALLET_TOKEN_ACTIONS.reduce((map, action) => {
     map[action.key] = action;
@@ -1620,7 +1620,12 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
             break;
     }
 
-    return okxJsonRequest('GET', config.path, { query, auth: hasOkxCredentials });
+    const method = (config.method || 'GET').toUpperCase();
+    const requestOptions = method === 'GET'
+        ? { query, auth: hasOkxCredentials }
+        : { body: query, auth: hasOkxCredentials };
+
+    return okxJsonRequest(method, config.path, requestOptions);
 }
 
 function buildOkxTokenQueryFromContext(context, overrides = {}) {
@@ -6184,7 +6189,7 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
 
     let priceInfoEntry = null;
     try {
-        const payload = await okxJsonRequest('GET', '/api/v6/dex/market/price-info', { query });
+        const payload = await okxJsonRequest('POST', '/api/v6/dex/market/price-info', { body: query });
         priceInfoEntry = unwrapOkxFirst(payload);
     } catch (error) {
         errors.push(new Error(`[price-info:${chainLabel}] ${error.message}`));
@@ -6195,7 +6200,7 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
 
     if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
         try {
-            const payload = await okxJsonRequest('GET', '/api/v6/dex/market/price', { query });
+            const payload = await okxJsonRequest('POST', '/api/v6/dex/market/price', { body: query });
             priceEntry = unwrapOkxFirst(payload);
             source = 'OKX DEX price';
         } catch (error) {
@@ -6262,7 +6267,7 @@ async function fetchBanmaoTokenProfile(options = {}) {
         query.tokenContractAddress = normalizedAddress;
     }
 
-    const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
+    const payload = await okxJsonRequest('POST', '/api/v6/dex/market/token/basic-info', { body: query });
     return unwrapOkxFirst(payload);
 }
 function decimalToRawBigInt(amount, decimals) {
