@@ -96,6 +96,8 @@ const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY
 const WALLET_BALANCE_TIMEOUT = Number(process.env.WALLET_BALANCE_TIMEOUT || 8000);
 const WALLET_RPC_HEALTH_TIMEOUT = Number(process.env.WALLET_RPC_HEALTH_TIMEOUT || 4000);
 const WALLET_CHAIN_CALLBACK_TTL = Number(process.env.WALLET_CHAIN_CALLBACK_TTL || 10 * 60 * 1000);
+const WALLET_TOKEN_CALLBACK_TTL = Number(process.env.WALLET_TOKEN_CALLBACK_TTL || 5 * 60 * 1000);
+const WALLET_TOKEN_BUTTON_LIMIT = Number(process.env.WALLET_TOKEN_BUTTON_LIMIT || 6);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -113,6 +115,22 @@ const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
+const walletTokenCallbackStore = new Map();
+const WALLET_TOKEN_ACTIONS = [
+    { key: 'current_price', labelKey: 'wallet_token_action_current_price', path: '/api/v6/dex/index/current-price' },
+    { key: 'historical_price', labelKey: 'wallet_token_action_historical_price', path: '/api/v6/dex/index/historical-price' },
+    { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles' },
+    { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles' },
+    { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/price' },
+    { key: 'price_info', labelKey: 'wallet_token_action_price_info', path: '/api/v6/dex/market/price-info' },
+    { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info' },
+    { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder' },
+    { key: 'trades', labelKey: 'wallet_token_action_trades', path: '/api/v6/dex/market/trades' }
+];
+const WALLET_TOKEN_ACTION_LOOKUP = WALLET_TOKEN_ACTIONS.reduce((map, action) => {
+    map[action.key] = action;
+    return map;
+}, {});
 const ERC20_MIN_ABI = [
     'function balanceOf(address account) view returns (uint256)',
     'function decimals() view returns (uint8)',
@@ -773,6 +791,58 @@ function resolveWalletChainCallback(token) {
     return value;
 }
 
+function pruneWalletTokenCallbacks() {
+    const now = Date.now();
+    for (const [key, entry] of walletTokenCallbackStore.entries()) {
+        if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+            walletTokenCallbackStore.delete(key);
+        }
+    }
+}
+
+function registerWalletTokenContext(context) {
+    if (!context) {
+        return null;
+    }
+
+    pruneWalletTokenCallbacks();
+    const token = crypto.randomBytes(4).toString('hex');
+    const now = Date.now();
+    const storedContext = { ...context, tokenCallbackId: token };
+    walletTokenCallbackStore.set(token, {
+        context: storedContext,
+        expiresAt: now + WALLET_TOKEN_CALLBACK_TTL
+    });
+    return token;
+}
+
+function resolveWalletTokenContext(token, { extend = false } = {}) {
+    if (!token) {
+        return null;
+    }
+
+    pruneWalletTokenCallbacks();
+    const entry = walletTokenCallbackStore.get(token);
+    if (!entry) {
+        return null;
+    }
+
+    if (!Number.isFinite(entry.expiresAt) || entry.expiresAt <= Date.now()) {
+        walletTokenCallbackStore.delete(token);
+        return null;
+    }
+
+    if (extend) {
+        entry.expiresAt = Date.now() + WALLET_TOKEN_CALLBACK_TTL;
+    }
+
+    if (entry.context && !entry.context.tokenCallbackId) {
+        entry.context.tokenCallbackId = token;
+    }
+
+    return entry.context;
+}
+
 async function buildWalletChainMenu(lang, walletAddress) {
     let chains = [];
     try {
@@ -1182,6 +1252,110 @@ async function fetchDexOverviewForWallet(walletAddress, options = {}) {
     }
 }
 
+function formatDexChainLabel(entry, lang) {
+    if (!entry) {
+        return lang ? t(lang, 'wallet_balance_chain_unknown') : 'Unknown chain';
+    }
+
+    const chainShort = entry.chainShortName || entry.chainName || entry.chain;
+    const chainIndex = Number.isFinite(entry.chainIndex)
+        ? Number(entry.chainIndex)
+        : Number.isFinite(entry.chainId)
+            ? Number(entry.chainId)
+            : Number.isFinite(entry.chain)
+                ? Number(entry.chain)
+                : null;
+
+    if (chainShort && chainIndex) {
+        return `${chainShort} (#${chainIndex})`;
+    }
+    if (chainShort) {
+        return chainShort;
+    }
+    if (chainIndex) {
+        return `#${chainIndex}`;
+    }
+    return lang ? t(lang, 'wallet_balance_chain_unknown') : 'Unknown chain';
+}
+
+function describeDexTokenValue(token, lang) {
+    const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || token.name || 'Token';
+    const symbolLabel = String(symbol);
+    const balanceValue = token.amountText
+        || token.balance
+        || token.amount
+        || token.rawBalance
+        || token.available
+        || token.currencyAmount
+        || '0';
+    const balanceHtml = `${escapeHtml(String(balanceValue))} ${escapeHtml(symbolLabel)}`;
+
+    const totalUsd = Number.isFinite(token.totalValueUsd)
+        ? Number(token.totalValueUsd)
+        : (Number.isFinite(Number(token.currencyAmount)) ? Number(token.currencyAmount) : null);
+    const formattedTotalUsd = Number.isFinite(totalUsd) && totalUsd > 0
+        ? formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : null;
+    const unitPriceRaw = token.unitPriceText
+        || (token.tokenPrice !== undefined && token.tokenPrice !== null ? String(token.tokenPrice) : null)
+        || (Number.isFinite(token.unitPriceUsd) ? String(token.unitPriceUsd) : null);
+    const priceLabel = unitPriceRaw
+        ? escapeHtml(`${unitPriceRaw} USD/${symbolLabel}`)
+        : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
+
+    const totalParts = [];
+    if (token.totalValueExactText) {
+        totalParts.push(`${token.totalValueExactText} USD`);
+    } else if (formattedTotalUsd) {
+        totalParts.push(`${formattedTotalUsd} USD`);
+    }
+    if (token.valueText) {
+        totalParts.push(token.valueText);
+    }
+
+    const totalLabel = totalParts.length > 0
+        ? totalParts.map((part) => escapeHtml(part)).join(' / ')
+        : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
+
+    return {
+        symbolLabel,
+        balanceHtml,
+        priceLabel,
+        totalLabel,
+        unitPriceRaw,
+        formattedTotalUsd
+    };
+}
+
+function resolveTokenContractAddress(token) {
+    if (!token || typeof token !== 'object') {
+        return null;
+    }
+
+    const candidates = [
+        token.tokenContractAddress,
+        token.tokenAddress,
+        token.contractAddress,
+        token.token,
+        token.address
+    ];
+
+    for (const candidate of candidates) {
+        if (!candidate) {
+            continue;
+        }
+        const normalized = normalizeAddressSafe(candidate);
+        if (normalized) {
+            return normalized;
+        }
+        if (typeof candidate === 'string' && candidate.startsWith('native:')) {
+            return candidate;
+        }
+    }
+
+    return null;
+}
+
 function buildWalletDexOverviewText(lang, walletAddress, overview, options = {}) {
     const normalizedWallet = normalizeAddressSafe(walletAddress) || walletAddress;
     const walletHtml = normalizedWallet
@@ -1208,32 +1382,9 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
         return lines.join('\n');
     }
 
-    const formatChainLabel = (token) => {
-        const chainShort = token.chainShortName || token.chainName;
-        const chainIndex = token.chainIndex || token.chainId || token.chain;
-        if (chainShort && chainIndex) {
-            return `${chainShort} (#${chainIndex})`;
-        }
-        if (chainShort) {
-            return chainShort;
-        }
-        if (chainIndex) {
-            return `#${chainIndex}`;
-        }
-        return t(lang, 'wallet_balance_chain_unknown');
-    };
-
     tokens.forEach((token, idx) => {
-        const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || token.name || 'Token';
-        const symbolLabel = String(symbol);
-        const balanceValue = token.amountText
-            || token.balance
-            || token.amount
-            || token.rawBalance
-            || token.available
-            || token.currencyAmount
-            || '0';
-        const balanceHtml = `${escapeHtml(String(balanceValue))} ${escapeHtml(symbolLabel)}`;
+        const meta = describeDexTokenValue(token, lang);
+        const symbolLabel = meta.symbolLabel;
         const riskLabel = token.isRiskToken || token.riskToken || token.tokenRisk
             ? t(lang, 'wallet_dex_risk_yes')
             : t(lang, 'wallet_dex_risk_no');
@@ -1254,41 +1405,15 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             contractHtml = t(lang, 'wallet_balance_contract_unknown');
         }
 
-        const totalUsd = Number.isFinite(token.totalValueUsd)
-            ? token.totalValueUsd
-            : (Number.isFinite(Number(token.currencyAmount)) ? Number(token.currencyAmount) : null);
-        const formattedTotalUsd = Number.isFinite(totalUsd) && totalUsd > 0
-            ? formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-            : null;
-        const unitPriceRaw = token.unitPriceText
-            || (token.tokenPrice !== undefined && token.tokenPrice !== null ? String(token.tokenPrice) : null)
-            || (Number.isFinite(token.unitPriceUsd) ? String(token.unitPriceUsd) : null);
-        const priceLabel = unitPriceRaw
-            ? escapeHtml(`${unitPriceRaw} USD/${symbolLabel}`)
-            : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
-
-        const totalParts = [];
-        if (token.totalValueExactText) {
-            totalParts.push(`${token.totalValueExactText} USD`);
-        } else if (formattedTotalUsd) {
-            totalParts.push(`${formattedTotalUsd} USD`);
-        }
-        if (token.valueText) {
-            totalParts.push(token.valueText);
-        }
-        const totalLabel = totalParts.length > 0
-            ? totalParts.map((part) => escapeHtml(part)).join(' / ')
-            : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
-
         lines.push('');
         lines.push(t(lang, 'wallet_dex_token_header', {
             index: (idx + 1).toString(),
-            symbol: escapeHtml(String(symbol)),
-            chain: escapeHtml(formatChainLabel(token))
+            symbol: escapeHtml(String(symbolLabel)),
+            chain: escapeHtml(formatDexChainLabel(token, lang))
         }));
-        lines.push(t(lang, 'wallet_dex_token_balance', { balance: balanceHtml }));
-        lines.push(t(lang, 'wallet_dex_token_value', { value: priceLabel }));
-        lines.push(t(lang, 'wallet_dex_token_total_value', { total: totalLabel }));
+        lines.push(t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }));
+        lines.push(t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }));
+        lines.push(t(lang, 'wallet_dex_token_total_value', { total: meta.totalLabel }));
         lines.push(t(lang, 'wallet_dex_token_contract', { contract: contractHtml }));
         lines.push(t(lang, 'wallet_dex_token_risk', { risk: escapeHtml(riskLabel) }));
     });
@@ -1304,6 +1429,544 @@ function appendPortfolioLinkAndHint(lines, lang, walletAddress, customUrl) {
         lines.push(t(lang, 'wallet_dex_analysis_link', { url: escapeHtml(analysisUrl) }));
     }
     lines.push(t(lang, 'wallet_dex_copy_hint'));
+}
+
+function buildWalletTokenButtonRows(lang, tokens, options = {}) {
+    if (!Array.isArray(tokens) || tokens.length === 0) {
+        return [];
+    }
+
+    const normalizedWallet = normalizeAddressSafe(options.wallet) || options.wallet || null;
+    const chainContext = options.chainContext || null;
+    const chainLabel = options.chainLabel || (chainContext ? formatDexChainLabel(chainContext, lang) : null);
+    const limit = Number.isFinite(options.maxButtons) ? Math.max(1, options.maxButtons) : WALLET_TOKEN_BUTTON_LIMIT;
+    const rows = [];
+    let currentRow = [];
+
+    for (const token of tokens.slice(0, limit)) {
+        if (!token) {
+            continue;
+        }
+        const callbackId = registerWalletTokenContext({
+            wallet: normalizedWallet,
+            chainContext,
+            chainLabel,
+            chainCallbackData: options.chainCallbackData || null,
+            token
+        });
+        if (!callbackId) {
+            continue;
+        }
+
+        const meta = describeDexTokenValue(token, lang);
+        const symbol = meta.symbolLabel || 'Token';
+        const truncatedSymbol = symbol.length > 16 ? `${symbol.slice(0, 13)}…` : symbol;
+        currentRow.push({
+            text: `🪙 ${truncatedSymbol}`,
+            callback_data: `wallet_token_view|${callbackId}`
+        });
+
+        if (currentRow.length === 2) {
+            rows.push(currentRow);
+            currentRow = [];
+        }
+    }
+
+    if (currentRow.length > 0) {
+        rows.push(currentRow);
+    }
+
+    return rows;
+}
+
+function buildWalletTokenMenu(context, lang, options = {}) {
+    const token = context?.token || {};
+    const meta = describeDexTokenValue(token, lang);
+    const walletHtml = context?.wallet
+        ? `<code>${escapeHtml(context.wallet)}</code>`
+        : t(lang, 'wallet_balance_contract_unknown');
+    const chainLabel = context?.chainLabel || formatDexChainLabel(context?.chainContext || token, lang);
+    const contractAddress = resolveTokenContractAddress(token);
+    const contractHtml = contractAddress
+        ? `<code>${escapeHtml(contractAddress)}</code>`
+        : t(lang, 'wallet_balance_contract_unknown');
+
+    const lines = [
+        t(lang, 'wallet_token_menu_title', { symbol: escapeHtml(meta.symbolLabel || 'Token') }),
+        t(lang, 'wallet_dex_wallet_line', { wallet: walletHtml }),
+        t(lang, 'wallet_balance_chain_line', { chain: escapeHtml(chainLabel) }),
+        t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }),
+        t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }),
+        t(lang, 'wallet_dex_token_total_value', { total: meta.totalLabel }),
+        t(lang, 'wallet_dex_token_contract', { contract: contractHtml }),
+        '',
+        t(lang, 'wallet_token_menu_hint')
+    ];
+
+    if (options.actionResult) {
+        const actionResult = options.actionResult;
+        lines.push('');
+        lines.push(t(lang, 'wallet_token_action_result_title', {
+            symbol: escapeHtml(meta.symbolLabel || 'Token'),
+            action: escapeHtml(actionResult.actionLabel || '')
+        }));
+
+        const metrics = Array.isArray(actionResult.metrics) ? actionResult.metrics : [];
+        metrics.forEach((metric) => {
+            if (!metric || !metric.label || metric.value === undefined || metric.value === null) {
+                return;
+            }
+            lines.push(t(lang, 'wallet_token_action_metric_line', {
+                label: escapeHtml(String(metric.label)),
+                value: escapeHtml(String(metric.value))
+            }));
+        });
+
+        const entries = Array.isArray(actionResult.listEntries) ? actionResult.listEntries : [];
+        if (entries.length > 0) {
+            lines.push('');
+            const listLabel = actionResult.listLabel || actionResult.actionLabel || '';
+            if (listLabel) {
+                lines.push(t(lang, 'wallet_token_action_list_header', { label: escapeHtml(listLabel) }));
+            }
+            entries.forEach((entry) => {
+                lines.push(`• ${escapeHtml(String(entry))}`);
+            });
+        } else if (metrics.length === 0) {
+            lines.push(t(lang, 'wallet_token_action_result_empty'));
+        }
+    }
+
+    return {
+        text: lines.join('\n'),
+        replyMarkup: buildWalletTokenActionKeyboard(context, lang)
+    };
+}
+
+function buildWalletTokenActionKeyboard(context, lang) {
+    const rows = [];
+    const tokenId = context?.tokenCallbackId;
+
+    if (tokenId) {
+        let currentRow = [];
+        for (const action of WALLET_TOKEN_ACTIONS) {
+            currentRow.push({
+                text: t(lang, action.labelKey),
+                callback_data: `wallet_token_action|${tokenId}|${action.key}`
+            });
+            if (currentRow.length === 2) {
+                rows.push(currentRow);
+                currentRow = [];
+            }
+        }
+        if (currentRow.length > 0) {
+            rows.push(currentRow);
+        }
+    }
+
+    if (context?.chainCallbackData) {
+        rows.push([{ text: t(lang, 'wallet_token_back_to_assets'), callback_data: context.chainCallbackData }]);
+    }
+
+    rows.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+    return { inline_keyboard: rows };
+}
+
+async function buildWalletTokenActionResult(actionKey, context, lang) {
+    const config = WALLET_TOKEN_ACTION_LOOKUP[actionKey];
+    if (!config) {
+        throw new Error('wallet_token_action_unknown');
+    }
+
+    const payload = await fetchWalletTokenActionPayload(actionKey, context);
+    return normalizeWalletTokenActionResult(actionKey, payload, lang);
+}
+
+async function fetchWalletTokenActionPayload(actionKey, context) {
+    const config = WALLET_TOKEN_ACTION_LOOKUP[actionKey];
+    if (!config) {
+        throw new Error('wallet_token_action_unknown');
+    }
+
+    const tokenAddress = resolveTokenContractAddress(context?.token);
+    if (!tokenAddress) {
+        throw new Error('wallet_token_missing_contract');
+    }
+
+    const baseQuery = buildOkxTokenQueryFromContext(context);
+    const query = { ...baseQuery };
+
+    switch (actionKey) {
+        case 'historical_price':
+            query.limit = query.limit || 10;
+            break;
+        case 'candles':
+            query.bar = query.bar || '1m';
+            query.limit = query.limit || 10;
+            break;
+        case 'historical_candles':
+            query.bar = query.bar || '15m';
+            query.limit = query.limit || 20;
+            break;
+        case 'latest_price':
+        case 'price_info':
+        case 'trades':
+            query.limit = query.limit || 10;
+            break;
+        case 'holder':
+            query.limit = query.limit || 10;
+            break;
+        default:
+            break;
+    }
+
+    return okxJsonRequest('GET', config.path, { query, auth: hasOkxCredentials });
+}
+
+function buildOkxTokenQueryFromContext(context, overrides = {}) {
+    const query = { ...overrides };
+    const chainContext = context?.chainContext || {};
+    const token = context?.token || {};
+    const tokenAddress = resolveTokenContractAddress(token);
+
+    if (tokenAddress) {
+        query.tokenAddress = query.tokenAddress || tokenAddress;
+        query.tokenContractAddress = query.tokenContractAddress || tokenAddress;
+        query.contractAddress = query.contractAddress || tokenAddress;
+        query.baseTokenAddress = query.baseTokenAddress || tokenAddress;
+        query.fromTokenAddress = query.fromTokenAddress || tokenAddress;
+    }
+
+    const chainIndex = Number.isFinite(token?.chainIndex)
+        ? Number(token.chainIndex)
+        : Number.isFinite(chainContext?.chainIndex)
+            ? Number(chainContext.chainIndex)
+            : null;
+    const chainId = Number.isFinite(token?.chainId)
+        ? Number(token.chainId)
+        : Number.isFinite(chainContext?.chainId)
+            ? Number(chainContext.chainId)
+            : chainIndex;
+
+    if (Number.isFinite(chainIndex) && !Number.isFinite(query.chainIndex)) {
+        query.chainIndex = chainIndex;
+    }
+    if (Number.isFinite(chainId) && !Number.isFinite(query.chainId)) {
+        query.chainId = chainId;
+    }
+
+    const chainShortName = resolveChainContextShortName(chainContext) || chainContext.chainShortName;
+    if (chainShortName && !query.chainShortName) {
+        query.chainShortName = chainShortName;
+    }
+
+    if (context?.wallet && !query.walletAddress) {
+        query.walletAddress = context.wallet;
+    }
+
+    if (OKX_QUOTE_TOKEN_ADDRESS) {
+        query.quoteTokenAddress = query.quoteTokenAddress || OKX_QUOTE_TOKEN_ADDRESS;
+        query.toTokenAddress = query.toTokenAddress || OKX_QUOTE_TOKEN_ADDRESS;
+    }
+
+    return query;
+}
+
+function normalizeWalletTokenActionResult(actionKey, payload, lang) {
+    const config = WALLET_TOKEN_ACTION_LOOKUP[actionKey];
+    const actionLabel = config ? t(lang, config.labelKey) : actionKey;
+    const result = {
+        actionLabel,
+        metrics: [],
+        listEntries: [],
+        listLabel: null
+    };
+
+    const entries = unwrapOkxData(payload) || [];
+    const primaryEntry = unwrapOkxFirst(payload) || (entries.length > 0 ? entries[0] : null);
+
+    switch (actionKey) {
+        case 'current_price':
+        case 'latest_price':
+        case 'price_info': {
+            result.metrics.push(...buildWalletTokenPriceMetrics(primaryEntry, actionKey));
+            break;
+        }
+        case 'historical_price': {
+            result.listEntries = entries
+                .slice(0, 6)
+                .map(formatWalletTokenHistoryEntry)
+                .filter(Boolean);
+            result.listLabel = actionLabel;
+            break;
+        }
+        case 'candles':
+        case 'historical_candles': {
+            result.listEntries = entries
+                .slice(0, 6)
+                .map(formatWalletTokenCandleEntry)
+                .filter(Boolean);
+            result.listLabel = actionLabel;
+            break;
+        }
+        case 'token_info': {
+            if (primaryEntry) {
+                const name = primaryEntry.name || primaryEntry.tokenName;
+                const symbol = primaryEntry.symbol || primaryEntry.tokenSymbol;
+                if (name || symbol) {
+                    result.metrics.push({ label: '🧬 Token', value: [name, symbol].filter(Boolean).join(' / ') });
+                }
+                const decimals = pickOkxNumeric(primaryEntry, ['decimals', 'decimal', 'tokenDecimal']);
+                if (Number.isFinite(decimals)) {
+                    result.metrics.push({ label: '🔢 Decimals', value: decimals });
+                }
+                const supply = pickOkxNumeric(primaryEntry, ['supply', 'totalSupply', 'circulatingSupply']);
+                if (Number.isFinite(supply)) {
+                    result.metrics.push({ label: '📦 Supply', value: supply });
+                }
+                const holders = pickOkxNumeric(primaryEntry, ['holderCount', 'holders']);
+                if (Number.isFinite(holders)) {
+                    result.metrics.push({ label: '👥 Holders', value: holders });
+                }
+                const website = primaryEntry.website || primaryEntry.site;
+                if (website) {
+                    result.metrics.push({ label: '🌐 Website', value: website });
+                }
+            }
+            break;
+        }
+        case 'holder': {
+            const total = pickOkxNumeric(primaryEntry || payload?.data || {}, ['holderCount', 'holders', 'total']);
+            if (Number.isFinite(total)) {
+                result.metrics.push({ label: '👥 Total holders', value: total });
+            }
+            result.listEntries = entries
+                .slice(0, 5)
+                .map((entry, idx) => formatWalletTokenHolderEntry(entry, idx))
+                .filter(Boolean);
+            result.listLabel = actionLabel;
+            break;
+        }
+        case 'trades': {
+            result.listEntries = entries
+                .slice(0, 5)
+                .map(formatWalletTokenTradeEntry)
+                .filter(Boolean);
+            result.listLabel = actionLabel;
+            break;
+        }
+        default:
+            break;
+    }
+
+    return result;
+}
+
+function buildWalletTokenPriceMetrics(entry, actionKey) {
+    const metrics = [];
+    if (!entry) {
+        return metrics;
+    }
+
+    const price = extractOkxPriceValue(entry);
+    if (price !== null && price !== undefined) {
+        metrics.push({ label: '💰 Price', value: `${price} USD` });
+    }
+
+    const changeAbs = pickOkxNumeric(entry, ['usdChange24h', 'change24h', 'change', 'priceChange']);
+    if (Number.isFinite(changeAbs)) {
+        metrics.push({ label: '📈 Change (24h)', value: changeAbs });
+    }
+
+    const changePercent = pickOkxNumeric(entry, ['changeRate', 'changePercent', 'change24hPercent', 'percentChange', 'changePct']);
+    if (Number.isFinite(changePercent)) {
+        metrics.push({ label: '📉 Change %', value: `${changePercent}%` });
+    }
+
+    const volume = pickOkxNumeric(entry, ['volume24h', 'usdVolume24h', 'turnover24h', 'volume']);
+    if (Number.isFinite(volume)) {
+        metrics.push({ label: '📊 Volume 24h', value: volume });
+    }
+
+    const liquidity = pickOkxNumeric(entry, ['liquidity', 'liquidityUsd', 'usdLiquidity']);
+    if (Number.isFinite(liquidity)) {
+        metrics.push({ label: '💦 Liquidity', value: liquidity });
+    }
+
+    const marketCap = pickOkxNumeric(entry, ['marketCap', 'marketCapUsd', 'fdvUsd', 'fullyDilutedMarketCap']);
+    if (Number.isFinite(marketCap)) {
+        metrics.push({ label: '🏦 Market cap', value: marketCap });
+    }
+
+    const timestamp = entry.ts || entry.timestamp || entry.time;
+    const timestampLabel = formatWalletTokenTimestamp(timestamp);
+    if (timestampLabel) {
+        metrics.push({ label: '🕒 Timestamp', value: timestampLabel });
+    }
+
+    const source = entry.source || entry.market || entry.venue;
+    if (source) {
+        metrics.push({ label: '🔗 Source', value: source });
+    }
+
+    if (actionKey === 'latest_price') {
+        const pair = entry.instrumentId || entry.symbol || entry.pair;
+        if (pair) {
+            metrics.push({ label: '🪙 Pair', value: pair });
+        }
+    }
+
+    return metrics;
+}
+
+function formatWalletTokenTimestamp(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    let numeric = null;
+    if (typeof value === 'number') {
+        numeric = value;
+    } else if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (/^-?\d+$/.test(trimmed)) {
+            numeric = Number(trimmed);
+        } else {
+            return trimmed;
+        }
+    } else {
+        return null;
+    }
+
+    const ms = numeric > 1e12 ? numeric : numeric * 1000;
+    if (!Number.isFinite(ms)) {
+        return null;
+    }
+    return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+function formatWalletTokenHistoryEntry(row) {
+    if (!row) {
+        return null;
+    }
+
+    if (Array.isArray(row)) {
+        const timestamp = row[0];
+        const price = row[1] ?? row[2];
+        const label = formatWalletTokenTimestamp(timestamp) || timestamp;
+        if (!label && price === undefined) {
+            return null;
+        }
+        return label ? `${label}: ${price ?? '—'}` : `${price ?? '—'}`;
+    }
+
+    const timestamp = row.ts || row.timestamp || row.time || row.date;
+    const price = row.price || row.value || row.indexPrice;
+    const label = formatWalletTokenTimestamp(timestamp) || timestamp;
+    if (!label && price === undefined) {
+        return null;
+    }
+    return label ? `${label}: ${price ?? '—'}` : `${price ?? '—'}`;
+}
+
+function formatWalletTokenCandleEntry(row) {
+    if (!row) {
+        return null;
+    }
+
+    let timestamp;
+    let open;
+    let high;
+    let low;
+    let close;
+    let volume;
+
+    if (Array.isArray(row)) {
+        [timestamp, open, high, low, close, volume] = row;
+    } else {
+        timestamp = row.ts || row.timestamp || row.time;
+        open = row.open || row.o;
+        high = row.high || row.h;
+        low = row.low || row.l;
+        close = row.close || row.c;
+        volume = row.volume || row.v;
+    }
+
+    const label = formatWalletTokenTimestamp(timestamp) || timestamp;
+    const parts = [
+        `O ${open ?? '—'}`,
+        `H ${high ?? '—'}`,
+        `L ${low ?? '—'}`,
+        `C ${close ?? '—'}`
+    ];
+    if (volume !== undefined && volume !== null) {
+        parts.push(`V ${volume}`);
+    }
+
+    return label ? `${label}: ${parts.join(' / ')}` : parts.join(' / ');
+}
+
+function formatWalletTokenHolderEntry(row, index = 0) {
+    if (!row) {
+        return null;
+    }
+    const address = row.address || row.walletAddress || row.holderAddress;
+    const amount = row.amount || row.balance || row.quantity;
+    const percent = pickOkxNumeric(row, ['percentage', 'percent', 'ratio']);
+    const parts = [];
+
+    if (address) {
+        const normalized = normalizeAddressSafe(address) || address;
+        parts.push(shortenAddress(normalized));
+    }
+    if (amount !== undefined && amount !== null) {
+        parts.push(amount);
+    }
+    if (Number.isFinite(percent)) {
+        parts.push(`${percent}%`);
+    }
+
+    if (parts.length === 0) {
+        return null;
+    }
+
+    return `${index + 1}. ${parts.join(' — ')}`;
+}
+
+function formatWalletTokenTradeEntry(row) {
+    if (!row) {
+        return null;
+    }
+
+    let timestamp;
+    let price;
+    let amount;
+    let side;
+
+    if (Array.isArray(row)) {
+        [timestamp, price, amount, side] = row;
+    } else {
+        timestamp = row.ts || row.timestamp || row.time;
+        price = row.price || row.fillPrice || row.tradePrice;
+        amount = row.amount || row.size || row.qty || row.quantity;
+        side = row.side || row.direction || row.type;
+    }
+
+    const label = formatWalletTokenTimestamp(timestamp) || timestamp;
+    const sideLabel = side ? String(side).toUpperCase() : '';
+    const parts = [];
+    if (sideLabel) {
+        parts.push(sideLabel);
+    }
+    if (amount !== undefined && amount !== null) {
+        parts.push(amount);
+    }
+    if (price !== undefined && price !== null) {
+        parts.push(`@ ${price}`);
+    }
+
+    const entryText = parts.join(' ');
+    return label ? `${label}: ${entryText}` : entryText;
 }
 
 function resolveKnownTokenAddress(tokenKey) {
@@ -8329,14 +8992,29 @@ function startTelegramBot() {
                     }];
 
                     const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
+                    const chainRefreshToken = createWalletChainCallback(chainContext, normalizedWallet);
+                    const chainCallbackData = chainRefreshToken ? `wallet_chain|${chainRefreshToken}` : null;
+                    const tokenButtonRows = buildWalletTokenButtonRows(callbackLang, entries[0]?.tokens || [], {
+                        wallet: normalizedWallet,
+                        chainContext,
+                        chainLabel,
+                        chainCallbackData
+                    });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
                         .filter((row) => row.address && row.url)
                         .map((row) => [{ text: t(callbackLang, 'wallet_action_portfolio', { wallet: shortenAddress(row.address) }), url: row.url }]);
                     const backTarget = targetWallet || normalizedWallet;
                     const backCallback = backTarget ? `wallet_chain_menu|${encodeURIComponent(backTarget)}` : 'wallet_overview';
+                    const combinedRows = [];
+                    if (tokenButtonRows.length > 0) {
+                        combinedRows.push(...tokenButtonRows);
+                    }
+                    if (portfolioRows.length > 0) {
+                        combinedRows.push(...portfolioRows);
+                    }
                     const replyMarkup = appendCloseButton(
-                        portfolioRows.length ? { inline_keyboard: portfolioRows } : null,
+                        combinedRows.length ? { inline_keyboard: combinedRows } : null,
                         callbackLang,
                         { backCallbackData: backCallback }
                     );
@@ -8381,6 +9059,64 @@ function startTelegramBot() {
                         console.warn(`[WalletChains] Callback ack error after failure: ${ackError.message}`);
                     }
                 }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_token_action|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const parts = query.data.split('|');
+                const tokenId = parts[1];
+                const actionKey = parts[2];
+                const context = resolveWalletTokenContext(tokenId, { extend: true });
+                if (!context || !actionKey) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
+                    return;
+                }
+
+                try {
+                    const actionResult = await buildWalletTokenActionResult(actionKey, context, callbackLang);
+                    const menu = buildWalletTokenMenu(context, callbackLang, { actionResult });
+                    if (query.message?.message_id) {
+                        await bot.editMessageText(menu.text, {
+                            chat_id: chatId,
+                            message_id: query.message.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        });
+                    } else {
+                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[WalletToken] Failed to run ${actionKey}: ${error.message}`);
+                    const alertText = error.message === 'wallet_token_missing_contract'
+                        ? t(callbackLang, 'wallet_token_action_no_contract')
+                        : t(callbackLang, 'wallet_token_action_error');
+                    await bot.answerCallbackQuery(queryId, { text: alertText, show_alert: true });
+                }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_token_view|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const tokenId = query.data.split('|')[1];
+                const context = resolveWalletTokenContext(tokenId, { extend: true });
+                if (!context) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
+                    return;
+                }
+
+                const menu = buildWalletTokenMenu(context, callbackLang);
+                await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
             }
 
