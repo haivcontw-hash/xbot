@@ -755,9 +755,8 @@ async function buildWalletChainMenu(lang, walletAddress) {
     const buttons = sorted.map((entry) => {
         const label = formatChainLabel(entry) || 'Chain';
         const chainId = Number(entry.chainId || entry.chainIndex || 196);
-        const chainShort = encodeURIComponent(entry.chainShortName || entry.chainName || 'xlayer');
         const walletParam = walletAddress ? `|${encodeURIComponent(walletAddress)}` : '';
-        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}${walletParam}` };
+        return { text: label, callback_data: `wallet_chain|${chainId}${walletParam}` };
     });
 
     const inline_keyboard = [];
@@ -6208,6 +6207,11 @@ function normalizeChainKey(value) {
     return trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Backward-compatible alias for earlier helper name references.
+function normalizeOkxChainEntry(entry) {
+    return normalizeOkxChainDirectoryEntry(entry);
+}
+
 function normalizeOkxChainDirectoryEntry(entry) {
     if (!entry) {
         return null;
@@ -8237,8 +8241,24 @@ function startTelegramBot() {
                 }
                 const parts = query.data.split('|');
                 const chainId = Number(parts[1]);
-                const chainShort = parts[2] ? decodeURIComponent(parts[2]) : null;
-                const targetWallet = parts[3] ? decodeURIComponent(parts[3]) : null;
+                const third = parts[2] ? decodeURIComponent(parts[2]) : null;
+                const fourth = parts[3] ? decodeURIComponent(parts[3]) : null;
+
+                let chainShort = null;
+                let targetWallet = null;
+
+                if (fourth) {
+                    chainShort = third;
+                    targetWallet = normalizeAddressSafe(fourth) || fourth;
+                } else if (third) {
+                    const maybeWallet = normalizeAddressSafe(third);
+                    if (maybeWallet) {
+                        targetWallet = maybeWallet;
+                    } else {
+                        chainShort = third;
+                    }
+                }
+
                 let chainEntry = null;
                 try {
                     const chains = await fetchOkxBalanceSupportedChains();
@@ -8249,35 +8269,36 @@ function startTelegramBot() {
                     console.warn(`[WalletChains] Failed to load chains for selection: ${error.message}`);
                 }
 
-            const chainContext = chainEntry || {
-                chainId: Number.isFinite(chainId) ? chainId : 196,
-                chainIndex: Number.isFinite(chainId) ? chainId : 196,
-                chainShortName: chainShort || 'xlayer',
-                aliases: chainShort ? [chainShort] : ['xlayer']
-            };
-            const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
+                const chainContext = chainEntry || {
+                    chainId: Number.isFinite(chainId) ? chainId : 196,
+                    chainIndex: Number.isFinite(chainId) ? chainId : 196,
+                    chainShortName: chainEntry?.chainShortName || chainShort || 'xlayer',
+                    aliases: chainEntry?.aliases || (chainShort ? [chainShort] : ['xlayer'])
+                };
+                const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
-            try {
-                const normalizedWallet = normalizeAddressSafe(targetWallet) || targetWallet;
-                const liveSnapshot = await fetchLiveWalletTokens(normalizedWallet, {
-                    chainContext,
-                    forceDex: true
-                });
+                try {
+                    const normalizedWallet = normalizeAddressSafe(targetWallet) || targetWallet;
+                    const liveSnapshot = await fetchLiveWalletTokens(normalizedWallet, {
+                        chainContext,
+                        forceDex: true
+                    });
 
-                const entries = [{
-                    address: normalizedWallet,
-                    tokens: Array.isArray(liveSnapshot.tokens) ? liveSnapshot.tokens : [],
-                    warning: liveSnapshot.warning,
-                    cached: false,
-                    totalUsd: Number.isFinite(liveSnapshot.totalUsd) ? liveSnapshot.totalUsd : null
-                }];
+                    const entries = [{
+                        address: normalizedWallet,
+                        tokens: Array.isArray(liveSnapshot.tokens) ? liveSnapshot.tokens : [],
+                        warning: liveSnapshot.warning,
+                        cached: false,
+                        totalUsd: Number.isFinite(liveSnapshot.totalUsd) ? liveSnapshot.totalUsd : null
+                    }];
 
-                const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
+                    const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
                         .filter((row) => row.address && row.url)
                         .map((row) => [{ text: t(callbackLang, 'wallet_action_portfolio', { wallet: shortenAddress(row.address) }), url: row.url }]);
-                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
+                    const backTarget = targetWallet || normalizedWallet;
+                    const backCallback = backTarget ? `wallet_chain_menu|${encodeURIComponent(backTarget)}` : 'wallet_overview';
                     const replyMarkup = appendCloseButton(
                         portfolioRows.length ? { inline_keyboard: portfolioRows } : null,
                         callbackLang,
@@ -8311,7 +8332,8 @@ function startTelegramBot() {
                 } catch (error) {
                     console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
                     const fallback = t(callbackLang, 'wallet_overview_wallet_no_token');
-                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
+                    const backTarget = targetWallet || null;
+                    const backCallback = backTarget ? `wallet_chain_menu|${encodeURIComponent(backTarget)}` : 'wallet_overview';
                     try {
                         await bot.sendMessage(chatId, fallback, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang, { backCallbackData: backCallback }) });
                     } catch (sendError) {
