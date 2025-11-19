@@ -95,6 +95,7 @@ const OKX_WALLET_LOG_LOOKBACK_BLOCKS = Number(process.env.OKX_WALLET_LOG_LOOKBAC
 const WALLET_BALANCE_CONCURRENCY = Number(process.env.WALLET_BALANCE_CONCURRENCY || 8);
 const WALLET_BALANCE_TIMEOUT = Number(process.env.WALLET_BALANCE_TIMEOUT || 8000);
 const WALLET_RPC_HEALTH_TIMEOUT = Number(process.env.WALLET_RPC_HEALTH_TIMEOUT || 4000);
+const WALLET_CHAIN_CALLBACK_TTL = Number(process.env.WALLET_CHAIN_CALLBACK_TTL || 10 * 60 * 1000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -111,6 +112,7 @@ let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
+const walletChainCallbackStore = new Map();
 const ERC20_MIN_ABI = [
     'function balanceOf(address account) view returns (uint256)',
     'function decimals() view returns (uint8)',
@@ -726,6 +728,57 @@ function sortChainsForMenu(chains) {
     });
 }
 
+function pruneWalletChainCallbacks() {
+    const now = Date.now();
+    for (const [key, value] of walletChainCallbackStore.entries()) {
+        if (!value || !Number.isFinite(value.expiresAt) || value.expiresAt <= now) {
+            walletChainCallbackStore.delete(key);
+        }
+    }
+}
+
+function createWalletChainCallback(entry, walletAddress) {
+    pruneWalletChainCallbacks();
+    const token = crypto.randomBytes(4).toString('hex');
+    const normalizedWallet = normalizeAddressSafe(walletAddress) || walletAddress;
+
+    const chainId = Number.isFinite(entry?.chainId)
+        ? Number(entry.chainId)
+        : Number.isFinite(entry?.chainIndex)
+            ? Number(entry.chainIndex)
+            : OKX_CHAIN_INDEX_FALLBACK;
+
+    const chainContext = {
+        chainId,
+        chainIndex: Number.isFinite(entry?.chainIndex) ? Number(entry.chainIndex) : chainId,
+        chainShortName: entry?.chainShortName || null,
+        chainName: entry?.chainName || null,
+        aliases: Array.isArray(entry?.aliases) ? entry.aliases : null
+    };
+
+    walletChainCallbackStore.set(token, {
+        wallet: normalizedWallet,
+        chainContext,
+        expiresAt: Date.now() + WALLET_CHAIN_CALLBACK_TTL
+    });
+
+    return token;
+}
+
+function resolveWalletChainCallback(token) {
+    pruneWalletChainCallbacks();
+    const value = walletChainCallbackStore.get(token);
+    if (!value) {
+        return null;
+    }
+    if (!Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now()) {
+        walletChainCallbackStore.delete(token);
+        return null;
+    }
+    walletChainCallbackStore.delete(token);
+    return value;
+}
+
 async function buildWalletChainMenu(lang, walletAddress) {
     let chains = [];
     try {
@@ -754,9 +807,8 @@ async function buildWalletChainMenu(lang, walletAddress) {
     const sorted = sortChainsForMenu(chains);
     const buttons = sorted.map((entry) => {
         const label = formatChainLabel(entry) || 'Chain';
-        const chainId = Number(entry.chainId || entry.chainIndex || 196);
-        const walletParam = walletAddress ? `|${encodeURIComponent(walletAddress)}` : '';
-        return { text: label, callback_data: `wallet_chain|${chainId}${walletParam}` };
+        const callbackToken = createWalletChainCallback(entry, walletAddress);
+        return { text: label, callback_data: `wallet_chain|${callbackToken}` };
     });
 
     const inline_keyboard = [];
@@ -8240,12 +8292,28 @@ function startTelegramBot() {
                     return;
                 }
                 const parts = query.data.split('|');
-                const chainId = Number(parts[1]);
+                const chainToken = parts[1] ? parts[1].trim() : null;
                 const third = parts[2] ? decodeURIComponent(parts[2]) : null;
                 const fourth = parts[3] ? decodeURIComponent(parts[3]) : null;
 
                 let chainShort = null;
                 let targetWallet = null;
+                let chainId = Number.isFinite(Number(chainToken)) ? Number(chainToken) : null;
+                let chainEntry = null;
+
+                if (chainToken && !Number.isFinite(chainId)) {
+                    const resolved = resolveWalletChainCallback(chainToken);
+                    if (resolved?.chainContext) {
+                        chainEntry = resolved.chainContext;
+                        chainId = Number.isFinite(chainEntry.chainId)
+                            ? chainEntry.chainId
+                            : Number.isFinite(chainEntry.chainIndex)
+                                ? chainEntry.chainIndex
+                                : chainId;
+                        chainShort = chainEntry.chainShortName || chainShort;
+                        targetWallet = targetWallet || resolved.wallet || null;
+                    }
+                }
 
                 if (fourth) {
                     chainShort = third;
@@ -8259,10 +8327,9 @@ function startTelegramBot() {
                     }
                 }
 
-                let chainEntry = null;
                 try {
                     const chains = await fetchOkxBalanceSupportedChains();
-                    chainEntry = chains.find((entry) => Number(entry.chainId) === chainId
+                    chainEntry = chainEntry || chains.find((entry) => Number(entry.chainId) === chainId
                         || Number(entry.chainIndex) === chainId
                         || (chainShort && entry.chainShortName === chainShort));
                 } catch (error) {
