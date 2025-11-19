@@ -221,15 +221,23 @@ const OKX_CANDLE_BAR_MAP = {
     '1w': '1W',
     '1mo': '1M',
     '1mth': '1M',
-    '1month': '1M'
+    '1month': '1M',
+    '1mutc': '1Mutc',
+    '3mutc': '3Mutc',
+    '6hutc': '6Hutc',
+    '12hutc': '12Hutc',
+    '1dutc': '1Dutc',
+    '1wutc': '1Wutc'
 };
 const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
     const value = Number(process.env.TELEGRAM_MESSAGE_SAFE_LENGTH || 3900);
     return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
 })();
-const WALLET_TOKEN_HOLDER_LIMIT = 100;
+const WALLET_TOKEN_HOLDER_LIMIT = 200;
 const WALLET_TOKEN_TRADE_LIMIT = 100;
-const WALLET_TOKEN_CANDLE_DAY_SPAN = 30;
+const WALLET_TOKEN_CANDLE_DAY_SPAN = 7;
+const WALLET_TOKEN_CANDLE_RECENT_LIMIT = 24;
+const WALLET_TOKEN_CANDLE_RECENT_BAR = '1H';
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -244,11 +252,22 @@ const WALLET_TOKEN_ACTIONS = [
         path: '/api/v6/dex/index/historical-price',
         method: 'GET'
     },
-    { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles', method: 'POST' },
-    { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles', method: 'POST' },
+    { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles', method: 'GET' },
+    {
+        key: 'historical_candles',
+        labelKey: 'wallet_token_action_historical_candles',
+        path: '/api/v6/dex/market/historical-candles',
+        method: 'GET'
+    },
     { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/trades', method: 'GET' },
-    { key: 'price_info', labelKey: 'wallet_token_action_price_info', path: '/api/v6/dex/market/price-info', method: 'POST' },
-    { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST' },
+    {
+        key: 'price_info',
+        labelKey: 'wallet_token_action_price_info',
+        path: '/api/v6/dex/market/price-info',
+        method: 'POST',
+        bodyType: 'array'
+    },
+    { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST', bodyType: 'array' },
     { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'GET' }
 ];
 const WALLET_TOKEN_ACTION_LOOKUP = WALLET_TOKEN_ACTIONS.reduce((map, action) => {
@@ -1793,21 +1812,20 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
             break;
         }
         case 'candles':
-            query.bar = normalizeOkxCandleBar(query.bar, '1m') || '1m';
-            query.limit = query.limit || 10;
+            query.bar = normalizeOkxCandleBar(query.bar, WALLET_TOKEN_CANDLE_RECENT_BAR) || WALLET_TOKEN_CANDLE_RECENT_BAR;
+            query.limit = Math.min(WALLET_TOKEN_CANDLE_RECENT_LIMIT, query.limit || WALLET_TOKEN_CANDLE_RECENT_LIMIT);
             break;
         case 'historical_candles':
-            query.bar = normalizeOkxCandleBar(query.bar, '1d') || '1D';
-            query.limit = Math.min(
-                WALLET_TOKEN_CANDLE_DAY_SPAN,
-                query.limit || WALLET_TOKEN_CANDLE_DAY_SPAN
-            );
+            query.bar = normalizeOkxCandleBar(query.bar, '1Dutc') || '1Dutc';
+            query.limit = Math.min(WALLET_TOKEN_CANDLE_DAY_SPAN, query.limit || WALLET_TOKEN_CANDLE_DAY_SPAN);
             break;
         case 'latest_price':
             query.limit = Math.min(WALLET_TOKEN_TRADE_LIMIT, query.limit || WALLET_TOKEN_TRADE_LIMIT);
             break;
         case 'price_info':
-            query.limit = query.limit || 1;
+            if (query.limit === undefined || query.limit === null) {
+                delete query.limit;
+            }
             break;
         case 'holder':
             query.limit = Math.min(WALLET_TOKEN_HOLDER_LIMIT, query.limit || WALLET_TOKEN_HOLDER_LIMIT);
@@ -2522,9 +2540,19 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
     const primaryEntry = unwrapOkxFirst(payload) || (entries.length > 0 ? entries[0] : null);
 
     switch (actionKey) {
-        case 'current_price':
-        case 'price_info': {
+        case 'current_price': {
             result.metrics.push(...buildWalletTokenPriceMetrics(primaryEntry, actionKey));
+            break;
+        }
+        case 'price_info': {
+            result.metrics.push(...buildWalletTokenPriceInfoMetrics(primaryEntry));
+            result.listEntries = entries
+                .slice(0, 7)
+                .map(formatWalletTokenPriceInfoEntry)
+                .filter(Boolean);
+            if (result.listEntries.length > 0) {
+                result.listLabel = t(lang, 'wallet_token_action_price_info_list_label') || actionLabel;
+            }
             break;
         }
         case 'historical_price': {
@@ -2550,10 +2578,10 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
         }
         case 'candles': {
             result.listEntries = entries
-                .slice(0, 6)
+                .slice(0, WALLET_TOKEN_CANDLE_RECENT_LIMIT)
                 .map(formatWalletTokenCandleEntry)
                 .filter(Boolean);
-            result.listLabel = actionLabel;
+            result.listLabel = t(lang, 'wallet_token_action_candles_label_recent', { hours: 24 }) || actionLabel;
             break;
         }
         case 'historical_candles': {
@@ -2693,6 +2721,106 @@ function buildWalletTokenPriceMetrics(entry, actionKey) {
     const source = entry.source || entry.market || entry.venue;
     if (source) {
         metrics.push({ label: '🔗 Source', value: source });
+    }
+
+    return metrics;
+}
+
+function buildWalletTokenPriceInfoMetrics(entry) {
+    const metrics = [];
+    if (!entry) {
+        return metrics;
+    }
+
+    const timestamp = entry.time || entry.ts || entry.timestamp;
+    const label = formatWalletTokenTimestamp(timestamp);
+    if (label) {
+        metrics.push({ label: '⏰ Time', value: label });
+    }
+
+    const price = entry.price || entry.latestPrice;
+    if (price !== undefined && price !== null) {
+        metrics.push({ label: '💰 Price', value: `${price} USD` });
+    }
+
+    const marketCap = pickOkxNumeric(entry, ['marketCap']);
+    if (Number.isFinite(marketCap)) {
+        metrics.push({ label: '🪙 Market cap', value: marketCap });
+    }
+
+    if (entry.minPrice !== undefined && entry.minPrice !== null) {
+        metrics.push({ label: '📉 24h Low', value: entry.minPrice });
+    }
+
+    if (entry.maxPrice !== undefined && entry.maxPrice !== null) {
+        metrics.push({ label: '🚀 24h High', value: entry.maxPrice });
+    }
+
+    const tradeNum = pickOkxNumeric(entry, ['tradeNum']);
+    if (Number.isFinite(tradeNum)) {
+        metrics.push({ label: '🔁 Trades (24h)', value: tradeNum });
+    }
+
+    const changeKeys = [
+        ['priceChange5M', 'priceChange5m'],
+        ['priceChange1H', 'priceChange1h'],
+        ['priceChange4H', 'priceChange4h'],
+        ['priceChange24H', 'priceChange24h']
+    ];
+    for (const pair of changeKeys) {
+        for (const key of pair) {
+            if (entry[key] !== undefined && entry[key] !== null) {
+                metrics.push({ label: `📈 ${key.replace('priceChange', '')}`, value: `${entry[key]}%` });
+                break;
+            }
+        }
+    }
+
+    const volumeKeys = [
+        ['volume5M', 'volume5m'],
+        ['volume1H', 'volume1h'],
+        ['volume4H', 'volume4h'],
+        ['volume24H', 'volume24h']
+    ];
+    for (const pair of volumeKeys) {
+        for (const key of pair) {
+            const volume = pickOkxNumeric(entry, [key]);
+            if (Number.isFinite(volume)) {
+                metrics.push({ label: `📊 ${key.replace('volume', 'Vol ')}`, value: volume });
+                break;
+            }
+        }
+    }
+
+    const txKeys = [
+        ['txs5M', 'txs5m'],
+        ['txs1H', 'txs1h'],
+        ['txs4H', 'txs4h'],
+        ['txs24H', 'txs24h']
+    ];
+    for (const pair of txKeys) {
+        for (const key of pair) {
+            const txs = pickOkxNumeric(entry, [key]);
+            if (Number.isFinite(txs)) {
+                metrics.push({ label: `🧾 ${key.replace('txs', 'Txs ')}`, value: txs });
+                break;
+            }
+        }
+    }
+
+    const circSupply = pickOkxNumeric(entry, ['circSupply', 'circulatingSupply']);
+    if (Number.isFinite(circSupply)) {
+        metrics.push({ label: '🔄 Circulating supply', value: circSupply });
+    }
+
+    const liquidity = pickOkxNumeric(entry, ['liquidity']);
+    if (Number.isFinite(liquidity)) {
+        metrics.push({ label: '💦 Liquidity', value: liquidity });
+    }
+
+    const holders = pickOkxNumeric(entry, ['holders', 'holderCount']);
+    if (Number.isFinite(holders)) {
+        metrics.push({ label: '👥 Holders', value: holders });
     }
 
     return metrics;
@@ -2928,6 +3056,39 @@ function formatWalletTokenHistoryEntry(row, previousRow, lang) {
     return label ? `${label}: ${priceDisplay}${deltaSuffix}` : `${priceDisplay}${deltaSuffix}`;
 }
 
+function formatWalletTokenPriceInfoEntry(row, index = 0) {
+    if (!row) {
+        return null;
+    }
+
+    const timestamp = row.time || row.ts || row.timestamp;
+    const label = formatWalletTokenTimestamp(timestamp) || 'Snapshot';
+    const price = row.price || row.latestPrice;
+    const marketCap = pickOkxNumeric(row, ['marketCap']);
+    const volume24h = pickOkxNumeric(row, ['volume24H', 'volume24h']);
+    const liquidity = pickOkxNumeric(row, ['liquidity']);
+    const holders = pickOkxNumeric(row, ['holders', 'holderCount']);
+
+    const parts = [];
+    if (price !== undefined && price !== null) {
+        parts.push(`Price ${price} USD`);
+    }
+    if (Number.isFinite(marketCap)) {
+        parts.push(`MC ${marketCap}`);
+    }
+    if (Number.isFinite(volume24h)) {
+        parts.push(`Vol24h ${volume24h}`);
+    }
+    if (Number.isFinite(liquidity)) {
+        parts.push(`Liq ${liquidity}`);
+    }
+    if (Number.isFinite(holders)) {
+        parts.push(`Holders ${holders}`);
+    }
+
+    return `${index + 1}. ${label}${parts.length > 0 ? ` — ${parts.join(' | ')}` : ''}`;
+}
+
 function formatWalletTokenCandleEntry(row) {
     if (!row) {
         return null;
@@ -3049,6 +3210,9 @@ function formatWalletTokenTradeEntry(row, index = 0) {
     let side;
     let maker;
     let taker;
+    let volume;
+    let dexName;
+    let txHashUrl;
 
     if (Array.isArray(row)) {
         [timestamp, price, amount, side] = row;
@@ -3057,6 +3221,9 @@ function formatWalletTokenTradeEntry(row, index = 0) {
         price = row.price || row.fillPrice || row.tradePrice;
         amount = row.amount || row.size || row.qty || row.quantity;
         side = row.side || row.direction || row.type;
+        volume = row.volume;
+        dexName = row.dexName || row.dex;
+        txHashUrl = row.txHashUrl || row.txUrl;
         maker = row.maker
             || row.makerAddress
             || row.buyerAddress
@@ -3064,7 +3231,8 @@ function formatWalletTokenTradeEntry(row, index = 0) {
             || row.from
             || row.fromAddress
             || row.addressFrom
-            || row.traderAddress;
+            || row.traderAddress
+            || row.userAddress;
         taker = row.taker
             || row.takerAddress
             || row.sellerAddress
@@ -3081,11 +3249,17 @@ function formatWalletTokenTradeEntry(row, index = 0) {
     if (sideLabel) {
         detailParts.push(sideLabel);
     }
+    if (dexName) {
+        detailParts.push(`DEX ${dexName}`);
+    }
     if (amount !== undefined && amount !== null) {
-        detailParts.push(`Qty ${amount}`);
+        detailParts.push(`Amount ${amount}`);
     }
     if (price !== undefined && price !== null) {
-        detailParts.push(`@ ${price}`);
+        detailParts.push(`Price ${price}`);
+    }
+    if (volume !== undefined && volume !== null) {
+        detailParts.push(`USD ${volume}`);
     }
 
     const normalizedMaker = normalizeAddressSafe(maker) || maker;
@@ -3100,14 +3274,41 @@ function formatWalletTokenTradeEntry(row, index = 0) {
 
     const txHash = row.txHash || row.transactionHash || row.hash || row.txid;
 
+    const changed = row.changedTokenInfo || row.changedTokenInfos;
+    const changeLines = [];
+    if (Array.isArray(changed)) {
+        for (const info of changed) {
+            if (!info) continue;
+            const symbol = info.tokenSymbol || info.symbol;
+            const infoAmount = info.amount;
+            const infoAddress = info.tokenContractAddress;
+            const parts = [];
+            if (symbol) parts.push(symbol);
+            if (infoAmount !== undefined && infoAmount !== null) {
+                parts.push(`Amt ${infoAmount}`);
+            }
+            if (infoAddress) {
+                parts.push(`Contract ${infoAddress}`);
+            }
+            if (parts.length > 0) {
+                changeLines.push(`   • ${parts.join(' | ')}`);
+            }
+        }
+    }
+
     const lines = [];
     const header = detailParts.length > 0 ? ` — ${detailParts.join(' | ')}` : '';
     lines.push(`${index + 1}. ${label}${header}`);
     if (addressParts.length > 0) {
         lines.push(`   ${addressParts.join(' / ')}`);
     }
-    if (txHash) {
+    if (txHashUrl) {
+        lines.push(`   Tx: ${txHashUrl}`);
+    } else if (txHash) {
         lines.push(`   Tx: ${txHash}`);
+    }
+    if (changeLines.length > 0) {
+        lines.push(...changeLines);
     }
 
     return lines.join('\n');
