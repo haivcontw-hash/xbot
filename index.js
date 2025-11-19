@@ -192,7 +192,6 @@ const WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS = {
     '1h': 60 * 60 * 1000,
     '1d': 24 * 60 * 60 * 1000
 };
-const WALLET_TOKEN_HISTORY_PERIOD_OPTIONS = ['30m', '1h', '12h', '1d', '7d', '30d', '60d', '90d'];
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -479,6 +478,7 @@ const pendingCheckinChallenges = new Map();
 const pendingEmotionPrompts = new Map();
 const pendingGoalInputs = new Map();
 const pendingSecretMessages = new Map();
+const pendingWalletTokenRangeInputs = new Map();
 const checkinAdminStates = new Map();
 const checkinAdminMenus = new Map();
 const helpMenuStates = new Map();
@@ -897,7 +897,16 @@ function registerWalletTokenContext(context) {
     const token = crypto.randomBytes(4).toString('hex');
     const now = Date.now();
     const historyPeriod = normalizeWalletTokenHistoryPeriod(context.historyPeriod);
-    const storedContext = { ...context, tokenCallbackId: token, historyPeriod };
+    const historyBegin = normalizeWalletTokenHistoryTimestamp(context.historyBegin);
+    const historyEnd = normalizeWalletTokenHistoryTimestamp(context.historyEnd);
+    const storedContext = {
+        ...context,
+        tokenCallbackId: token,
+        historyPeriod,
+        historyBegin: historyBegin !== null ? String(historyBegin) : null,
+        historyEnd: historyEnd !== null ? String(historyEnd) : null
+    };
+    ensureWalletTokenHistoryRangeOrder(storedContext);
     walletTokenCallbackStore.set(token, {
         context: storedContext,
         expiresAt: now + WALLET_TOKEN_CALLBACK_TTL
@@ -1579,8 +1588,7 @@ function buildWalletTokenMenu(context, lang, options = {}) {
     const contractHtml = contractAddress
         ? `<code>${escapeHtml(contractAddress)}</code>`
         : t(lang, 'wallet_balance_contract_unknown');
-    const historyPeriod = normalizeWalletTokenHistoryPeriod(context?.historyPeriod);
-    const historyPeriodHtml = `<code>${escapeHtml(historyPeriod)}</code>`;
+    const historyRangeLine = formatWalletTokenHistoryRangeLine(context, lang);
 
     const lines = [
         t(lang, 'wallet_token_menu_title', { symbol: escapeHtml(meta.symbolLabel || 'Token') }),
@@ -1589,7 +1597,8 @@ function buildWalletTokenMenu(context, lang, options = {}) {
         t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }),
         t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }),
         t(lang, 'wallet_dex_token_total_value', { total: meta.totalLabel }),
-        t(lang, 'wallet_token_history_period_line', { period: historyPeriodHtml }),
+        historyRangeLine,
+        t(lang, 'wallet_token_history_range_hint'),
         t(lang, 'wallet_dex_token_contract', { contract: contractHtml }),
         '',
         t(lang, 'wallet_token_menu_hint')
@@ -1655,9 +1664,9 @@ function buildWalletTokenActionKeyboard(context, lang) {
             rows.push(currentRow);
         }
 
-        const periodRows = buildWalletTokenHistoryPeriodButtonRows(tokenId, lang, context?.historyPeriod);
-        if (periodRows.length > 0) {
-            rows.push(...periodRows);
+        const rangeRows = buildWalletTokenHistoryRangeButtonRows(context, lang);
+        if (rangeRows.length > 0) {
+            rows.push(...rangeRows);
         }
     }
 
@@ -1669,39 +1678,136 @@ function buildWalletTokenActionKeyboard(context, lang) {
     return { inline_keyboard: rows };
 }
 
-function buildWalletTokenHistoryPeriodButtonRows(tokenId, lang, selectedPeriod) {
+function formatWalletTokenHistoryRangeLine(context, lang) {
+    const beginLabel = formatWalletTokenHistoryRangeValue(context?.historyBegin, lang);
+    const endLabel = formatWalletTokenHistoryRangeValue(context?.historyEnd, lang);
+    return t(lang, 'wallet_token_history_range_line', { begin: beginLabel, end: endLabel });
+}
+
+function formatWalletTokenHistoryRangeValue(value, lang) {
+    const normalized = normalizeWalletTokenHistoryTimestamp(value);
+    if (normalized === null) {
+        return t(lang, 'wallet_token_history_range_unset');
+    }
+
+    const formatted = formatWalletTokenTimestamp(normalized);
+    if (!formatted) {
+        return t(lang, 'wallet_token_history_range_unset');
+    }
+
+    return `<code>${escapeHtml(formatted)}</code>`;
+}
+
+function buildWalletTokenHistoryRangeButtonRows(context, lang) {
+    const tokenId = context?.tokenCallbackId;
     if (!tokenId) {
         return [];
     }
 
-    const normalizedSelected = normalizeWalletTokenHistoryPeriod(selectedPeriod);
-    const rows = [];
-    let currentRow = [];
-    for (const period of WALLET_TOKEN_HISTORY_PERIOD_OPTIONS) {
-        if (!WALLET_TOKEN_HISTORY_PERIOD_MS[period]) {
-            continue;
-        }
+    const rows = [[
+        { text: t(lang, 'wallet_token_history_set_begin'), callback_data: `wallet_token_range|${tokenId}|begin` },
+        { text: t(lang, 'wallet_token_history_set_end'), callback_data: `wallet_token_range|${tokenId}|end` }
+    ]];
 
-        const labelKey = normalizedSelected === period
-            ? 'wallet_token_history_period_option_selected'
-            : 'wallet_token_history_period_option';
-
-        currentRow.push({
-            text: t(lang, labelKey, { period }),
-            callback_data: `wallet_token_period|${tokenId}|${period}`
-        });
-
-        if (currentRow.length === 4) {
-            rows.push(currentRow);
-            currentRow = [];
-        }
-    }
-
-    if (currentRow.length > 0) {
-        rows.push(currentRow);
+    if (context?.historyBegin || context?.historyEnd) {
+        rows.push([{ text: t(lang, 'wallet_token_history_clear_range'), callback_data: `wallet_token_range|${tokenId}|clear` }]);
     }
 
     return rows;
+}
+
+function buildWalletTokenHistoryRangeInputKey(chatId) {
+    if (!chatId) {
+        return null;
+    }
+    return chatId.toString();
+}
+
+async function promptWalletTokenHistoryInput(chatId, lang, type, { invalid = false } = {}) {
+    if (!chatId) {
+        return null;
+    }
+
+    const lines = [];
+    if (invalid) {
+        lines.push(t(lang, 'wallet_token_history_input_invalid'));
+    }
+
+    if (type === 'end') {
+        lines.push(t(lang, 'wallet_token_history_prompt_end'));
+    } else {
+        lines.push(t(lang, 'wallet_token_history_prompt_begin'));
+    }
+    lines.push(t(lang, 'wallet_token_history_prompt_format'));
+
+    try {
+        return await bot.sendMessage(chatId, lines.filter(Boolean).join('\n'), {
+            reply_markup: { force_reply: true, selective: true }
+        });
+    } catch (error) {
+        console.warn(`[WalletToken] Failed to prompt for history range: ${error.message}`);
+        return null;
+    }
+}
+
+function describeWalletTokenHistoryRangeType(type, lang) {
+    if (type === 'end') {
+        return t(lang, 'wallet_token_history_range_type_end');
+    }
+    return t(lang, 'wallet_token_history_range_type_begin');
+}
+
+function parseWalletTokenHistoryInput(text) {
+    if (!text) {
+        return null;
+    }
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    if (/^-?\d+$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        if (!Number.isFinite(numeric) || numeric < 0) {
+            return null;
+        }
+        if (trimmed.length <= 10) {
+            return Math.floor(numeric * 1000);
+        }
+        return Math.floor(numeric);
+    }
+
+    const normalized = normalizeWalletTokenHistoryInputToIso(trimmed);
+    const parsed = Date.parse(normalized);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+        return Math.floor(parsed);
+    }
+
+    const fallback = Date.parse(trimmed);
+    if (Number.isFinite(fallback) && fallback >= 0) {
+        return Math.floor(fallback);
+    }
+
+    return null;
+}
+
+function normalizeWalletTokenHistoryInputToIso(value) {
+    if (!value) {
+        return value;
+    }
+
+    let text = value.trim().replace(/\s+/g, ' ');
+    if (!text.includes('T') && text.includes(' ')) {
+        text = text.replace(' ', 'T');
+    }
+
+    const hasTimezone = /([+-]\d{2}:?\d{2}|Z)$/i.test(text);
+    if (!hasTimezone) {
+        text = `${text}Z`;
+    }
+
+    return text;
 }
 
 async function buildWalletTokenActionResult(actionKey, context, lang) {
@@ -1860,6 +1966,7 @@ function applyWalletTokenHistoricalPriceIntervalDefaults(query, { targetPeriod }
         return;
     }
 
+    normalizeWalletTokenHistoryRangeOnQuery(query);
     const normalizedPeriod = normalizeWalletTokenHistoryPeriod(targetPeriod || query.period);
     const requestPeriod = resolveWalletTokenHistoryRequestPeriod(normalizedPeriod);
     const bucketMs = getWalletTokenHistoryBucketMs(normalizedPeriod);
@@ -1922,6 +2029,7 @@ function buildWalletTokenHistoricalPriceFallbackQuery(query) {
     if (!fallback.limit) {
         fallback.limit = WALLET_TOKEN_HISTORY_FALLBACK_LIMIT;
     }
+    normalizeWalletTokenHistoryRangeOnQuery(fallback);
     return fallback;
 }
 
@@ -1948,6 +2056,41 @@ function normalizeWalletTokenHistoryPeriod(value) {
         return text;
     }
     return fallback;
+}
+
+function normalizeWalletTokenHistoryTimestamp(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value) || value < 0) {
+            return null;
+        }
+        return Math.floor(value);
+    }
+
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        if (/^-?\d+$/.test(trimmed)) {
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) {
+                return null;
+            }
+            return Math.floor(numeric);
+        }
+
+        const parsed = Date.parse(trimmed);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+            return Math.floor(parsed);
+        }
+    }
+
+    return null;
 }
 
 function resolveWalletTokenHistoryRequestPeriod(period) {
@@ -1978,6 +2121,63 @@ function getWalletTokenHistoryRequestPeriodMs(period) {
         return WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS[period];
     }
     return null;
+}
+
+function normalizeWalletTokenHistoryRangeOnQuery(query) {
+    if (!query || typeof query !== 'object') {
+        return;
+    }
+
+    const begin = normalizeWalletTokenHistoryTimestamp(query.begin);
+    const end = normalizeWalletTokenHistoryTimestamp(query.end);
+
+    if (begin === null && end === null) {
+        if ('begin' in query) {
+            delete query.begin;
+        }
+        if ('end' in query) {
+            delete query.end;
+        }
+        return;
+    }
+
+    if (begin !== null) {
+        query.begin = String(begin);
+    } else if ('begin' in query) {
+        delete query.begin;
+    }
+
+    if (end !== null) {
+        query.end = String(end);
+    } else if ('end' in query) {
+        delete query.end;
+    }
+
+    if (begin !== null && end !== null && begin > end) {
+        query.begin = String(end);
+        query.end = String(begin);
+    }
+}
+
+function ensureWalletTokenHistoryRangeOrder(context) {
+    if (!context) {
+        return;
+    }
+
+    const begin = normalizeWalletTokenHistoryTimestamp(context.historyBegin);
+    const end = normalizeWalletTokenHistoryTimestamp(context.historyEnd);
+
+    context.historyBegin = begin !== null ? String(begin) : null;
+    context.historyEnd = end !== null ? String(end) : null;
+
+    if (context.historyBegin !== null && context.historyEnd !== null) {
+        const beginMs = Number(context.historyBegin);
+        const endMs = Number(context.historyEnd);
+        if (Number.isFinite(beginMs) && Number.isFinite(endMs) && beginMs > endMs) {
+            context.historyBegin = String(endMs);
+            context.historyEnd = String(beginMs);
+        }
+    }
 }
 
 function hasWalletTokenHistoryExplicitRange(query) {
@@ -2076,6 +2276,16 @@ function buildOkxTokenQueryFromContext(context, overrides = {}) {
         query.toTokenAddress = query.toTokenAddress || OKX_QUOTE_TOKEN_ADDRESS;
     }
 
+    const contextBegin = normalizeWalletTokenHistoryTimestamp(context?.historyBegin);
+    const contextEnd = normalizeWalletTokenHistoryTimestamp(context?.historyEnd);
+    if (contextBegin !== null && (query.begin === undefined || query.begin === null)) {
+        query.begin = String(contextBegin);
+    }
+    if (contextEnd !== null && (query.end === undefined || query.end === null)) {
+        query.end = String(contextEnd);
+    }
+
+    normalizeWalletTokenHistoryRangeOnQuery(query);
     return query;
 }
 
@@ -4332,6 +4542,105 @@ async function handleGoalCallback(query, token, action, value = null) {
     }
 
     bot.answerCallbackQuery(query.id, { text: t(lang, 'checkin_error_invalid_choice'), show_alert: true });
+}
+
+async function handleWalletTokenRangeInput(msg) {
+    if (!msg?.reply_to_message) {
+        return false;
+    }
+
+    const chatId = msg.chat?.id?.toString();
+    const userId = msg.from?.id?.toString();
+    if (!chatId || !userId) {
+        return false;
+    }
+
+    const key = buildWalletTokenHistoryRangeInputKey(chatId);
+    if (!key || !pendingWalletTokenRangeInputs.has(key)) {
+        return false;
+    }
+
+    const pending = pendingWalletTokenRangeInputs.get(key);
+    if (!pending || pending.userId !== userId || pending.promptMessageId !== msg.reply_to_message.message_id) {
+        return false;
+    }
+
+    const lang = await resolveNotificationLanguage(userId, msg.from?.language_code || pending.lang);
+    const rawText = (msg.text || '').trim();
+    if (!rawText) {
+        const prompt = await promptWalletTokenHistoryInput(chatId, lang, pending.field, { invalid: true });
+        if (prompt) {
+            pending.promptMessageId = prompt.message_id;
+            pendingWalletTokenRangeInputs.set(key, pending);
+        }
+        return true;
+    }
+
+    const parsed = parseWalletTokenHistoryInput(rawText);
+    if (parsed === null) {
+        const prompt = await promptWalletTokenHistoryInput(chatId, lang, pending.field, { invalid: true });
+        if (prompt) {
+            pending.promptMessageId = prompt.message_id;
+            pendingWalletTokenRangeInputs.set(key, pending);
+        }
+        return true;
+    }
+
+    const context = resolveWalletTokenContext(pending.tokenId, { extend: true });
+    if (!context) {
+        pendingWalletTokenRangeInputs.delete(key);
+        await sendEphemeralMessage(chatId, t(lang, 'wallet_token_action_error'));
+        return true;
+    }
+
+    if (pending.field === 'end') {
+        context.historyEnd = String(parsed);
+    } else {
+        context.historyBegin = String(parsed);
+    }
+    ensureWalletTokenHistoryRangeOrder(context);
+
+    if (pending.promptMessageId) {
+        try {
+            await bot.deleteMessage(chatId, pending.promptMessageId);
+        } catch (error) {
+            // ignore cleanup errors
+        }
+    }
+
+    const menu = buildWalletTokenMenu(context, lang);
+    let rendered = false;
+    if (pending.menuMessageId) {
+        try {
+            await bot.editMessageText(menu.text, {
+                chat_id: chatId,
+                message_id: pending.menuMessageId,
+                parse_mode: 'HTML',
+                reply_markup: menu.replyMarkup
+            });
+            rendered = true;
+        } catch (editError) {
+            if (isTelegramMessageNotModifiedError(editError)) {
+                rendered = true;
+            } else {
+                console.warn(`[WalletToken] Failed to edit menu after range input: ${editError.message}`);
+            }
+        }
+    }
+
+    if (!rendered) {
+        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+    }
+
+    const typeLabel = describeWalletTokenHistoryRangeType(pending.field, lang);
+    try {
+        await sendEphemeralMessage(chatId, t(lang, 'wallet_token_history_range_saved', { type: typeLabel }), {}, 12000);
+    } catch (error) {
+        // ignore notification errors
+    }
+
+    pendingWalletTokenRangeInputs.delete(key);
+    return true;
 }
 
 async function handleGoalTextInput(msg) {
@@ -10015,49 +10324,85 @@ function startTelegramBot() {
                 return;
             }
 
-            if (query.data.startsWith('wallet_token_period|')) {
+            if (query.data.startsWith('wallet_token_range|')) {
                 if (!chatId) {
                     await bot.answerCallbackQuery(queryId);
                     return;
                 }
 
-                const [, tokenId, rawPeriod] = query.data.split('|');
-                const normalizedPeriod = normalizeWalletTokenHistoryPeriod(rawPeriod);
+                const parts = query.data.split('|');
+                const tokenId = parts[1];
+                const action = parts[2];
                 const context = resolveWalletTokenContext(tokenId, { extend: true });
-                if (!context || !tokenId || !normalizedPeriod) {
+                if (!context || !tokenId) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
                     return;
                 }
 
-                context.historyPeriod = normalizedPeriod;
-                const menu = buildWalletTokenMenu(context, callbackLang);
-                let rendered = false;
+                if (action === 'clear') {
+                    const pendingKey = buildWalletTokenHistoryRangeInputKey(chatId);
+                    if (pendingKey) {
+                        pendingWalletTokenRangeInputs.delete(pendingKey);
+                    }
+                    context.historyBegin = null;
+                    context.historyEnd = null;
+                    const menu = buildWalletTokenMenu(context, callbackLang);
+                    let rendered = false;
 
-                if (query.message?.message_id) {
-                    try {
-                        await bot.editMessageText(menu.text, {
-                            chat_id: chatId,
-                            message_id: query.message.message_id,
-                            parse_mode: 'HTML',
-                            reply_markup: menu.replyMarkup
-                        });
-                        rendered = true;
-                    } catch (editError) {
-                        if (isTelegramMessageNotModifiedError(editError)) {
+                    if (query.message?.message_id) {
+                        try {
+                            await bot.editMessageText(menu.text, {
+                                chat_id: chatId,
+                                message_id: query.message.message_id,
+                                parse_mode: 'HTML',
+                                reply_markup: menu.replyMarkup
+                            });
                             rendered = true;
-                        } else {
-                            console.warn(`[WalletToken] Failed to edit history period: ${editError.message}`);
+                        } catch (editError) {
+                            if (!isTelegramMessageNotModifiedError(editError)) {
+                                console.warn(`[WalletToken] Failed to clear range: ${editError.message}`);
+                            }
+                            rendered = true;
                         }
                     }
+
+                    if (!rendered) {
+                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                    }
+
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_history_range_cleared') });
+                    return;
                 }
 
-                if (!rendered) {
-                    await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                if (action === 'begin' || action === 'end') {
+                    try {
+                        const userId = query.from?.id?.toString() || chatId;
+                        const promptMessage = await promptWalletTokenHistoryInput(chatId, callbackLang, action);
+                        if (promptMessage) {
+                            const key = buildWalletTokenHistoryRangeInputKey(chatId);
+                            if (key) {
+                                pendingWalletTokenRangeInputs.delete(key);
+                                pendingWalletTokenRangeInputs.set(key, {
+                                    chatId,
+                                    userId,
+                                    tokenId,
+                                    field: action,
+                                    promptMessageId: promptMessage.message_id,
+                                    menuMessageId: query.message?.message_id || null,
+                                    lang: callbackLang
+                                });
+                            }
+                        }
+
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_history_prompt_reply') });
+                    } catch (error) {
+                        console.error(`[WalletToken] Failed to initiate range input: ${error.message}`);
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
+                    }
+                    return;
                 }
 
-                await bot.answerCallbackQuery(queryId, {
-                    text: t(callbackLang, 'wallet_token_history_period_updated', { period: normalizedPeriod })
-                });
+                await bot.answerCallbackQuery(queryId);
                 return;
             }
 
@@ -11678,6 +12023,10 @@ function startTelegramBot() {
     });
 
     bot.on('message', async (msg) => {
+        if (await handleWalletTokenRangeInput(msg)) {
+            return;
+        }
+
         if (await handleGoalTextInput(msg)) {
             return;
         }
