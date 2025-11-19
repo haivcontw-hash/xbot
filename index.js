@@ -1392,7 +1392,10 @@ async function fetchDexOverviewForWallet(walletAddress, options = {}) {
 }
 
 function buildWalletDexOverviewText(lang, walletAddress, overview) {
-    const lines = [t(lang, 'wallet_dex_overview_title', { wallet: escapeHtml(shortenAddress(walletAddress)) })];
+    const normalizedWallet = normalizeAddressSafe(walletAddress) || walletAddress;
+    const walletHtml = `<code>${escapeHtml(normalizedWallet)}</code>`;
+    const lines = [t(lang, 'wallet_dex_overview_title', { wallet: walletHtml })];
+    lines.push(t(lang, 'wallet_dex_wallet_line', { wallet: walletHtml }));
 
     if (Number.isFinite(overview.totalUsd)) {
         const formattedTotal = formatFiatValue(overview.totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1404,38 +1407,86 @@ function buildWalletDexOverviewText(lang, walletAddress, overview) {
     const tokens = Array.isArray(overview.tokens) ? overview.tokens : [];
     if (tokens.length === 0) {
         lines.push(t(lang, 'wallet_dex_no_tokens'));
+        lines.push(t(lang, 'wallet_dex_copy_hint'));
         return lines.join('\n');
     }
 
-    for (const token of tokens) {
-        const chainIndex = token.chainIndex || token.chainId || token.chain || '—';
-        const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || 'Token';
-        const balance = token.balance
-            || token.amountText
+    const formatChainLabel = (token) => {
+        const chainShort = token.chainShortName || token.chainName;
+        const chainIndex = token.chainIndex || token.chainId || token.chain;
+        if (chainShort && chainIndex) {
+            return `${chainShort} (#${chainIndex})`;
+        }
+        if (chainShort) {
+            return chainShort;
+        }
+        if (chainIndex) {
+            return `#${chainIndex}`;
+        }
+        return t(lang, 'wallet_balance_chain_unknown');
+    };
+
+    tokens.forEach((token, idx) => {
+        const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || token.name || 'Token';
+        const balanceValue = token.amountText
+            || token.balance
             || token.amount
             || token.rawBalance
             || token.available
             || token.currencyAmount
             || '0';
-        const risk = token.isRiskToken || token.riskToken || token.tokenRisk
+        const balanceHtml = `${escapeHtml(String(balanceValue))} ${escapeHtml(String(symbol))}`;
+        const riskLabel = token.isRiskToken || token.riskToken || token.tokenRisk
             ? t(lang, 'wallet_dex_risk_yes')
             : t(lang, 'wallet_dex_risk_no');
-        const contract = token.tokenContractAddress
+        const tokenWallet = normalizeAddressSafe(token.walletAddress) || normalizedWallet;
+        const tokenWalletHtml = `<code>${escapeHtml(tokenWallet)}</code>`;
+
+        const contractRaw = token.tokenContractAddress
             || token.tokenAddress
             || token.contractAddress
             || token.token
             || null;
+        let contractHtml = null;
+        if (contractRaw) {
+            const cleaned = String(contractRaw).replace(/^native:/, '');
+            if (cleaned) {
+                contractHtml = `<code>${escapeHtml(cleaned)}</code>`;
+            }
+        }
+        if (!contractHtml) {
+            contractHtml = t(lang, 'wallet_balance_contract_unknown');
+        }
 
-        lines.push(t(lang, 'wallet_dex_token_line', {
-            chain: escapeHtml(String(chainIndex)),
+        const valueParts = [];
+        if (token.valueText) {
+            valueParts.push(token.valueText);
+        }
+        const numericCurrency = Number(token.currencyAmount);
+        if (Number.isFinite(numericCurrency) && numericCurrency > 0) {
+            const fiat = formatFiatValue(numericCurrency, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (fiat) {
+                valueParts.push(`${fiat} USD`);
+            }
+        }
+        const valueLabel = valueParts.length > 0
+            ? escapeHtml(valueParts.join(' / '))
+            : t(lang, 'wallet_dex_token_value_unknown');
+
+        lines.push('');
+        lines.push(t(lang, 'wallet_dex_token_header', {
+            index: (idx + 1).toString(),
             symbol: escapeHtml(String(symbol)),
-            balance: escapeHtml(String(balance)),
-            risk: escapeHtml(String(risk)),
-            address: escapeHtml(shortenAddress(walletAddress)),
-            contract: contract ? escapeHtml(shortenAddress(String(contract).replace(/^native:/, ''))) : t(lang, 'wallet_balance_contract_unknown')
+            chain: escapeHtml(formatChainLabel(token))
         }));
-    }
+        lines.push(t(lang, 'wallet_dex_token_balance', { balance: balanceHtml }));
+        lines.push(t(lang, 'wallet_dex_token_value', { value: valueLabel }));
+        lines.push(t(lang, 'wallet_dex_token_wallet', { wallet: tokenWalletHtml }));
+        lines.push(t(lang, 'wallet_dex_token_contract', { contract: contractHtml }));
+        lines.push(t(lang, 'wallet_dex_token_risk', { risk: escapeHtml(riskLabel) }));
+    });
 
+    lines.push('', t(lang, 'wallet_dex_copy_hint'));
     return lines.join('\n');
 }
 
