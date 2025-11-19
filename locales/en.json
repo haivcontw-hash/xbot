@@ -475,7 +475,7 @@
   "wallet_token_action_historical_candles_label": "📊 Daily candles — last {days} days",
   "wallet_token_action_holder_list_label": "👥 Top {count} holders",
   "wallet_token_action_latest_price_list_label": "🆕 Latest {count} trades",
-  "wallet_token_action_price_info_list_label": "ℹ️ Price snapshots",
+  "wallet_token_action_price_info_history_label": "ℹ️ Daily prices (last {days} days, UTC close)",
   "wallet_token_action_token_info_list_label": "🧬 Token metadata",
   "wallet_overview_empty": "You haven't linked any Xlayer wallets yet.",
   "wallet_overview_error": "⚠️ Unable to load wallet balances right now. Please try again shortly.",

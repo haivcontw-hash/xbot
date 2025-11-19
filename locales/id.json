@@ -475,7 +475,7 @@
   "wallet_token_action_historical_candles_label": "📊 Candlestick harian — {days} hari terakhir",
   "wallet_token_action_holder_list_label": "👥 {count} pemegang teratas",
   "wallet_token_action_latest_price_list_label": "🆕 {count} transaksi terbaru",
-  "wallet_token_action_price_info_list_label": "ℹ️ Cuplikan harga",
+  "wallet_token_action_price_info_history_label": "ℹ️ Harga harian (7 hari terakhir, penutupan UTC)",
   "wallet_token_action_token_info_list_label": "🧬 Detail token",
   "wallet_overview_empty": "Anda belum menautkan dompet Xlayer mana pun.",
   "wallet_overview_error": "⚠️ Tidak bisa memuat saldo dompet sekarang. Coba lagi sebentar lagi.",

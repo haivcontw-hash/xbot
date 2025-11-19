@@ -475,7 +475,7 @@
   "wallet_token_action_historical_candles_label": "📊 Nến ngày — {days} ngày gần nhất",
   "wallet_token_action_holder_list_label": "👥 Top {count} người nắm giữ",
   "wallet_token_action_latest_price_list_label": "🆕 {count} giao dịch gần nhất",
-  "wallet_token_action_price_info_list_label": "ℹ️ Ảnh chụp giá",
+  "wallet_token_action_price_info_history_label": "ℹ️ Giá đóng cửa từng ngày (7 ngày gần nhất, UTC)",
   "wallet_token_action_token_info_list_label": "🧬 Thông tin chi tiết token",
   "wallet_overview_empty": "Bạn chưa liên kết ví Xlayer nào.",
   "wallet_overview_error": "⚠️ Không thể tải số dư ví lúc này. Vui lòng thử lại sau.",

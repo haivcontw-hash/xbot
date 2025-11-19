@@ -475,7 +475,7 @@
   "wallet_token_action_historical_candles_label": "📊 일별 캔들 — 최근 {days}일",
   "wallet_token_action_holder_list_label": "👥 상위 {count} 보유자",
   "wallet_token_action_latest_price_list_label": "🆕 최근 {count}건 체결",
-  "wallet_token_action_price_info_list_label": "ℹ️ 가격 스냅샷",
+  "wallet_token_action_price_info_history_label": "ℹ️ 일일 종가 (최근 {days}일, UTC)",
   "wallet_token_action_token_info_list_label": "🧬 토큰 상세 정보",
   "wallet_overview_empty": "아직 연결된 Xlayer 지갑이 없습니다.",
   "wallet_overview_error": "⚠️ 지금은 지갑 잔액을 불러올 수 없습니다. 잠시 후 다시 시도하세요.",
