@@ -734,8 +734,21 @@ async function buildWalletChainMenu(lang, walletAddress) {
         console.warn(`[WalletChains] Failed to load supported chains: ${error.message}`);
     }
 
+    const xlayerEntry = { chainId: 196, chainIndex: 196, chainShortName: 'xlayer', chainName: 'X Layer', aliases: ['xlayer'] };
+    const hasXlayer = Array.isArray(chains)
+        && chains.some((entry) => {
+            if (!entry) return false;
+            if (Number(entry.chainId) === 196 || Number(entry.chainIndex) === 196) return true;
+            const aliases = entry.aliases || [];
+            return aliases.some((alias) => typeof alias === 'string' && alias.toLowerCase().includes('xlayer'));
+        });
+
+    if (!hasXlayer) {
+        chains = Array.isArray(chains) && chains.length > 0 ? [xlayerEntry, ...chains] : [xlayerEntry];
+    }
+
     if (!Array.isArray(chains) || chains.length === 0) {
-        chains = [{ chainId: 196, chainIndex: 196, chainShortName: 'xlayer', chainName: 'X Layer', aliases: ['xlayer'] }];
+        chains = [xlayerEntry];
     }
 
     const sorted = sortChainsForMenu(chains);
