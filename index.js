@@ -154,7 +154,11 @@ const WALLET_TOKEN_HISTORY_FALLBACK_LIMIT = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_FALLBACK_LIMIT || 10);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10;
 })();
-const WALLET_TOKEN_HISTORY_DEFAULT_PERIOD = process.env.WALLET_TOKEN_HISTORY_DEFAULT_PERIOD || '1d';
+const WALLET_TOKEN_HISTORY_DEFAULT_LIMIT = (() => {
+    const value = Number(process.env.WALLET_TOKEN_HISTORY_DEFAULT_LIMIT || 50);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 50;
+})();
+const WALLET_TOKEN_HISTORY_DEFAULT_PERIOD = process.env.WALLET_TOKEN_HISTORY_DEFAULT_PERIOD || '30m';
 const WALLET_TOKEN_HISTORY_MAX_LIMIT = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_LIMIT || 200);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 200;
@@ -1847,7 +1851,7 @@ function buildWalletTokenHistoricalPriceFallbackQuery(query) {
 function normalizeWalletTokenHistoryLimit(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) {
-        return Math.min(10, WALLET_TOKEN_HISTORY_MAX_LIMIT);
+        return Math.min(WALLET_TOKEN_HISTORY_DEFAULT_LIMIT, WALLET_TOKEN_HISTORY_MAX_LIMIT);
     }
     return Math.min(Math.floor(numeric), WALLET_TOKEN_HISTORY_MAX_LIMIT);
 }
