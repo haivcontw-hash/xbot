@@ -3225,7 +3225,8 @@ function formatWalletTokenHolderEntry(row, index = 0) {
     if (!row) {
         return null;
     }
-    const address = row.address || row.walletAddress || row.holderAddress;
+    const address =
+        row.address || row.walletAddress || row.holderAddress || row.holderWalletAddress;
     const normalizedAddress = normalizeAddressSafe(address) || address;
     const amount = row.amount || row.balance || row.quantity || row.holdAmount || row.holding;
     const percent = pickOkxNumeric(row, ['percentage', 'percent', 'ratio', 'share']);
