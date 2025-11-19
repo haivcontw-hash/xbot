@@ -117,8 +117,20 @@ const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
 const WALLET_TOKEN_ACTIONS = [
-    { key: 'current_price', labelKey: 'wallet_token_action_current_price', path: '/api/v6/dex/index/current-price', method: 'POST' },
-    { key: 'historical_price', labelKey: 'wallet_token_action_historical_price', path: '/api/v6/dex/index/historical-price', method: 'POST' },
+    {
+        key: 'current_price',
+        labelKey: 'wallet_token_action_current_price',
+        path: '/api/v6/dex/index/current-price',
+        method: 'POST',
+        bodyType: 'array'
+    },
+    {
+        key: 'historical_price',
+        labelKey: 'wallet_token_action_historical_price',
+        path: '/api/v6/dex/index/historical-price',
+        method: 'POST',
+        bodyType: 'array'
+    },
     { key: 'candles', labelKey: 'wallet_token_action_candles', path: '/api/v6/dex/market/candles', method: 'POST' },
     { key: 'historical_candles', labelKey: 'wallet_token_action_historical_candles', path: '/api/v6/dex/market/historical-candles', method: 'POST' },
     { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/price', method: 'POST' },
@@ -1623,7 +1635,8 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     return callOkxDexEndpoint(config.path, query, {
         method: config.method || 'GET',
         auth: hasOkxCredentials,
-        allowFallback: true
+        allowFallback: true,
+        bodyType: config.bodyType
     });
 }
 
@@ -1699,7 +1712,8 @@ async function callOkxDexEndpoint(path, query, options = {}) {
     const {
         method = 'GET',
         auth = hasOkxCredentials,
-        allowFallback = true
+        allowFallback = true,
+        bodyType = null
     } = options;
 
     const preferredMethod = (method || 'GET').toUpperCase();
@@ -1712,9 +1726,17 @@ async function callOkxDexEndpoint(path, query, options = {}) {
 
     for (const currentMethod of methods) {
         try {
+            const requestBody = bodyType === 'array' && currentMethod !== 'GET'
+                ? Array.isArray(query)
+                    ? query
+                    : query
+                        ? [query]
+                        : []
+                : query;
+
             const requestOptions = currentMethod === 'GET'
                 ? { query, auth }
-                : { body: query, auth };
+                : { body: requestBody, auth };
 
             return await okxJsonRequest(currentMethod, path, requestOptions);
         } catch (error) {
