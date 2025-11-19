@@ -5849,21 +5849,37 @@ function extractDexHoldingRows(payload) {
     return rows;
 }
 
+function resolveChainContextShortName(context) {
+    if (context && typeof context === 'object') {
+        const aliasCandidates = [context.chainShortName, context.chainName, ...(context.aliases || [])]
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter(Boolean);
+        if (aliasCandidates.length > 0) {
+            return aliasCandidates[0];
+        }
+    }
+
+    const candidates = getOkxChainShortNameCandidates();
+    return candidates.length > 0 ? candidates[0] : 'xlayer';
+}
+
 async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
     const normalized = normalizeAddressSafe(walletAddress);
     if (!normalized) {
         return { tokens: [], totalUsd: null };
     }
 
-    const chainShortName = (options.chainContext?.chainShortName || OKX_CHAIN_SHORT_NAME || 'xlayer').trim();
-    const chainIdNumbers = Array.from(new Set([
+    const chainShortName = resolveChainContextShortName(options.chainContext);
+    const contextChains = Array.from(new Set([
         Number(options.chainContext?.chainId),
         Number(options.chainContext?.chainIndex),
-        ...(Array.isArray(options.chainContext?.chains) ? options.chainContext.chains : []),
+        ...(Array.isArray(options.chainContext?.chains) ? options.chainContext.chains : [])
+    ].filter((value) => Number.isFinite(value))));
+    const fallbackChains = Array.from(new Set([
         Number(OKX_CHAIN_INDEX_FALLBACK),
         196
     ].filter((value) => Number.isFinite(value))));
-    const chainIdList = chainIdNumbers.length > 0 ? chainIdNumbers : [196];
+    const chainIdList = contextChains.length > 0 ? contextChains : (fallbackChains.length > 0 ? fallbackChains : [196]);
 
     const query = {
         address: normalized,
