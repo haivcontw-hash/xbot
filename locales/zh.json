@@ -442,6 +442,7 @@
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",
   "wallet_dex_token_balance": "📊 余额：{balance}",
   "wallet_dex_token_value": "💰 价值：{value}",
+  "wallet_dex_token_total_value": "🧮 总价值：{total}",
   "wallet_dex_token_value_unknown": "—",
   "wallet_dex_token_contract": "📄 合约：{contract}",
   "wallet_dex_token_risk": "⚠️ 风险：{risk}",

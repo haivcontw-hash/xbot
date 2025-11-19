@@ -1256,31 +1256,33 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             contractHtml = t(lang, 'wallet_balance_contract_unknown');
         }
 
-        const valueParts = [];
         const totalUsd = Number.isFinite(token.totalValueUsd)
             ? token.totalValueUsd
             : (Number.isFinite(Number(token.currencyAmount)) ? Number(token.currencyAmount) : null);
-        if (Number.isFinite(totalUsd) && totalUsd > 0) {
-            const fiat = formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            if (fiat) {
-                valueParts.push(`${fiat} USD`);
-            }
-        }
+        const formattedTotalUsd = Number.isFinite(totalUsd) && totalUsd > 0
+            ? formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : null;
         const unitUsd = Number.isFinite(token.unitPriceUsd)
             ? token.unitPriceUsd
             : (Number.isFinite(Number(token.tokenPrice)) ? Number(token.tokenPrice) : null);
-        if (Number.isFinite(unitUsd) && unitUsd > 0) {
-            const unitLabel = formatFiatValue(unitUsd, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
-            if (unitLabel) {
-                valueParts.push(`≈ ${unitLabel} USD/token`);
-            }
+        const formattedUnitUsd = Number.isFinite(unitUsd) && unitUsd > 0
+            ? formatFiatValue(unitUsd, { minimumFractionDigits: 2, maximumFractionDigits: 6 })
+            : null;
+
+        const priceLabel = formattedUnitUsd
+            ? escapeHtml(`≈ ${formattedUnitUsd} USD/token`)
+            : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
+
+        const totalParts = [];
+        if (formattedTotalUsd) {
+            totalParts.push(`${formattedTotalUsd} USD`);
         }
         if (token.valueText) {
-            valueParts.push(token.valueText);
+            totalParts.push(token.valueText);
         }
-        const valueLabel = valueParts.length > 0
-            ? escapeHtml(valueParts.join(' / '))
-            : t(lang, 'wallet_dex_token_value_unknown');
+        const totalLabel = totalParts.length > 0
+            ? totalParts.map((part) => escapeHtml(part)).join(' / ')
+            : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
 
         lines.push('');
         lines.push(t(lang, 'wallet_dex_token_header', {
@@ -1289,7 +1291,8 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             chain: escapeHtml(formatChainLabel(token))
         }));
         lines.push(t(lang, 'wallet_dex_token_balance', { balance: balanceHtml }));
-        lines.push(t(lang, 'wallet_dex_token_value', { value: valueLabel }));
+        lines.push(t(lang, 'wallet_dex_token_value', { value: priceLabel }));
+        lines.push(t(lang, 'wallet_dex_token_total_value', { total: totalLabel }));
         lines.push(t(lang, 'wallet_dex_token_contract', { contract: contractHtml }));
         lines.push(t(lang, 'wallet_dex_token_risk', { risk: escapeHtml(riskLabel) }));
     });
@@ -8135,13 +8138,6 @@ function startTelegramBot() {
                         await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
                     }
 
-                    try {
-                        const overview = await fetchDexOverviewForWallet(wallet, { forceDex: true });
-                        const dexText = buildWalletDexOverviewText(callbackLang, wallet, overview);
-                        await bot.sendMessage(chatId, dexText, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang) });
-                    } catch (overviewError) {
-                        console.warn(`[WalletPick] Failed to render dex overview for ${wallet}: ${overviewError.message}`);
-                    }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
                     console.error(`[WalletPick] Failed to render chains for ${wallet}: ${error.message}`);
