@@ -911,7 +911,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     // force a live snapshot even if a cached copy exists.
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
     if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
-        const tokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
+        let mappedTokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
             const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
             let amountText = null;
             let numericAmount = null;
@@ -1011,8 +1011,34 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             };
         });
 
+        const filtered = mappedTokens.filter(Boolean);
+
+        // If OKX returned holdings but our formatter discarded them (e.g., unexpected shapes),
+        // fall back to a minimal projection so the raw rows still render for the user.
+        const fallbackTokens = [];
+        if (filtered.length === 0 && Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
+            for (const raw of dexSnapshot.tokens) {
+                if (!raw) continue;
+                const amountText = raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? '0';
+                const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
+                const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
+                const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
+                fallbackTokens.push({
+                    tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
+                    tokenLabel,
+                    amountText: String(amountText),
+                    valueText: raw.tokenPrice ? `${formatFiatValue(raw.tokenPrice)} USDT` : null,
+                    chainIndex,
+                    walletAddress: walletAddr,
+                    isRiskToken: Boolean(raw.isRiskToken)
+                });
+            }
+        }
+
+        const tokens = filtered.length > 0 ? filtered : fallbackTokens;
+
         return {
-            tokens: tokens.filter(Boolean),
+            tokens,
             warning: rpcWarning,
             totalUsd: dexSnapshot.totalUsd
         };
