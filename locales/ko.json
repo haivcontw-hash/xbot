@@ -457,6 +457,7 @@
   "wallet_token_action_result_title": "📊 {symbol} — {action}",
   "wallet_token_action_metric_line": "{label}: {value}",
   "wallet_token_action_list_header": "{label}",
+  "wallet_token_action_history_delta": "24시간 변화 {delta}",
   "wallet_token_action_result_empty": "이 요청에 대해 OKX 데이터가 없습니다.",
   "wallet_token_action_current_price": "💵 현재 가격",
   "wallet_token_action_historical_price": "📈 가격 기록",

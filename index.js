@@ -1786,10 +1786,19 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
         }
         case 'historical_price': {
             const historyEntries = expandWalletTokenHistoryEntries(entries);
-            result.listEntries = historyEntries
-                .slice(0, 6)
-                .map(formatWalletTokenHistoryEntry)
-                .filter(Boolean);
+            const sortedHistoryEntries = sortWalletTokenHistoryEntries(historyEntries);
+            const formattedEntries = [];
+
+            for (let i = 0; i < sortedHistoryEntries.length && formattedEntries.length < 6; i += 1) {
+                const row = sortedHistoryEntries[i];
+                const previousRow = i + 1 < sortedHistoryEntries.length ? sortedHistoryEntries[i + 1] : null;
+                const formatted = formatWalletTokenHistoryEntry(row, previousRow, lang);
+                if (formatted) {
+                    formattedEntries.push(formatted);
+                }
+            }
+
+            result.listEntries = formattedEntries;
             result.listLabel = actionLabel;
             break;
         }
@@ -1964,28 +1973,129 @@ function expandWalletTokenHistoryEntries(entries) {
     return result;
 }
 
-function formatWalletTokenHistoryEntry(row) {
+function sortWalletTokenHistoryEntries(entries) {
+    if (!Array.isArray(entries)) {
+        return [];
+    }
+
+    return entries
+        .slice()
+        .sort((a, b) => {
+            const timestampA = getWalletTokenHistoryTimestampValue(a);
+            const timestampB = getWalletTokenHistoryTimestampValue(b);
+
+            if (timestampA === null && timestampB === null) {
+                return 0;
+            }
+            if (timestampA === null) {
+                return 1;
+            }
+            if (timestampB === null) {
+                return -1;
+            }
+
+            return timestampB - timestampA;
+        });
+}
+
+function getWalletTokenHistoryTimestampRaw(row) {
     if (!row) {
         return null;
     }
 
     if (Array.isArray(row)) {
-        const timestamp = row[0];
-        const price = row[1] ?? row[2];
-        const label = formatWalletTokenTimestamp(timestamp) || timestamp;
-        if (!label && price === undefined) {
-            return null;
-        }
-        return label ? `${label}: ${price ?? '—'}` : `${price ?? '—'}`;
+        return row.length > 0 ? row[0] : null;
     }
 
-    const timestamp = row.ts || row.timestamp || row.time || row.date;
-    const price = row.price || row.value || row.indexPrice;
-    const label = formatWalletTokenTimestamp(timestamp) || timestamp;
-    if (!label && price === undefined) {
+    return row.ts ?? row.timestamp ?? row.time ?? row.date ?? null;
+}
+
+function getWalletTokenHistoryTimestampValue(row) {
+    const raw = getWalletTokenHistoryTimestampRaw(row);
+    if (raw === undefined || raw === null) {
         return null;
     }
-    return label ? `${label}: ${price ?? '—'}` : `${price ?? '—'}`;
+
+    if (typeof raw === 'number') {
+        return Number.isFinite(raw) ? raw : null;
+    }
+
+    if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+
+        const parsed = Date.parse(trimmed);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    return null;
+}
+
+function getWalletTokenHistoryPriceText(row) {
+    if (!row) {
+        return null;
+    }
+
+    if (Array.isArray(row)) {
+        const candidate = row[1] ?? row[2];
+        if (candidate !== undefined && candidate !== null && String(candidate).trim()) {
+            return String(candidate).trim();
+        }
+    }
+
+    const fields = ['price', 'value', 'indexPrice', 'close', 'avgPrice'];
+    for (const field of fields) {
+        if (row[field] !== undefined && row[field] !== null) {
+            const text = String(row[field]).trim();
+            if (text) {
+                return text;
+            }
+        }
+    }
+
+    return null;
+}
+
+function formatWalletTokenHistoryEntry(row, previousRow, lang) {
+    if (!row) {
+        return null;
+    }
+
+    const timestampRaw = getWalletTokenHistoryTimestampRaw(row);
+    const label = formatWalletTokenTimestamp(timestampRaw) || timestampRaw;
+    const priceText = getWalletTokenHistoryPriceText(row);
+
+    if (!label && priceText === null) {
+        return null;
+    }
+
+    let deltaSuffix = '';
+    if (previousRow) {
+        const previousPriceText = getWalletTokenHistoryPriceText(previousRow);
+        if (priceText !== null && previousPriceText !== null) {
+            const deltaValue = subtractDecimalStrings(priceText, previousPriceText);
+            if (deltaValue !== null) {
+                let normalizedDelta = deltaValue;
+                if (!normalizedDelta.startsWith('-') && normalizedDelta !== '0') {
+                    normalizedDelta = `+${normalizedDelta}`;
+                }
+                const deltaLabel = t(lang || defaultLang, 'wallet_token_action_history_delta', { delta: normalizedDelta });
+                if (deltaLabel) {
+                    deltaSuffix = ` (${deltaLabel})`;
+                }
+            }
+        }
+    }
+
+    const priceDisplay = priceText !== null ? priceText : '—';
+    return label ? `${label}: ${priceDisplay}${deltaSuffix}` : `${priceDisplay}${deltaSuffix}`;
 }
 
 function formatWalletTokenCandleEntry(row) {
@@ -6518,6 +6628,62 @@ function multiplyDecimalStrings(valueA, valueB) {
         return `-${normalizedInt}`;
     }
     return normalizedInt;
+}
+
+function subtractDecimalStrings(valueA, valueB) {
+    const partsA = parseDecimalStringParts(valueA);
+    const partsB = parseDecimalStringParts(valueB);
+    if (!partsA || !partsB) {
+        return null;
+    }
+
+    const targetScale = Math.max(partsA.scale, partsB.scale);
+    const scaleDiffA = targetScale - partsA.scale;
+    const scaleDiffB = targetScale - partsB.scale;
+
+    let digitsA;
+    let digitsB;
+    try {
+        const multiplierA = 10n ** BigInt(Math.max(0, scaleDiffA));
+        const multiplierB = 10n ** BigInt(Math.max(0, scaleDiffB));
+        digitsA = BigInt(partsA.digits) * multiplierA;
+        digitsB = BigInt(partsB.digits) * multiplierB;
+    } catch (error) {
+        return null;
+    }
+
+    const signedA = partsA.sign < 0 ? -digitsA : digitsA;
+    const signedB = partsB.sign < 0 ? -digitsB : digitsB;
+
+    const diff = signedA - signedB;
+    if (diff === 0n) {
+        return '0';
+    }
+
+    const isNegative = diff < 0n;
+    const absolute = isNegative ? -diff : diff;
+    let digits = absolute.toString();
+
+    if (targetScale > 0) {
+        if (digits.length <= targetScale) {
+            digits = digits.padStart(targetScale + 1, '0');
+        }
+        const intPart = digits.slice(0, digits.length - targetScale) || '0';
+        const fracPart = digits.slice(digits.length - targetScale);
+        const normalizedInt = intPart.replace(/^0+(?=\d)/, '') || '0';
+        const normalizedFrac = fracPart.replace(/0+$/, '');
+        const combined = normalizedFrac ? `${normalizedInt}.${normalizedFrac}` : normalizedInt;
+        if (combined === '0') {
+            return '0';
+        }
+        return isNegative ? `-${combined}` : combined;
+    }
+
+    const normalizedInt = digits.replace(/^0+(?=\d)/, '') || '0';
+    if (normalizedInt === '0') {
+        return '0';
+    }
+    return isNegative ? `-${normalizedInt}` : normalizedInt;
 }
 
 function normalizeDexHolding(row) {

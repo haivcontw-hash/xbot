@@ -456,6 +456,7 @@
   "wallet_token_action_result_title": "📊 {symbol} — {action}",
   "wallet_token_action_metric_line": "{label}: {value}",
   "wallet_token_action_list_header": "{label}",
+  "wallet_token_action_history_delta": "Δ24ч {delta}",
   "wallet_token_action_result_empty": "OKX не вернул данные по этому запросу.",
   "wallet_token_action_current_price": "💵 Текущая цена",
   "wallet_token_action_historical_price": "📈 История цены",

@@ -457,6 +457,7 @@
   "wallet_token_action_result_title": "📊 {symbol} — {action}",
   "wallet_token_action_metric_line": "{label}: {value}",
   "wallet_token_action_list_header": "{label}",
+  "wallet_token_action_history_delta": "Δ24h {delta}",
   "wallet_token_action_result_empty": "OKX không trả về dữ liệu cho yêu cầu này.",
   "wallet_token_action_current_price": "💵 Giá hiện tại",
   "wallet_token_action_historical_price": "📈 Giá lịch sử",
