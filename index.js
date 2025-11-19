@@ -726,7 +726,7 @@ function sortChainsForMenu(chains) {
     });
 }
 
-async function buildWalletChainMenu(lang) {
+async function buildWalletChainMenu(lang, walletAddress) {
     let chains = [];
     try {
         chains = await fetchOkxBalanceSupportedChains();
@@ -734,8 +734,21 @@ async function buildWalletChainMenu(lang) {
         console.warn(`[WalletChains] Failed to load supported chains: ${error.message}`);
     }
 
+    const xlayerEntry = { chainId: 196, chainIndex: 196, chainShortName: 'xlayer', chainName: 'X Layer', aliases: ['xlayer'] };
+    const hasXlayer = Array.isArray(chains)
+        && chains.some((entry) => {
+            if (!entry) return false;
+            if (Number(entry.chainId) === 196 || Number(entry.chainIndex) === 196) return true;
+            const aliases = entry.aliases || [];
+            return aliases.some((alias) => typeof alias === 'string' && alias.toLowerCase().includes('xlayer'));
+        });
+
+    if (!hasXlayer) {
+        chains = Array.isArray(chains) && chains.length > 0 ? [xlayerEntry, ...chains] : [xlayerEntry];
+    }
+
     if (!Array.isArray(chains) || chains.length === 0) {
-        chains = [{ chainId: 196, chainIndex: 196, chainShortName: 'xlayer', chainName: 'X Layer', aliases: ['xlayer'] }];
+        chains = [xlayerEntry];
     }
 
     const sorted = sortChainsForMenu(chains);
@@ -743,19 +756,54 @@ async function buildWalletChainMenu(lang) {
         const label = formatChainLabel(entry) || 'Chain';
         const chainId = Number(entry.chainId || entry.chainIndex || 196);
         const chainShort = encodeURIComponent(entry.chainShortName || entry.chainName || 'xlayer');
-        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}` };
+        const walletParam = walletAddress ? `|${encodeURIComponent(walletAddress)}` : '';
+        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}${walletParam}` };
     });
 
     const inline_keyboard = [];
     for (let i = 0; i < buttons.length; i += 2) {
         inline_keyboard.push(buttons.slice(i, i + 2));
     }
+    inline_keyboard.push([{ text: t(lang, 'action_back'), callback_data: 'wallet_overview' }, { text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+
+    const contextLine = walletAddress ? t(lang, 'wallet_balance_wallet', { index: '1', wallet: escapeHtml(shortenAddress(walletAddress)) }) : null;
+    const lines = [t(lang, 'wallet_chain_prompt')];
+    if (contextLine) {
+        lines.push(contextLine);
+    }
+
+    return {
+        text: lines.join('\n'),
+        replyMarkup: { inline_keyboard },
+        chains: sorted
+    };
+}
+
+async function buildWalletSelectMenu(lang, chatId) {
+    const wallets = await db.getWalletsForUser(chatId);
+    if (!Array.isArray(wallets) || wallets.length === 0) {
+        return {
+            text: t(lang, 'mywallet_not_linked'),
+            replyMarkup: appendCloseButton(null, lang)
+        };
+    }
+
+    const lines = [
+        t(lang, 'mywallet_list_header', { count: wallets.length.toString() }),
+        t(lang, 'mywallet_list_footer')
+    ];
+
+    const inline_keyboard = [];
+    for (const wallet of wallets) {
+        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const shortAddr = shortenAddress(normalized);
+        inline_keyboard.push([{ text: `💼 ${shortAddr}`, callback_data: `wallet_pick|${normalized}` }]);
+    }
     inline_keyboard.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
 
     return {
-        text: t(lang, 'wallet_chain_prompt'),
-        replyMarkup: { inline_keyboard },
-        chains: sorted
+        text: lines.join('\n'),
+        replyMarkup: { inline_keyboard }
     };
 }
 
@@ -785,7 +833,14 @@ function formatChainLabel(entry) {
 }
 
 async function loadWalletOverviewEntries(chatId, options = {}) {
-    const wallets = await db.getWalletsForUser(chatId);
+    let wallets = await db.getWalletsForUser(chatId);
+    if (options.targetWallet) {
+        const target = normalizeAddressSafe(options.targetWallet) || options.targetWallet;
+        wallets = wallets.filter((wallet) => (normalizeAddressSafe(wallet) || wallet).toLowerCase() === (target || '').toLowerCase());
+        if (wallets.length === 0 && target) {
+            wallets = [target];
+        }
+    }
     const overview = await db.getWalletTokenOverview(chatId);
     const tokenMap = new Map();
     for (const entry of overview) {
@@ -810,19 +865,42 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
         let totalUsd = null;
 
         try {
-            const live = await fetchLiveWalletTokens(normalized, { registeredTokens, chatId, chainContext: options.chainContext });
-            tokens = live?.tokens || [];
-            warning = live?.warning || null;
-            totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : null;
+            // When a chain is selected we should rely on the OKX balance endpoints directly
+            // to reflect the latest on-chain snapshot for that chain before attempting any
+            // legacy fallbacks.
+            if (options.chainContext) {
+                const liveSnapshot = await fetchOkxDexBalanceSnapshot(normalized, { chainContext: options.chainContext });
+                if (Array.isArray(liveSnapshot.tokens) && liveSnapshot.tokens.length > 0) {
+                    tokens = liveSnapshot.tokens;
+                    totalUsd = Number.isFinite(liveSnapshot.totalUsd) ? liveSnapshot.totalUsd : null;
+                    await db.saveWalletHoldingsCache(chatId, normalized, tokens);
+                } else {
+                    warning = 'wallet_overview_wallet_no_token';
+                }
+            }
 
-            if (tokens.length > 0) {
-                await db.saveWalletHoldingsCache(chatId, normalized, tokens);
-            } else {
-                const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
-                if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
-                    tokens = cachedSnapshot.tokens;
-                    cached = true;
-                    warning = warning || 'wallet_cached';
+            // If the direct snapshot did not return holdings, attempt the broader live
+            // workflow (RPC/log discovery) as a fallback.
+            if (tokens.length === 0) {
+                const live = await fetchLiveWalletTokens(normalized, {
+                    registeredTokens,
+                    chatId,
+                    chainContext: options.chainContext,
+                    forceDex: options.forceDex
+                });
+                tokens = live?.tokens || [];
+                warning = warning || live?.warning || null;
+                totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : totalUsd;
+
+                if (tokens.length > 0) {
+                    await db.saveWalletHoldingsCache(chatId, normalized, tokens);
+                } else if (!options.forceLive) {
+                    const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
+                    if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
+                        tokens = cachedSnapshot.tokens;
+                        cached = true;
+                        warning = warning || 'wallet_cached';
+                    }
                 }
             }
         } catch (error) {
@@ -837,7 +915,7 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
 }
 
 async function fetchLiveWalletTokens(walletAddress, options = {}) {
-    const { registeredTokens = [], chatId = null, chainContext = null } = options;
+    const { registeredTokens = [], chatId = null, chainContext = null, forceDex = false } = options;
     const normalizedWallet = normalizeAddressSafe(walletAddress);
     if (!normalizedWallet) {
         return { tokens: [], warning: 'wallet_invalid' };
@@ -847,36 +925,75 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const providerHealthy = await isProviderHealthy(provider);
     const rpcWarning = providerHealthy ? null : 'rpc_offline';
 
-    // Always prefer OKX DEX holdings first to avoid slow RPC scans.
+    // Always prefer OKX DEX holdings first to avoid slow RPC scans and, when requested,
+    // force a live snapshot even if a cached copy exists.
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
-    if (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
-        const tokens = await mapWithConcurrency(dexSnapshot.tokens, WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            if (!holding.tokenAddress || holding.amountRaw === null || holding.amountRaw === undefined) {
-                return null;
-            }
-
+    if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
+        let mappedTokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
             const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
             let amountText = null;
             let numericAmount = null;
 
-            try {
-                amountText = formatBigIntValue(holding.amountRaw, decimals, {
-                    maximumFractionDigits: Math.min(6, Math.max(2, decimals))
-                });
-                numericAmount = Number(ethers.formatUnits(holding.amountRaw, decimals));
-            } catch (error) {
-                amountText = null;
-                numericAmount = null;
+            // Try to format a BigInt-style balance first
+            const rawCandidate = holding.amountRaw ?? holding.rawBalance ?? null;
+            if (rawCandidate !== null && rawCandidate !== undefined) {
+                try {
+                    const bigIntValue = typeof rawCandidate === 'bigint' ? rawCandidate : BigInt(rawCandidate);
+                    amountText = formatBigIntValue(bigIntValue, decimals, {
+                        maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+                    });
+                    numericAmount = Number(ethers.formatUnits(bigIntValue, decimals));
+                } catch (error) {
+                    // ignore raw formatting errors
+                }
             }
 
-            if (!amountText || !numericAmount || numericAmount <= 0) {
-                return null;
+            // Fallbacks when raw balance formatting failed or decimals are missing
+            if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined || holding.amount !== undefined)) {
+                const fallbackAmount = holding.balance ?? holding.coinAmount ?? holding.amount;
+                if (fallbackAmount !== undefined && fallbackAmount !== null) {
+                    amountText = String(fallbackAmount);
+                }
+                const numericFallback = Number(fallbackAmount);
+                if (!Number.isFinite(numericAmount) && Number.isFinite(numericFallback)) {
+                    numericAmount = numericFallback;
+                }
+                if (!numericAmount && Number.isFinite(decimals)) {
+                    const raw = decimalToRawBigInt(fallbackAmount, decimals);
+                    if (raw !== null) {
+                        try {
+                            numericAmount = Number(ethers.formatUnits(raw, decimals));
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
+                }
             }
 
-            const priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            if (!amountText) {
+                amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
+            }
+
             const valueParts = [];
+            if (Number.isFinite(holding.currencyAmount) && holding.currencyAmount > 0) {
+                const usdValue = formatFiatValue(holding.currencyAmount, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                if (usdValue) {
+                    valueParts.push(`${usdValue} USDT`);
+                }
+            }
 
-            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
+            let priceInfo = null;
+            if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
+                priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
+            }
+            if (!priceInfo && holding.tokenAddress) {
+                priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+            }
+            if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
+                priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
+            }
+
+            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0 && Number.isFinite(numericAmount)) {
                 const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2
@@ -905,12 +1022,41 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 tokenAddress: holding.tokenAddress,
                 tokenLabel: holding.symbol || holding.name || 'Token',
                 amountText,
-                valueText: valueParts.length ? valueParts.join(' / ') : null
+                valueText: valueParts.length ? valueParts.join(' / ') : null,
+                chainIndex: holding.chainIndex,
+                walletAddress: holding.walletAddress || normalizedWallet,
+                isRiskToken: holding.isRiskToken === true
             };
         });
 
+        const filtered = mappedTokens.filter(Boolean);
+
+        // If OKX returned holdings but our formatter discarded them (e.g., unexpected shapes),
+        // fall back to a minimal projection so the raw rows still render for the user.
+        const fallbackTokens = [];
+        if (filtered.length === 0 && Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
+            for (const raw of dexSnapshot.tokens) {
+                if (!raw) continue;
+                const amountText = raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? '0';
+                const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
+                const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
+                const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
+                fallbackTokens.push({
+                    tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
+                    tokenLabel,
+                    amountText: String(amountText),
+                    valueText: raw.tokenPrice ? `${formatFiatValue(raw.tokenPrice)} USDT` : null,
+                    chainIndex,
+                    walletAddress: walletAddr,
+                    isRiskToken: Boolean(raw.isRiskToken)
+                });
+            }
+        }
+
+        const tokens = filtered.length > 0 ? filtered : fallbackTokens;
+
         return {
-            tokens: tokens.filter(Boolean),
+            tokens,
             warning: rpcWarning,
             totalUsd: dexSnapshot.totalUsd
         };
@@ -1148,22 +1294,29 @@ async function buildWalletBalanceText(lang, entries, options = {}) {
         }
 
         for (const token of entry.tokens) {
-            if (token.amountText && token.valueText) {
-                lines.push(t(lang, 'wallet_balance_token_value', {
-                    token: escapeHtml(token.tokenLabel || 'Token'),
-                    amount: escapeHtml(token.amountText),
-                    symbol: escapeHtml(token.tokenLabel || 'Token'),
-                    value: escapeHtml(token.valueText)
-                }));
-            } else if (token.amountText) {
-                lines.push(t(lang, 'wallet_balance_token_amount', {
-                    token: escapeHtml(token.tokenLabel || 'Token'),
-                    amount: escapeHtml(token.amountText),
-                    symbol: escapeHtml(token.tokenLabel || 'Token')
-                }));
-            } else {
-                lines.push(t(lang, 'wallet_balance_token_pending', { token: escapeHtml(token.tokenLabel || 'Token') }));
-            }
+            const chainTag = token.chainIndex
+                ? `#${token.chainIndex}`
+                : (options.chainLabel || t(lang, 'wallet_balance_chain_unknown'));
+            const riskLabel = token.isRiskToken
+                ? t(lang, 'wallet_balance_risk_flagged')
+                : t(lang, 'wallet_balance_risk_safe');
+            const walletLabel = escapeHtml(shortenAddress(token.walletAddress || entry.address));
+            const contractLabel = token.tokenAddress
+                ? escapeHtml(shortenAddress(String(token.tokenAddress).replace(/^native:/, '')))
+                : t(lang, 'wallet_balance_contract_unknown');
+            const valueSuffix = token.valueText
+                ? ` | ${t(lang, 'wallet_balance_value_label', { value: escapeHtml(token.valueText) })}`
+                : '';
+
+            lines.push(t(lang, 'wallet_balance_token_table', {
+                chain: escapeHtml(chainTag),
+                token: escapeHtml(token.tokenLabel || 'Token'),
+                amount: escapeHtml(token.amountText || '0'),
+                risk: escapeHtml(riskLabel),
+                wallet: walletLabel,
+                contract: contractLabel,
+                value: valueSuffix
+            }));
         }
     }
 
@@ -5500,18 +5653,20 @@ function normalizeDexHolding(row) {
         return null;
     }
 
-    const tokenAddress = normalizeOkxConfigAddress(
-        row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr
-    );
+    const firstBalance = row.rawBalance
+        ?? row.balance
+        ?? row.tokenBalance
+        ?? row.amount
+        ?? row.holdingAmount
+        ?? row.holding
+        ?? row.tokenAmount;
+    const rawBalance = firstBalance;
+    const tokenAddressRaw = row.tokenContractAddress || row.tokenAddress || row.contractAddress || row.tokenAddr;
+    let tokenAddress = normalizeOkxConfigAddress(tokenAddressRaw);
 
-    if (!tokenAddress) {
-        return null;
-    }
-
-    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals);
+    const decimals = Number(row.decimals || row.decimal || row.tokenDecimal || row.tokenDecimals || row.tokenPrecision);
     const symbol = row.tokenSymbol || row.symbol;
     const name = row.tokenName || row.name;
-    const rawBalance = row.balance || row.tokenBalance || row.amount || row.holdingAmount || row.holding || row.tokenAmount;
 
     let amountRaw = null;
     if (rawBalance !== undefined && rawBalance !== null) {
@@ -5520,13 +5675,32 @@ function normalizeDexHolding(row) {
         } catch (error) {
             amountRaw = null;
         }
-    } else if (row.coinAmount !== undefined && row.coinAmount !== null && Number.isFinite(decimals)) {
-        amountRaw = decimalToRawBigInt(row.coinAmount, decimals);
+    }
+
+    if (amountRaw === null && row.coinAmount !== undefined && row.coinAmount !== null) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(row.coinAmount, decimalsForDecimal);
+    }
+
+    if (amountRaw === null && firstBalance !== undefined && firstBalance !== null) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(firstBalance, decimalsForDecimal);
+    }
+
+    if (amountRaw === null && row.balance) {
+        const decimalsForDecimal = Number.isFinite(decimals) ? decimals : 18;
+        amountRaw = decimalToRawBigInt(row.balance, decimalsForDecimal);
+    }
+
+    if (!tokenAddress) {
+        const chainId = row.chainIndex || row.chainId || row.chain || 'unknown';
+        const symbolKey = (symbol || name || 'token').toString().toLowerCase().replace(/[^a-z0-9]+/gi, '-');
+        tokenAddress = `native:${chainId}:${symbolKey || 'token'}`;
     }
 
     const currencyAmount = Number(row.currencyAmount);
-    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice))
-        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice)
+    let priceUsd = Number.isFinite(Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice))
+        ? Number(row.tokenUnitPrice || row.priceUsd || row.usdPrice || row.tokenPrice)
         : null;
 
     if ((!Number.isFinite(priceUsd) || priceUsd === null) && amountRaw !== null && Number.isFinite(decimals) && Number.isFinite(currencyAmount) && currencyAmount > 0) {
@@ -5540,14 +5714,21 @@ function normalizeDexHolding(row) {
         }
     }
 
+    const balanceText = row.balance ?? row.coinAmount ?? null;
+
     return {
         tokenAddress,
         decimals: Number.isFinite(decimals) ? decimals : undefined,
         symbol,
         name,
+        rawBalance,
+        balance: balanceText,
         amountRaw,
         currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
-        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
+        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null,
+        chainIndex: row.chainIndex || row.chainId || row.chain || row.chain_id,
+        walletAddress: row.address || row.walletAddress,
+        isRiskToken: Boolean(row.isRiskToken)
     };
 }
 
@@ -5569,6 +5750,9 @@ function extractDexHoldingRows(payload) {
             if (Array.isArray(item.tokenBalances)) {
                 rows.push(...item.tokenBalances);
             }
+            if (Array.isArray(item.tokenAssets)) {
+                rows.push(...item.tokenAssets);
+            }
             if (Array.isArray(item.balanceList)) {
                 rows.push(...item.balanceList);
             }
@@ -5587,6 +5771,7 @@ function extractDexHoldingRows(payload) {
         const candidates = [
             nested.tokenBalance,
             nested.tokenBalances,
+            nested.tokenAssets,
             nested.balanceList,
             nested.balances,
             nested.list
@@ -5627,10 +5812,26 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         chainShortName
     };
 
+    const logBalanceRequest = (endpoint) => {
+        try {
+            const params = new URLSearchParams();
+            params.set('address', query.address);
+            params.set('walletAddress', query.walletAddress);
+            chainIdList.forEach((id) => params.append('chains', String(id)));
+            params.set('chainId', String(query.chainId));
+            params.set('chainIndex', String(query.chainIndex));
+            params.set('chainShortName', query.chainShortName);
+            console.log(`[DexHoldings] ${endpoint} -> ${params.toString()}`);
+        } catch (error) {
+            // ignore log errors
+        }
+    };
+
     let holdings = [];
     let totalUsd = null;
 
     try {
+        logBalanceRequest('/api/v6/dex/balance/all-token-balances-by-address');
         const response = await okxJsonRequest('GET', '/api/v6/dex/balance/all-token-balances-by-address', {
             query,
             auth: hasOkxCredentials,
@@ -5638,9 +5839,14 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         });
 
         const rows = extractDexHoldingRows(response);
+        // Preserve every normalized holding row that the OKX response returns so the
+        // downstream formatter can render balances even when some numeric fields are
+        // missing or cannot be parsed (e.g., native tokens without decimals). The
+        // formatter already tolerates missing amounts by falling back to the balance
+        // strings, so keep all rows instead of filtering them out here.
         holdings = rows
             .map((row) => normalizeDexHolding(row))
-            .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
+            .filter(Boolean);
 
         const responseTotal = extractDexTotalValue(response);
         totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
@@ -5650,6 +5856,7 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
 
     if (!Number.isFinite(totalUsd)) {
         try {
+            logBalanceRequest('/api/v6/dex/balance/total-value-by-address');
             const totalResponse = await okxJsonRequest('GET', '/api/v6/dex/balance/total-value-by-address', {
                 query,
                 auth: hasOkxCredentials,
@@ -6902,7 +7109,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         try {
-            const menu = await buildWalletChainMenu(lang);
+            const menu = await buildWalletSelectMenu(lang, chatId);
             await sendReply(msg, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
         } catch (error) {
             console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
@@ -7862,14 +8069,61 @@ function startTelegramBot() {
                 return;
             }
 
-            if (query.data === 'wallet_overview' || query.data === 'wallet_chain_menu') {
+            if (query.data === 'wallet_overview' || query.data.startsWith('wallet_chain_menu')) {
                 if (!chatId) {
                     await bot.answerCallbackQuery(queryId);
                     return;
                 }
+                const walletParam = query.data.startsWith('wallet_chain_menu')
+                    ? decodeURIComponent(query.data.split('|')[1] || '')
+                    : null;
 
                 try {
-                    const menu = await buildWalletChainMenu(callbackLang);
+                    if (walletParam) {
+                        const menu = await buildWalletChainMenu(callbackLang, walletParam);
+                        const options = {
+                            chat_id: chatId,
+                            message_id: query.message?.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        };
+
+                        if (options.message_id) {
+                            await bot.editMessageText(menu.text, options);
+                        } else {
+                            await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        }
+                    } else {
+                        const menu = await buildWalletSelectMenu(callbackLang, chatId);
+                        const options = {
+                            chat_id: chatId,
+                            message_id: query.message?.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        };
+
+                        if (options.message_id) {
+                            await bot.editMessageText(menu.text, options);
+                        } else {
+                            await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        }
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[WalletChains] Failed to render wallet menu: ${error.message}`);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_overview_error'), show_alert: true });
+                }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_pick|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const wallet = decodeURIComponent(query.data.split('|')[1] || '');
+                try {
+                    const menu = await buildWalletChainMenu(callbackLang, wallet);
                     const options = {
                         chat_id: chatId,
                         message_id: query.message?.message_id,
@@ -7884,7 +8138,7 @@ function startTelegramBot() {
                     }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
-                    console.error(`[WalletChains] Failed to render chain menu: ${error.message}`);
+                    console.error(`[WalletPick] Failed to render chains for ${wallet}: ${error.message}`);
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_overview_error'), show_alert: true });
                 }
                 return;
@@ -7898,6 +8152,7 @@ function startTelegramBot() {
                 const parts = query.data.split('|');
                 const chainId = Number(parts[1]);
                 const chainShort = parts[2] ? decodeURIComponent(parts[2]) : null;
+                const targetWallet = parts[3] ? decodeURIComponent(parts[3]) : null;
                 let chainEntry = null;
                 try {
                     const chains = await fetchOkxBalanceSupportedChains();
@@ -7908,41 +8163,71 @@ function startTelegramBot() {
                     console.warn(`[WalletChains] Failed to load chains for selection: ${error.message}`);
                 }
 
-                const chainContext = chainEntry || {
-                    chainId: Number.isFinite(chainId) ? chainId : 196,
-                    chainIndex: Number.isFinite(chainId) ? chainId : 196,
-                    chainShortName: chainShort || 'xlayer',
-                    aliases: chainShort ? [chainShort] : ['xlayer']
-                };
-                const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
+            const chainContext = chainEntry || {
+                chainId: Number.isFinite(chainId) ? chainId : 196,
+                chainIndex: Number.isFinite(chainId) ? chainId : 196,
+                chainShortName: chainShort || 'xlayer',
+                aliases: chainShort ? [chainShort] : ['xlayer']
+            };
+            const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
-                try {
-                    const entries = await loadWalletOverviewEntries(chatId, { chainContext });
-                    const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
+            try {
+                const entries = await loadWalletOverviewEntries(chatId, {
+                    chainContext,
+                    forceLive: true,
+                    forceDex: true,
+                    targetWallet
+                });
+                const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
                         .filter((row) => row.address && row.url)
                         .map((row) => [{ text: t(callbackLang, 'wallet_action_portfolio', { wallet: shortenAddress(row.address) }), url: row.url }]);
+                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
                     const replyMarkup = appendCloseButton(
                         portfolioRows.length ? { inline_keyboard: portfolioRows } : null,
                         callbackLang,
-                        { backCallbackData: 'wallet_chain_menu' }
+                        { backCallbackData: backCallback }
                     );
 
+                    let rendered = false;
                     if (query.message?.message_id) {
-                        await bot.editMessageText(text, {
-                            chat_id: chatId,
-                            message_id: query.message.message_id,
-                            parse_mode: 'HTML',
-                            reply_markup: replyMarkup
-                        });
-                    } else {
+                        try {
+                            await bot.editMessageText(text, {
+                                chat_id: chatId,
+                                message_id: query.message.message_id,
+                                parse_mode: 'HTML',
+                                reply_markup: replyMarkup
+                            });
+                            rendered = true;
+                        } catch (editError) {
+                            console.warn(`[WalletChains] editMessageText failed, retrying with sendMessage: ${editError.message}`);
+                        }
+                    }
+
+                    if (!rendered) {
                         await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: replyMarkup });
                     }
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+
+                    try {
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                    } catch (ackError) {
+                        console.warn(`[WalletChains] Callback ack failed: ${ackError.message}`);
+                    }
                 } catch (error) {
                     console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_chain_error'), show_alert: true });
+                    const fallback = t(callbackLang, 'wallet_overview_wallet_no_token');
+                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
+                    try {
+                        await bot.sendMessage(chatId, fallback, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang, { backCallbackData: backCallback }) });
+                    } catch (sendError) {
+                        console.warn(`[WalletChains] Fallback send failed: ${sendError.message}`);
+                    }
+                    try {
+                        await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_chain_error'), show_alert: true });
+                    } catch (ackError) {
+                        console.warn(`[WalletChains] Callback ack error after failure: ${ackError.message}`);
+                    }
                 }
                 return;
             }
