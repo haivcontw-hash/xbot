@@ -961,6 +961,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
         let amountText = null;
         let numericAmount = null;
+        let amountExactText = null;
 
         const rawCandidate = holding.amountRaw ?? holding.rawBalance ?? null;
         if (rawCandidate !== null && rawCandidate !== undefined) {
@@ -970,6 +971,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                     maximumFractionDigits: Math.min(6, Math.max(2, decimals))
                 });
                 numericAmount = Number(ethers.formatUnits(bigIntValue, decimals));
+                amountExactText = ethers.formatUnits(bigIntValue, decimals);
             } catch (error) {
                 // ignore raw formatting errors
             }
@@ -1000,6 +1002,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
         }
 
+        if (!amountExactText && amountText) {
+            amountExactText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? amountText);
+        }
+
         const unitPriceText = holding.tokenPrice !== undefined && holding.tokenPrice !== null
             ? String(holding.tokenPrice)
             : null;
@@ -1010,9 +1016,14 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             totalValueUsd = numericAmount * unitPriceUsd;
         }
 
+        const totalValueExactText = amountExactText && unitPriceText
+            ? multiplyDecimalStrings(amountExactText, unitPriceText)
+            : null;
+
         return {
             tokenAddress: holding.tokenAddress,
             tokenLabel: holding.symbol || holding.name || 'Token',
+            symbol: holding.symbol || holding.tokenSymbol || holding.tokenLabel || holding.name || null,
             amountText,
             valueText: null,
             chainIndex: holding.chainIndex,
@@ -1021,7 +1032,8 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
             unitPriceText,
             totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
-            currencyAmount: Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null
+            currencyAmount: Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null,
+            totalValueExactText: totalValueExactText || null
         };
     });
 
@@ -1032,6 +1044,9 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         for (const raw of dexSnapshot.tokens) {
             if (!raw) continue;
             const amountText = raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? '0';
+            const amountExactText = raw.amountRaw !== undefined && raw.amountRaw !== null && Number.isFinite(raw.decimals)
+                ? ethers.formatUnits(raw.amountRaw, raw.decimals)
+                : String(amountText);
             const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
             const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
             const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
@@ -1041,9 +1056,13 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             const totalValueUsd = Number.isFinite(numericAmount) && Number.isFinite(unitPriceUsd)
                 ? numericAmount * unitPriceUsd
                 : null;
+            const totalValueExactText = amountExactText && unitPriceText
+                ? multiplyDecimalStrings(amountExactText, unitPriceText)
+                : null;
             fallbackTokens.push({
                 tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
                 tokenLabel,
+                symbol: raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || null,
                 amountText: String(amountText),
                 valueText: null,
                 chainIndex,
@@ -1052,7 +1071,8 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
                 unitPriceText,
                 totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
-                currencyAmount: Number.isFinite(Number(raw.currencyAmount)) ? Number(raw.currencyAmount) : null
+                currencyAmount: Number.isFinite(Number(raw.currencyAmount)) ? Number(raw.currencyAmount) : null,
+                totalValueExactText: totalValueExactText || null
             });
         }
     }
@@ -1205,6 +1225,7 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
 
     tokens.forEach((token, idx) => {
         const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || token.name || 'Token';
+        const symbolLabel = String(symbol);
         const balanceValue = token.amountText
             || token.balance
             || token.amount
@@ -1212,7 +1233,7 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             || token.available
             || token.currencyAmount
             || '0';
-        const balanceHtml = `${escapeHtml(String(balanceValue))} ${escapeHtml(String(symbol))}`;
+        const balanceHtml = `${escapeHtml(String(balanceValue))} ${escapeHtml(symbolLabel)}`;
         const riskLabel = token.isRiskToken || token.riskToken || token.tokenRisk
             ? t(lang, 'wallet_dex_risk_yes')
             : t(lang, 'wallet_dex_risk_no');
@@ -1243,11 +1264,13 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             || (token.tokenPrice !== undefined && token.tokenPrice !== null ? String(token.tokenPrice) : null)
             || (Number.isFinite(token.unitPriceUsd) ? String(token.unitPriceUsd) : null);
         const priceLabel = unitPriceRaw
-            ? escapeHtml(`${unitPriceRaw} USD/token`)
+            ? escapeHtml(`${unitPriceRaw} USD/${symbolLabel}`)
             : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
 
         const totalParts = [];
-        if (formattedTotalUsd) {
+        if (token.totalValueExactText) {
+            totalParts.push(`${token.totalValueExactText} USD`);
+        } else if (formattedTotalUsd) {
             totalParts.push(`${formattedTotalUsd} USD`);
         }
         if (token.valueText) {
@@ -5604,6 +5627,115 @@ function decimalToRawBigInt(amount, decimals) {
     } catch (error) {
         return null;
     }
+}
+
+function parseDecimalStringParts(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    const trimmed = String(value).trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const sanitized = trimmed.replace(/[, ]/g, '');
+    const match = sanitized.match(/^([+-]?)(\d*(?:\.\d*)?)(?:[eE]([+-]?\d+))?$/);
+    if (!match) {
+        return null;
+    }
+
+    const signChar = match[1] || '+';
+    let base = match[2];
+    let exponent = match[3] ? Number(match[3]) : 0;
+
+    if (!base || base === '.') {
+        base = '0';
+    }
+
+    if (!Number.isFinite(exponent)) {
+        exponent = 0;
+    }
+
+    if (!base.includes('.')) {
+        base = `${base}.`;
+    }
+
+    let [intPartRaw, fracPartRaw = ''] = base.split('.');
+    if (!intPartRaw) {
+        intPartRaw = '0';
+    }
+
+    let intPart = intPartRaw;
+    let fracPart = fracPartRaw;
+
+    if (exponent > 0) {
+        if (fracPart.length <= exponent) {
+            intPart = `${intPart}${fracPart}${'0'.repeat(exponent - fracPart.length)}`;
+            fracPart = '';
+        } else {
+            intPart = `${intPart}${fracPart.slice(0, exponent)}`;
+            fracPart = fracPart.slice(exponent);
+        }
+    } else if (exponent < 0) {
+        const shift = Math.abs(exponent);
+        if (intPart.length <= shift) {
+            const zerosNeeded = shift - intPart.length;
+            fracPart = `${'0'.repeat(zerosNeeded)}${intPart}${fracPart}`;
+            intPart = '0';
+        } else {
+            const splitIndex = intPart.length - shift;
+            fracPart = `${intPart.slice(splitIndex)}${fracPart}`;
+            intPart = intPart.slice(0, splitIndex);
+        }
+    }
+
+    const digits = `${intPart}${fracPart}`.replace(/^0+/, '') || '0';
+    const scale = fracPart.length;
+    const sign = signChar === '-' ? -1 : 1;
+    return { sign, digits, scale };
+}
+
+function multiplyDecimalStrings(valueA, valueB) {
+    const partsA = parseDecimalStringParts(valueA);
+    const partsB = parseDecimalStringParts(valueB);
+    if (!partsA || !partsB) {
+        return null;
+    }
+
+    if (partsA.digits === '0' || partsB.digits === '0') {
+        return '0';
+    }
+
+    const resultSign = partsA.sign * partsB.sign;
+    let productDigits;
+    try {
+        productDigits = (BigInt(partsA.digits) * BigInt(partsB.digits)).toString();
+    } catch (error) {
+        return null;
+    }
+
+    const scale = partsA.scale + partsB.scale;
+    if (scale > 0) {
+        if (productDigits.length <= scale) {
+            productDigits = productDigits.padStart(scale + 1, '0');
+        }
+        const intPart = productDigits.slice(0, productDigits.length - scale) || '0';
+        const fracPart = productDigits.slice(productDigits.length - scale);
+        const normalizedInt = intPart.replace(/^0+(?=\d)/, '') || '0';
+        const normalizedFrac = fracPart.replace(/0+$/, '');
+        const combined = normalizedFrac ? `${normalizedInt}.${normalizedFrac}` : normalizedInt;
+        if (resultSign < 0 && combined !== '0') {
+            return `-${combined}`;
+        }
+        return combined;
+    }
+
+    const normalizedInt = productDigits.replace(/^0+(?=\d)/, '') || '0';
+    if (resultSign < 0 && normalizedInt !== '0') {
+        return `-${normalizedInt}`;
+    }
+    return normalizedInt;
 }
 
 function normalizeDexHolding(row) {
