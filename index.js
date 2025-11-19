@@ -192,6 +192,30 @@ const WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS = {
     '1h': 60 * 60 * 1000,
     '1d': 24 * 60 * 60 * 1000
 };
+const OKX_CANDLE_BAR_MAP = {
+    '1m': '1m',
+    '3m': '3m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '1H',
+    '2h': '2H',
+    '4h': '4H',
+    '6h': '6H',
+    '12h': '12H',
+    '1d': '1D',
+    '2d': '2D',
+    '3d': '3D',
+    '7d': '7D',
+    '14d': '14D',
+    '30d': '30D',
+    '60d': '60D',
+    '90d': '90D',
+    '1w': '1W',
+    '1mo': '1M',
+    '1mth': '1M',
+    '1month': '1M'
+};
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -1694,11 +1718,11 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
             break;
         }
         case 'candles':
-            query.bar = query.bar || '1m';
+            query.bar = normalizeOkxCandleBar(query.bar, '1m') || '1m';
             query.limit = query.limit || 10;
             break;
         case 'historical_candles':
-            query.bar = query.bar || '15m';
+            query.bar = normalizeOkxCandleBar(query.bar, '15m') || '15m';
             query.limit = query.limit || 20;
             break;
         case 'latest_price':
@@ -1859,8 +1883,13 @@ async function fetchWalletTokenHistoricalPriceFallback(query, targetPeriod) {
 function buildWalletTokenHistoricalPriceFallbackQuery(query) {
     const fallback = { ...query };
     delete fallback.cursor;
+    delete fallback.period;
     if (!fallback.bar) {
         fallback.bar = WALLET_TOKEN_HISTORY_FALLBACK_BAR;
+    }
+    const normalizedBar = normalizeOkxCandleBar(fallback.bar, WALLET_TOKEN_HISTORY_FALLBACK_BAR);
+    if (normalizedBar) {
+        fallback.bar = normalizedBar;
     }
     if (!fallback.limit) {
         fallback.limit = WALLET_TOKEN_HISTORY_FALLBACK_LIMIT;
@@ -1921,6 +1950,21 @@ function getWalletTokenHistoryRequestPeriodMs(period) {
         return WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS[period];
     }
     return null;
+}
+
+function normalizeOkxCandleBar(value, fallback = null) {
+    const normalizeValue = (input) => {
+        if (input === undefined || input === null) {
+            return null;
+        }
+        const key = String(input).trim().toLowerCase();
+        if (!key) {
+            return null;
+        }
+        return OKX_CANDLE_BAR_MAP[key] || null;
+    };
+
+    return normalizeValue(value) || normalizeValue(fallback);
 }
 
 function convertWalletTokenCandlesToHistoryEntries(entries) {
