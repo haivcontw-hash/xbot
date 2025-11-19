@@ -168,8 +168,14 @@ const WALLET_TOKEN_HISTORY_PERIOD_MS = {
     '5m': 5 * 60 * 1000,
     '30m': 30 * 60 * 1000,
     '1h': 60 * 60 * 1000,
-    '1d': 24 * 60 * 60 * 1000
+    '12h': 12 * 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000,
+    '60d': 60 * 24 * 60 * 60 * 1000,
+    '90d': 90 * 24 * 60 * 60 * 1000
 };
+const WALLET_TOKEN_HISTORY_PERIOD_OPTIONS = ['30m', '1h', '12h', '1d', '7d', '30d', '60d', '90d'];
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -873,7 +879,8 @@ function registerWalletTokenContext(context) {
     pruneWalletTokenCallbacks();
     const token = crypto.randomBytes(4).toString('hex');
     const now = Date.now();
-    const storedContext = { ...context, tokenCallbackId: token };
+    const historyPeriod = normalizeWalletTokenHistoryPeriod(context.historyPeriod);
+    const storedContext = { ...context, tokenCallbackId: token, historyPeriod };
     walletTokenCallbackStore.set(token, {
         context: storedContext,
         expiresAt: now + WALLET_TOKEN_CALLBACK_TTL
@@ -1555,6 +1562,8 @@ function buildWalletTokenMenu(context, lang, options = {}) {
     const contractHtml = contractAddress
         ? `<code>${escapeHtml(contractAddress)}</code>`
         : t(lang, 'wallet_balance_contract_unknown');
+    const historyPeriod = normalizeWalletTokenHistoryPeriod(context?.historyPeriod);
+    const historyPeriodHtml = `<code>${escapeHtml(historyPeriod)}</code>`;
 
     const lines = [
         t(lang, 'wallet_token_menu_title', { symbol: escapeHtml(meta.symbolLabel || 'Token') }),
@@ -1563,6 +1572,7 @@ function buildWalletTokenMenu(context, lang, options = {}) {
         t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }),
         t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }),
         t(lang, 'wallet_dex_token_total_value', { total: meta.totalLabel }),
+        t(lang, 'wallet_token_history_period_line', { period: historyPeriodHtml }),
         t(lang, 'wallet_dex_token_contract', { contract: contractHtml }),
         '',
         t(lang, 'wallet_token_menu_hint')
@@ -1627,6 +1637,11 @@ function buildWalletTokenActionKeyboard(context, lang) {
         if (currentRow.length > 0) {
             rows.push(currentRow);
         }
+
+        const periodRows = buildWalletTokenHistoryPeriodButtonRows(tokenId, lang, context?.historyPeriod);
+        if (periodRows.length > 0) {
+            rows.push(...periodRows);
+        }
     }
 
     if (context?.chainCallbackData) {
@@ -1635,6 +1650,41 @@ function buildWalletTokenActionKeyboard(context, lang) {
 
     rows.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
     return { inline_keyboard: rows };
+}
+
+function buildWalletTokenHistoryPeriodButtonRows(tokenId, lang, selectedPeriod) {
+    if (!tokenId) {
+        return [];
+    }
+
+    const normalizedSelected = normalizeWalletTokenHistoryPeriod(selectedPeriod);
+    const rows = [];
+    let currentRow = [];
+    for (const period of WALLET_TOKEN_HISTORY_PERIOD_OPTIONS) {
+        if (!WALLET_TOKEN_HISTORY_PERIOD_MS[period]) {
+            continue;
+        }
+
+        const labelKey = normalizedSelected === period
+            ? 'wallet_token_history_period_option_selected'
+            : 'wallet_token_history_period_option';
+
+        currentRow.push({
+            text: t(lang, labelKey, { period }),
+            callback_data: `wallet_token_period|${tokenId}|${period}`
+        });
+
+        if (currentRow.length === 4) {
+            rows.push(currentRow);
+            currentRow = [];
+        }
+    }
+
+    if (currentRow.length > 0) {
+        rows.push(currentRow);
+    }
+
+    return rows;
 }
 
 async function buildWalletTokenActionResult(actionKey, context, lang) {
@@ -1664,6 +1714,9 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     let handler = null;
     switch (actionKey) {
         case 'historical_price':
+            if (!query.period && context?.historyPeriod) {
+                query.period = context.historyPeriod;
+            }
             applyWalletTokenHistoricalPriceIntervalDefaults(query);
             handler = () => fetchWalletTokenHistoricalPricePayload(query, config);
             break;
@@ -9867,6 +9920,52 @@ function startTelegramBot() {
                         console.warn(`[WalletChains] Callback ack error after failure: ${ackError.message}`);
                     }
                 }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_token_period|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const [, tokenId, rawPeriod] = query.data.split('|');
+                const normalizedPeriod = normalizeWalletTokenHistoryPeriod(rawPeriod);
+                const context = resolveWalletTokenContext(tokenId, { extend: true });
+                if (!context || !tokenId || !normalizedPeriod) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
+                    return;
+                }
+
+                context.historyPeriod = normalizedPeriod;
+                const menu = buildWalletTokenMenu(context, callbackLang);
+                let rendered = false;
+
+                if (query.message?.message_id) {
+                    try {
+                        await bot.editMessageText(menu.text, {
+                            chat_id: chatId,
+                            message_id: query.message.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        });
+                        rendered = true;
+                    } catch (editError) {
+                        if (isTelegramMessageNotModifiedError(editError)) {
+                            rendered = true;
+                        } else {
+                            console.warn(`[WalletToken] Failed to edit history period: ${editError.message}`);
+                        }
+                    }
+                }
+
+                if (!rendered) {
+                    await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                }
+
+                await bot.answerCallbackQuery(queryId, {
+                    text: t(callbackLang, 'wallet_token_history_period_updated', { period: normalizedPeriod })
+                });
                 return;
             }
 
