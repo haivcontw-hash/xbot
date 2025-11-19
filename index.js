@@ -6076,7 +6076,7 @@ async function fetchOkxBalanceSupportedChains() {
     const payload = await okxJsonRequest('GET', '/api/v6/dex/balance/supported/chain', { query: {}, expectOkCode: false });
     const raw = unwrapOkxData(payload) || [];
     const normalized = raw
-        .map((entry) => normalizeOkxChainEntry(entry))
+        .map((entry) => normalizeOkxChainDirectoryEntry(entry))
         .filter(Boolean);
     return dedupeOkxChainEntries(normalized);
 }
@@ -8242,12 +8242,20 @@ function startTelegramBot() {
             const chainLabel = formatChainLabel(chainContext) || 'X Layer (#196)';
 
             try {
-                const entries = await loadWalletOverviewEntries(chatId, {
+                const normalizedWallet = normalizeAddressSafe(targetWallet) || targetWallet;
+                const liveSnapshot = await fetchLiveWalletTokens(normalizedWallet, {
                     chainContext,
-                    forceLive: true,
-                    forceDex: true,
-                    targetWallet
+                    forceDex: true
                 });
+
+                const entries = [{
+                    address: normalizedWallet,
+                    tokens: Array.isArray(liveSnapshot.tokens) ? liveSnapshot.tokens : [],
+                    warning: liveSnapshot.warning,
+                    cached: false,
+                    totalUsd: Number.isFinite(liveSnapshot.totalUsd) ? liveSnapshot.totalUsd : null
+                }];
+
                 const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
