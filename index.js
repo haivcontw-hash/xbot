@@ -869,7 +869,7 @@ function buildOkxPortfolioAnalysisUrl(walletAddress) {
     if (!normalized) {
         return null;
     }
-    return `https://web3.okx.com/vi/portfolio/${encodeURIComponent(normalized)}/analysis`;
+    return `https://web3.okx.com/portfolio/${encodeURIComponent(normalized)}/analysis`;
 }
 
 function formatChainLabel(entry) {
@@ -1000,14 +1000,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
         }
 
-        const valueParts = [];
-        if (Number.isFinite(holding.currencyAmount) && holding.currencyAmount > 0) {
-            const usdValue = formatFiatValue(holding.currencyAmount, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            if (usdValue) {
-                valueParts.push(`${usdValue} USDT`);
-            }
-        }
-
+        let unitPriceUsd = Number.isFinite(Number(holding.tokenPrice)) ? Number(holding.tokenPrice) : null;
         let priceInfo = null;
         if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
             priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
@@ -1018,15 +1011,13 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
         if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
             priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
         }
+        if (!Number.isFinite(unitPriceUsd) && Number.isFinite(priceInfo?.priceUsd)) {
+            unitPriceUsd = priceInfo.priceUsd;
+        }
 
-        if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0 && Number.isFinite(numericAmount)) {
-            const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-            });
-            if (usdValue) {
-                valueParts.push(`${usdValue} USDT`);
-            }
+        let totalValueUsd = Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null;
+        if ((!Number.isFinite(totalValueUsd) || totalValueUsd === null) && Number.isFinite(numericAmount) && Number.isFinite(unitPriceUsd)) {
+            totalValueUsd = numericAmount * unitPriceUsd;
         }
 
         const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
@@ -1034,13 +1025,14 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
                 ? priceInfo.priceUsd / priceInfo.okbUsd
                 : null);
+        let okbValueText = null;
         if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
             const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
                 minimumFractionDigits: 4,
                 maximumFractionDigits: 4
             });
             if (okbValue) {
-                valueParts.push(`${okbValue} OKB`);
+                okbValueText = `${okbValue} OKB`;
             }
         }
 
@@ -1048,10 +1040,13 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             tokenAddress: holding.tokenAddress,
             tokenLabel: holding.symbol || holding.name || 'Token',
             amountText,
-            valueText: valueParts.length ? valueParts.join(' / ') : null,
+            valueText: okbValueText,
             chainIndex: holding.chainIndex,
             walletAddress: holding.walletAddress || normalizedWallet,
-            isRiskToken: holding.isRiskToken === true
+            isRiskToken: holding.isRiskToken === true,
+            unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
+            totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
+            currencyAmount: Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null
         };
     });
 
@@ -1065,14 +1060,22 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
             const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
             const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
+            const numericAmount = Number(raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? raw.amountRaw ?? 0);
+            const unitPriceUsd = Number.isFinite(Number(raw.tokenPrice)) ? Number(raw.tokenPrice) : null;
+            const totalValueUsd = Number.isFinite(numericAmount) && Number.isFinite(unitPriceUsd)
+                ? numericAmount * unitPriceUsd
+                : null;
             fallbackTokens.push({
                 tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
                 tokenLabel,
                 amountText: String(amountText),
-                valueText: raw.tokenPrice ? `${formatFiatValue(raw.tokenPrice)} USDT` : null,
+                valueText: null,
                 chainIndex,
                 walletAddress: walletAddr,
-                isRiskToken: Boolean(raw.isRiskToken)
+                isRiskToken: Boolean(raw.isRiskToken),
+                unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
+                totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
+                currencyAmount: Number.isFinite(Number(raw.currencyAmount)) ? Number(raw.currencyAmount) : null
             });
         }
     }
@@ -1254,15 +1257,26 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
         }
 
         const valueParts = [];
-        if (token.valueText) {
-            valueParts.push(token.valueText);
-        }
-        const numericCurrency = Number(token.currencyAmount);
-        if (Number.isFinite(numericCurrency) && numericCurrency > 0) {
-            const fiat = formatFiatValue(numericCurrency, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const totalUsd = Number.isFinite(token.totalValueUsd)
+            ? token.totalValueUsd
+            : (Number.isFinite(Number(token.currencyAmount)) ? Number(token.currencyAmount) : null);
+        if (Number.isFinite(totalUsd) && totalUsd > 0) {
+            const fiat = formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             if (fiat) {
                 valueParts.push(`${fiat} USD`);
             }
+        }
+        const unitUsd = Number.isFinite(token.unitPriceUsd)
+            ? token.unitPriceUsd
+            : (Number.isFinite(Number(token.tokenPrice)) ? Number(token.tokenPrice) : null);
+        if (Number.isFinite(unitUsd) && unitUsd > 0) {
+            const unitLabel = formatFiatValue(unitUsd, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+            if (unitLabel) {
+                valueParts.push(`≈ ${unitLabel} USD/token`);
+            }
+        }
+        if (token.valueText) {
+            valueParts.push(token.valueText);
         }
         const valueLabel = valueParts.length > 0
             ? escapeHtml(valueParts.join(' / '))
