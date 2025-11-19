@@ -149,6 +149,11 @@ const WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES || 2);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 2;
 })();
+const WALLET_TOKEN_HISTORY_FALLBACK_BAR = process.env.WALLET_TOKEN_HISTORY_FALLBACK_BAR || '1d';
+const WALLET_TOKEN_HISTORY_FALLBACK_LIMIT = (() => {
+    const value = Number(process.env.WALLET_TOKEN_HISTORY_FALLBACK_LIMIT || 10);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 10;
+})();
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -1703,6 +1708,8 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
     const combinedEntries = [];
     let cursor = query.cursor !== undefined ? query.cursor : null;
     let lastPayload = null;
+    let lastFlattenedEntries = null;
+    let lastUniquePriceCount = 0;
 
     for (let page = 0; page < WALLET_TOKEN_HISTORY_MAX_PAGES; page += 1) {
         const requestQuery = { ...query };
@@ -1729,6 +1736,8 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
 
         const flattenedEntries = expandWalletTokenHistoryEntries(combinedEntries);
         const uniquePriceCount = countDistinctWalletTokenHistoryPrices(flattenedEntries);
+        lastFlattenedEntries = flattenedEntries;
+        lastUniquePriceCount = uniquePriceCount;
         const nextCursor = extractOkxPayloadCursor(payload);
 
         if (uniquePriceCount >= WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES || !nextCursor || nextCursor === cursor) {
@@ -1738,11 +1747,94 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
         cursor = nextCursor;
     }
 
+    const flattenedEntries = lastFlattenedEntries || expandWalletTokenHistoryEntries(combinedEntries);
+    const uniquePriceCount = lastUniquePriceCount || countDistinctWalletTokenHistoryPrices(flattenedEntries);
+
+    if (flattenedEntries.length === 0 || uniquePriceCount < WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES) {
+        const fallbackPayload = await fetchWalletTokenHistoricalPriceFallback(query);
+        if (fallbackPayload) {
+            return fallbackPayload;
+        }
+    }
+
     if (combinedEntries.length > 0) {
         return { data: combinedEntries };
     }
 
     return lastPayload || { data: [] };
+}
+
+async function fetchWalletTokenHistoricalPriceFallback(query) {
+    try {
+        const fallbackQuery = buildWalletTokenHistoricalPriceFallbackQuery(query);
+        const payload = await callOkxDexEndpoint('/api/v6/dex/market/historical-candles', fallbackQuery, {
+            method: 'POST',
+            auth: hasOkxCredentials,
+            allowFallback: true
+        });
+
+        const entries = unwrapOkxData(payload) || [];
+        const normalizedEntries = convertWalletTokenCandlesToHistoryEntries(entries);
+        if (normalizedEntries.length === 0) {
+            return null;
+        }
+
+        return { data: normalizedEntries };
+    } catch (error) {
+        console.warn(`[WalletToken] Failed to fetch historical price fallback: ${error.message}`);
+        return null;
+    }
+}
+
+function buildWalletTokenHistoricalPriceFallbackQuery(query) {
+    const fallback = { ...query };
+    delete fallback.cursor;
+    if (!fallback.bar) {
+        fallback.bar = WALLET_TOKEN_HISTORY_FALLBACK_BAR;
+    }
+    if (!fallback.limit) {
+        fallback.limit = WALLET_TOKEN_HISTORY_FALLBACK_LIMIT;
+    }
+    return fallback;
+}
+
+function convertWalletTokenCandlesToHistoryEntries(entries) {
+    if (!Array.isArray(entries)) {
+        return [];
+    }
+
+    return entries
+        .map((row) => normalizeWalletTokenCandleHistoryEntry(row))
+        .filter(Boolean);
+}
+
+function normalizeWalletTokenCandleHistoryEntry(row) {
+    if (!row) {
+        return null;
+    }
+
+    let timestamp = null;
+    let price = null;
+
+    if (Array.isArray(row)) {
+        timestamp = row.length > 0 ? row[0] : null;
+        const closeValue = row.length > 4 ? row[4] : row[1];
+        if (closeValue !== undefined && closeValue !== null) {
+            price = String(closeValue).trim();
+        }
+    } else if (typeof row === 'object') {
+        timestamp = row.ts ?? row.timestamp ?? row.time ?? row.date ?? null;
+        const closeValue = row.close ?? row.c ?? row.price ?? row.avgPrice;
+        if (closeValue !== undefined && closeValue !== null) {
+            price = String(closeValue).trim();
+        }
+    }
+
+    if ((timestamp === undefined || timestamp === null) || !price) {
+        return null;
+    }
+
+    return { time: timestamp, price, close: price };
 }
 
 function buildOkxTokenQueryFromContext(context, overrides = {}) {
