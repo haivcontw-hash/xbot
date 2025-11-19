@@ -5821,13 +5821,14 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         });
 
         const rows = extractDexHoldingRows(response);
+        // Preserve every normalized holding row that the OKX response returns so the
+        // downstream formatter can render balances even when some numeric fields are
+        // missing or cannot be parsed (e.g., native tokens without decimals). The
+        // formatter already tolerates missing amounts by falling back to the balance
+        // strings, so keep all rows instead of filtering them out here.
         holdings = rows
             .map((row) => normalizeDexHolding(row))
-            .filter((item) => item && (
-                item.amountRaw !== null && item.amountRaw !== undefined
-                || item.rawBalance !== undefined && item.rawBalance !== null
-                || item.balance !== undefined && item.balance !== null
-            ));
+            .filter(Boolean);
 
         const responseTotal = extractDexTotalValue(response);
         totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
