@@ -864,6 +864,14 @@ function buildPortfolioEmbedUrl(walletAddress) {
     return `${base}/webview/portfolio/${encodeURIComponent(normalized)}`;
 }
 
+function buildOkxPortfolioAnalysisUrl(walletAddress) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!normalized) {
+        return null;
+    }
+    return `https://web3.okx.com/vi/portfolio/${encodeURIComponent(normalized)}/analysis`;
+}
+
 function formatChainLabel(entry) {
     if (!entry) {
         return null;
@@ -892,66 +900,35 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
             wallets = [target];
         }
     }
-    const overview = await db.getWalletTokenOverview(chatId);
-    const tokenMap = new Map();
-    for (const entry of overview) {
-        const key = (entry.walletAddress || '').toLowerCase();
-        tokenMap.set(key, Array.isArray(entry.tokens) ? entry.tokens : []);
-    }
 
     const results = [];
     for (const wallet of wallets) {
         const normalized = normalizeAddressSafe(wallet) || wallet;
-        const lower = (normalized || '').toLowerCase();
-        const registeredTokens = tokenMap.get(lower) || [];
-        const seeds = [
-            ...registeredTokens.map((token) => resolveRegisteredTokenAddress(token)).filter(Boolean),
-            ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
-            ...OKX_OKB_TOKEN_ADDRESSES
-        ];
-        seedWalletWatcher(normalized, seeds);
         let tokens = [];
         let warning = null;
         let cached = false;
         let totalUsd = null;
 
         try {
-            // When a chain is selected we should rely on the OKX balance endpoints directly
-            // to reflect the latest on-chain snapshot for that chain before attempting any
-            // legacy fallbacks.
-            if (options.chainContext) {
-                const liveSnapshot = await fetchOkxDexBalanceSnapshot(normalized, { chainContext: options.chainContext });
-                if (Array.isArray(liveSnapshot.tokens) && liveSnapshot.tokens.length > 0) {
-                    tokens = liveSnapshot.tokens;
-                    totalUsd = Number.isFinite(liveSnapshot.totalUsd) ? liveSnapshot.totalUsd : null;
-                    await db.saveWalletHoldingsCache(chatId, normalized, tokens);
-                } else {
+            const live = await fetchLiveWalletTokens(normalized, {
+                chatId,
+                chainContext: options.chainContext,
+                forceDex: true
+            });
+            tokens = live?.tokens || [];
+            warning = live?.warning || null;
+            totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : null;
+
+            if (tokens.length > 0) {
+                await db.saveWalletHoldingsCache(chatId, normalized, tokens);
+            } else if (!options.forceLive) {
+                const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
+                if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
+                    tokens = cachedSnapshot.tokens;
+                    cached = true;
+                    warning = warning || 'wallet_cached';
+                } else if (!warning) {
                     warning = 'wallet_overview_wallet_no_token';
-                }
-            }
-
-            // If the direct snapshot did not return holdings, attempt the broader live
-            // workflow (RPC/log discovery) as a fallback.
-            if (tokens.length === 0) {
-                const live = await fetchLiveWalletTokens(normalized, {
-                    registeredTokens,
-                    chatId,
-                    chainContext: options.chainContext,
-                    forceDex: options.forceDex
-                });
-                tokens = live?.tokens || [];
-                warning = warning || live?.warning || null;
-                totalUsd = Number.isFinite(live?.totalUsd) ? live.totalUsd : totalUsd;
-
-                if (tokens.length > 0) {
-                    await db.saveWalletHoldingsCache(chatId, normalized, tokens);
-                } else if (!options.forceLive) {
-                    const cachedSnapshot = await db.getWalletHoldingsCache(chatId, normalized);
-                    if (Array.isArray(cachedSnapshot.tokens) && cachedSnapshot.tokens.length > 0) {
-                        tokens = cachedSnapshot.tokens;
-                        cached = true;
-                        warning = warning || 'wallet_cached';
-                    }
                 }
             }
         } catch (error) {
@@ -966,293 +943,146 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
 }
 
 async function fetchLiveWalletTokens(walletAddress, options = {}) {
-    const { registeredTokens = [], chatId = null, chainContext = null, forceDex = false } = options;
+    const { chainContext = null } = options;
     const normalizedWallet = normalizeAddressSafe(walletAddress);
     if (!normalizedWallet) {
         return { tokens: [], warning: 'wallet_invalid' };
     }
 
-    let provider = getXlayerWebsocketProvider() || getXlayerProvider();
-    const providerHealthy = await isProviderHealthy(provider);
-    const rpcWarning = providerHealthy ? null : 'rpc_offline';
+    let dexSnapshot;
+    try {
+        dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
+    } catch (error) {
+        console.warn(`[DexHoldings] Failed to load live balances for ${shortenAddress(normalizedWallet)}: ${error.message}`);
+        return { tokens: [], warning: 'wallet_error' };
+    }
 
-    // Always prefer OKX DEX holdings first to avoid slow RPC scans and, when requested,
-    // force a live snapshot even if a cached copy exists.
-    const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
-    if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
-        let mappedTokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
-            let amountText = null;
-            let numericAmount = null;
+    let mappedTokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
+        const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
+        let amountText = null;
+        let numericAmount = null;
 
-            // Try to format a BigInt-style balance first
-            const rawCandidate = holding.amountRaw ?? holding.rawBalance ?? null;
-            if (rawCandidate !== null && rawCandidate !== undefined) {
-                try {
-                    const bigIntValue = typeof rawCandidate === 'bigint' ? rawCandidate : BigInt(rawCandidate);
-                    amountText = formatBigIntValue(bigIntValue, decimals, {
-                        maximumFractionDigits: Math.min(6, Math.max(2, decimals))
-                    });
-                    numericAmount = Number(ethers.formatUnits(bigIntValue, decimals));
-                } catch (error) {
-                    // ignore raw formatting errors
-                }
+        const rawCandidate = holding.amountRaw ?? holding.rawBalance ?? null;
+        if (rawCandidate !== null && rawCandidate !== undefined) {
+            try {
+                const bigIntValue = typeof rawCandidate === 'bigint' ? rawCandidate : BigInt(rawCandidate);
+                amountText = formatBigIntValue(bigIntValue, decimals, {
+                    maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+                });
+                numericAmount = Number(ethers.formatUnits(bigIntValue, decimals));
+            } catch (error) {
+                // ignore raw formatting errors
             }
+        }
 
-            // Fallbacks when raw balance formatting failed or decimals are missing
-            if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined || holding.amount !== undefined)) {
-                const fallbackAmount = holding.balance ?? holding.coinAmount ?? holding.amount;
-                if (fallbackAmount !== undefined && fallbackAmount !== null) {
-                    amountText = String(fallbackAmount);
-                }
-                const numericFallback = Number(fallbackAmount);
-                if (!Number.isFinite(numericAmount) && Number.isFinite(numericFallback)) {
-                    numericAmount = numericFallback;
-                }
-                if (!numericAmount && Number.isFinite(decimals)) {
-                    const raw = decimalToRawBigInt(fallbackAmount, decimals);
-                    if (raw !== null) {
-                        try {
-                            numericAmount = Number(ethers.formatUnits(raw, decimals));
-                        } catch (error) {
-                            // ignore
-                        }
+        if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined || holding.amount !== undefined)) {
+            const fallbackAmount = holding.balance ?? holding.coinAmount ?? holding.amount;
+            if (fallbackAmount !== undefined && fallbackAmount !== null) {
+                amountText = String(fallbackAmount);
+            }
+            const numericFallback = Number(fallbackAmount);
+            if (!Number.isFinite(numericAmount) && Number.isFinite(numericFallback)) {
+                numericAmount = numericFallback;
+            }
+            if (!numericAmount && Number.isFinite(decimals)) {
+                const raw = decimalToRawBigInt(fallbackAmount, decimals);
+                if (raw !== null) {
+                    try {
+                        numericAmount = Number(ethers.formatUnits(raw, decimals));
+                    } catch (error) {
+                        // ignore
                     }
                 }
             }
-
-            if (!amountText) {
-                amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
-            }
-
-            const valueParts = [];
-            if (Number.isFinite(holding.currencyAmount) && holding.currencyAmount > 0) {
-                const usdValue = formatFiatValue(holding.currencyAmount, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                if (usdValue) {
-                    valueParts.push(`${usdValue} USDT`);
-                }
-            }
-
-            let priceInfo = null;
-            if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
-                priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
-            }
-            if (!priceInfo && holding.tokenAddress) {
-                priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
-            }
-            if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
-                priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
-            }
-
-            if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0 && Number.isFinite(numericAmount)) {
-                const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2
-                });
-                if (usdValue) {
-                    valueParts.push(`${usdValue} USDT`);
-                }
-            }
-
-            const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
-                ? priceInfo.priceOkb
-                : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
-                    ? priceInfo.priceUsd / priceInfo.okbUsd
-                    : null);
-            if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
-                const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
-                    minimumFractionDigits: 4,
-                    maximumFractionDigits: 4
-                });
-                if (okbValue) {
-                    valueParts.push(`${okbValue} OKB`);
-                }
-            }
-
-            return {
-                tokenAddress: holding.tokenAddress,
-                tokenLabel: holding.symbol || holding.name || 'Token',
-                amountText,
-                valueText: valueParts.length ? valueParts.join(' / ') : null,
-                chainIndex: holding.chainIndex,
-                walletAddress: holding.walletAddress || normalizedWallet,
-                isRiskToken: holding.isRiskToken === true
-            };
-        });
-
-        const filtered = mappedTokens.filter(Boolean);
-
-        // If OKX returned holdings but our formatter discarded them (e.g., unexpected shapes),
-        // fall back to a minimal projection so the raw rows still render for the user.
-        const fallbackTokens = [];
-        if (filtered.length === 0 && Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
-            for (const raw of dexSnapshot.tokens) {
-                if (!raw) continue;
-                const amountText = raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? '0';
-                const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
-                const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
-                const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
-                fallbackTokens.push({
-                    tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
-                    tokenLabel,
-                    amountText: String(amountText),
-                    valueText: raw.tokenPrice ? `${formatFiatValue(raw.tokenPrice)} USDT` : null,
-                    chainIndex,
-                    walletAddress: walletAddr,
-                    isRiskToken: Boolean(raw.isRiskToken)
-                });
-            }
         }
 
-        const tokens = filtered.length > 0 ? filtered : fallbackTokens;
-
-        return {
-            tokens,
-            warning: rpcWarning,
-            totalUsd: dexSnapshot.totalUsd
-        };
-    }
-
-    const candidates = new Map();
-
-    const addCandidate = (address, meta = {}) => {
-        const normalized = normalizeAddressSafe(address);
-        if (!normalized) {
-            return;
-        }
-        const lower = normalized.toLowerCase();
-        if (!candidates.has(lower)) {
-            candidates.set(lower, { address: normalized, ...meta });
-        } else {
-            const existing = candidates.get(lower);
-            candidates.set(lower, { ...existing, ...meta });
-        }
-    };
-
-    for (const token of registeredTokens) {
-        const tokenAddress = resolveRegisteredTokenAddress(token);
-        addCandidate(tokenAddress, { symbol: token.tokenLabel || token.tokenKey?.toUpperCase() });
-    }
-
-    for (const token of OKX_OKB_TOKEN_ADDRESSES) {
-        addCandidate(token, { symbol: 'OKB' });
-    }
-    if (OKX_BANMAO_TOKEN_ADDRESS) {
-        addCandidate(OKX_BANMAO_TOKEN_ADDRESS, { symbol: 'BANMAO' });
-    }
-
-    const watcher = ensureWalletWatcher(normalizedWallet, Array.from(candidates.values()).map((c) => c.address));
-    if (watcher) {
-        watcher.tokens.forEach((addr) => addCandidate(addr));
-    }
-
-    if (provider) {
-        const discoveredTokens = await discoverWalletTokenContracts(normalizedWallet, {
-            lookbackBlocks: Math.min(OKX_WALLET_LOG_LOOKBACK_BLOCKS, 10000),
-            provider
-        });
-        for (const tokenAddress of discoveredTokens) {
-            addCandidate(tokenAddress);
-        }
-    }
-
-    if (candidates.size === 0) {
-        return { tokens: [], warning: rpcWarning };
-    }
-
-    const candidateList = Array.from(candidates.values());
-    const balances = await mapWithConcurrency(candidateList, WALLET_BALANCE_CONCURRENCY, async (candidate) => {
-        let rawBalance = candidate.amountRaw || null;
-
-        if (!rawBalance && provider) {
-            try {
-                const contract = new ethers.Contract(candidate.address, ERC20_MIN_ABI, provider);
-                rawBalance = await Promise.race([
-                    contract.balanceOf(normalizedWallet),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('balance_timeout')), WALLET_BALANCE_TIMEOUT))
-                ]);
-            } catch (error) {
-                return null;
-            }
+        if (!amountText) {
+            amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
         }
 
-        if (!rawBalance || rawBalance === 0n || rawBalance === '0' || rawBalance === '0x0') {
-            return null;
-        }
-
-        let decimals = Number.isFinite(candidate.decimals)
-            ? candidate.decimals
-            : await resolveTokenDecimals(candidate.address, {
-                chainName: OKX_CHAIN_SHORT_NAME,
-                chainIndex: OKX_CHAIN_INDEX,
-                fallback: 18
-            });
-        if (!Number.isFinite(decimals)) {
-            decimals = 18;
-        }
-
-        let amountBigInt;
-        try {
-            amountBigInt = typeof rawBalance === 'bigint' ? rawBalance : BigInt(rawBalance);
-        } catch (error) {
-            amountBigInt = null;
-        }
-
-        if (!amountBigInt) {
-            return null;
-        }
-
-        const formattedAmount = formatBigIntValue(amountBigInt, decimals, {
-            maximumFractionDigits: Math.min(6, Math.max(2, decimals))
-        });
-        let numericAmount = null;
-        try {
-            numericAmount = Number(ethers.formatUnits(amountBigInt, decimals));
-        } catch (error) {
-            numericAmount = null;
-        }
-
-        const priceInfo = await getTokenPriceInfo(candidate.address, candidate.symbol || candidate.name);
         const valueParts = [];
-        if (priceInfo && Number.isFinite(numericAmount) && numericAmount > 0) {
-            if (Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0) {
-                const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2
-                });
-                if (usdValue) {
-                    valueParts.push(`${usdValue} USDT`);
-                }
+        if (Number.isFinite(holding.currencyAmount) && holding.currencyAmount > 0) {
+            const usdValue = formatFiatValue(holding.currencyAmount, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (usdValue) {
+                valueParts.push(`${usdValue} USDT`);
             }
+        }
 
-            const okbUnitPrice = Number.isFinite(priceInfo.priceOkb) && priceInfo.priceOkb > 0
-                ? priceInfo.priceOkb
-                : (Number.isFinite(priceInfo.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo.priceUsd)
-                    ? priceInfo.priceUsd / priceInfo.okbUsd
-                    : null);
-            if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0) {
-                const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
-                    minimumFractionDigits: 4,
-                    maximumFractionDigits: 4
-                });
-                if (okbValue) {
-                    valueParts.push(`${okbValue} OKB`);
-                }
+        let priceInfo = null;
+        if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
+            priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
+        }
+        if (!priceInfo && holding.tokenAddress) {
+            priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
+        }
+        if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
+            priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
+        }
+
+        if (priceInfo && Number.isFinite(priceInfo.priceUsd) && priceInfo.priceUsd > 0 && Number.isFinite(numericAmount)) {
+            const usdValue = formatFiatValue(numericAmount * priceInfo.priceUsd, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+            if (usdValue) {
+                valueParts.push(`${usdValue} USDT`);
+            }
+        }
+
+        const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
+            ? priceInfo.priceOkb
+            : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
+                ? priceInfo.priceUsd / priceInfo.okbUsd
+                : null);
+        if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
+            const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
+                minimumFractionDigits: 4,
+                maximumFractionDigits: 4
+            });
+            if (okbValue) {
+                valueParts.push(`${okbValue} OKB`);
             }
         }
 
         return {
-            tokenAddress: candidate.address,
-            tokenLabel: candidate.symbol || candidate.name || 'Token',
-            amountText: formattedAmount,
-            valueText: valueParts.length ? valueParts.join(' / ')
-                : null
+            tokenAddress: holding.tokenAddress,
+            tokenLabel: holding.symbol || holding.name || 'Token',
+            amountText,
+            valueText: valueParts.length ? valueParts.join(' / ') : null,
+            chainIndex: holding.chainIndex,
+            walletAddress: holding.walletAddress || normalizedWallet,
+            isRiskToken: holding.isRiskToken === true
         };
     });
 
+    const filtered = mappedTokens.filter(Boolean);
+
+    const fallbackTokens = [];
+    if (filtered.length === 0 && Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0) {
+        for (const raw of dexSnapshot.tokens) {
+            if (!raw) continue;
+            const amountText = raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? '0';
+            const tokenLabel = raw.symbol || raw.tokenSymbol || raw.tokenName || raw.name || 'Token';
+            const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
+            const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
+            fallbackTokens.push({
+                tokenAddress: raw.tokenAddress || raw.tokenContractAddress || null,
+                tokenLabel,
+                amountText: String(amountText),
+                valueText: raw.tokenPrice ? `${formatFiatValue(raw.tokenPrice)} USDT` : null,
+                chainIndex,
+                walletAddress: walletAddr,
+                isRiskToken: Boolean(raw.isRiskToken)
+            });
+        }
+    }
+
+    const tokens = filtered.length > 0 ? filtered : fallbackTokens;
+
     return {
-        tokens: balances.filter(Boolean),
-        warning: rpcWarning
+        tokens,
+        warning: tokens.length === 0 ? 'wallet_overview_wallet_no_token' : null,
+        totalUsd: Number.isFinite(dexSnapshot.totalUsd) ? dexSnapshot.totalUsd : null
     };
 }
 
@@ -1312,68 +1142,29 @@ async function buildWalletBalanceText(lang, entries, options = {}) {
         return t(lang, 'wallet_overview_empty');
     }
 
-    const lines = [t(lang, 'wallet_balance_title', { count: entries.length.toString() })];
-
-    if (options.chainLabel) {
-        lines.push(t(lang, 'wallet_balance_chain_line', { chain: options.chainLabel }));
+    const entry = entries[0] || {};
+    const warnings = [];
+    if (entry.warning === 'rpc_offline') {
+        warnings.push(t(lang, 'wallet_balance_rpc_warning'));
+    }
+    if (entry.warning === 'wallet_cached' || entry.cached) {
+        warnings.push(t(lang, 'wallet_balance_cache_warning'));
     }
 
-    for (const [index, entry] of entries.entries()) {
-        const shortAddr = escapeHtml(shortenAddress(entry.address));
-        lines.push('', t(lang, 'wallet_balance_wallet', {
-            index: (index + 1).toString(),
-            wallet: shortAddr
-        }));
+    const overview = {
+        tokens: Array.isArray(entry.tokens) ? entry.tokens : [],
+        totalUsd: Number.isFinite(entry.totalUsd) ? entry.totalUsd : null
+    };
 
-        if (entry.warning === 'rpc_offline') {
-            lines.push(t(lang, 'wallet_balance_rpc_warning'));
-        }
-        if (entry.warning === 'wallet_cached' || entry.cached) {
-            lines.push(t(lang, 'wallet_balance_cache_warning'));
-        }
+    const body = buildWalletDexOverviewText(lang, entry.address, overview, {
+        chainLabel: options.chainLabel
+    });
 
-        if (Number.isFinite(entry.totalUsd)) {
-            const totalText = formatFiatValue(entry.totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            if (totalText) {
-                lines.push(t(lang, 'wallet_balance_total_value', { value: escapeHtml(totalText) }));
-            }
-        }
-
-        if (!entry.tokens || entry.tokens.length === 0) {
-            lines.push(t(lang, 'wallet_overview_wallet_no_token'));
-            continue;
-        }
-
-        for (const token of entry.tokens) {
-            const chainTag = token.chainIndex
-                ? `#${token.chainIndex}`
-                : (options.chainLabel || t(lang, 'wallet_balance_chain_unknown'));
-            const riskLabel = token.isRiskToken
-                ? t(lang, 'wallet_balance_risk_flagged')
-                : t(lang, 'wallet_balance_risk_safe');
-            const walletLabel = escapeHtml(shortenAddress(token.walletAddress || entry.address));
-            const contractLabel = token.tokenAddress
-                ? escapeHtml(shortenAddress(String(token.tokenAddress).replace(/^native:/, '')))
-                : t(lang, 'wallet_balance_contract_unknown');
-            const valueSuffix = token.valueText
-                ? ` | ${t(lang, 'wallet_balance_value_label', { value: escapeHtml(token.valueText) })}`
-                : '';
-
-            lines.push(t(lang, 'wallet_balance_token_table', {
-                chain: escapeHtml(chainTag),
-                token: escapeHtml(token.tokenLabel || 'Token'),
-                amount: escapeHtml(token.amountText || '0'),
-                risk: escapeHtml(riskLabel),
-                wallet: walletLabel,
-                contract: contractLabel,
-                value: valueSuffix
-            }));
-        }
+    if (warnings.length === 0) {
+        return body;
     }
 
-    lines.push('', t(lang, 'wallet_balance_refresh_hint'));
-    lines.push(t(lang, 'wallet_portfolio_hint'));
-    return lines.join('\n');
+    return `${warnings.join('\n')}\n\n${body}`;
 }
 
 async function fetchDexOverviewForWallet(walletAddress, options = {}) {
@@ -1391,11 +1182,17 @@ async function fetchDexOverviewForWallet(walletAddress, options = {}) {
     }
 }
 
-function buildWalletDexOverviewText(lang, walletAddress, overview) {
+function buildWalletDexOverviewText(lang, walletAddress, overview, options = {}) {
     const normalizedWallet = normalizeAddressSafe(walletAddress) || walletAddress;
-    const walletHtml = `<code>${escapeHtml(normalizedWallet)}</code>`;
+    const walletHtml = normalizedWallet
+        ? `<code>${escapeHtml(normalizedWallet)}</code>`
+        : t(lang, 'wallet_balance_contract_unknown');
     const lines = [t(lang, 'wallet_dex_overview_title', { wallet: walletHtml })];
     lines.push(t(lang, 'wallet_dex_wallet_line', { wallet: walletHtml }));
+
+    if (options.chainLabel) {
+        lines.push(t(lang, 'wallet_balance_chain_line', { chain: escapeHtml(options.chainLabel) }));
+    }
 
     if (Number.isFinite(overview.totalUsd)) {
         const formattedTotal = formatFiatValue(overview.totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1407,7 +1204,7 @@ function buildWalletDexOverviewText(lang, walletAddress, overview) {
     const tokens = Array.isArray(overview.tokens) ? overview.tokens : [];
     if (tokens.length === 0) {
         lines.push(t(lang, 'wallet_dex_no_tokens'));
-        lines.push(t(lang, 'wallet_dex_copy_hint'));
+        appendPortfolioLinkAndHint(lines, lang, normalizedWallet, options.analysisUrl);
         return lines.join('\n');
     }
 
@@ -1439,8 +1236,6 @@ function buildWalletDexOverviewText(lang, walletAddress, overview) {
         const riskLabel = token.isRiskToken || token.riskToken || token.tokenRisk
             ? t(lang, 'wallet_dex_risk_yes')
             : t(lang, 'wallet_dex_risk_no');
-        const tokenWallet = normalizeAddressSafe(token.walletAddress) || normalizedWallet;
-        const tokenWalletHtml = `<code>${escapeHtml(tokenWallet)}</code>`;
 
         const contractRaw = token.tokenContractAddress
             || token.tokenAddress
@@ -1481,13 +1276,21 @@ function buildWalletDexOverviewText(lang, walletAddress, overview) {
         }));
         lines.push(t(lang, 'wallet_dex_token_balance', { balance: balanceHtml }));
         lines.push(t(lang, 'wallet_dex_token_value', { value: valueLabel }));
-        lines.push(t(lang, 'wallet_dex_token_wallet', { wallet: tokenWalletHtml }));
         lines.push(t(lang, 'wallet_dex_token_contract', { contract: contractHtml }));
         lines.push(t(lang, 'wallet_dex_token_risk', { risk: escapeHtml(riskLabel) }));
     });
 
-    lines.push('', t(lang, 'wallet_dex_copy_hint'));
+    appendPortfolioLinkAndHint(lines, lang, normalizedWallet, options.analysisUrl);
     return lines.join('\n');
+}
+
+function appendPortfolioLinkAndHint(lines, lang, walletAddress, customUrl) {
+    const analysisUrl = customUrl || buildOkxPortfolioAnalysisUrl(walletAddress);
+    lines.push('');
+    if (analysisUrl) {
+        lines.push(t(lang, 'wallet_dex_analysis_link', { url: escapeHtml(analysisUrl) }));
+    }
+    lines.push(t(lang, 'wallet_dex_copy_hint'));
 }
 
 function resolveKnownTokenAddress(tokenKey) {
@@ -7274,10 +7077,6 @@ function startTelegramBot() {
 
         try {
             const result = await db.addWalletToUser(chatId, lang, parsed.wallet);
-            seedWalletWatcher(parsed.wallet, [
-                ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
-                ...OKX_OKB_TOKEN_ADDRESSES
-            ]);
 
             const messageKey = result?.added ? 'register_wallet_saved' : 'register_wallet_exists';
             const message = t(lang, messageKey, { wallet: shortenAddress(parsed.wallet) });
@@ -10043,10 +9842,6 @@ function startTelegramBot() {
                     }
 
                     const result = await db.addWalletToUser(userId, lang, parsed.wallet);
-                    seedWalletWatcher(parsed.wallet, [
-                        ...(OKX_BANMAO_TOKEN_ADDRESS ? [OKX_BANMAO_TOKEN_ADDRESS] : []),
-                        ...OKX_OKB_TOKEN_ADDRESSES
-                    ]);
 
                     if (registerState.promptMessageId) {
                         try {
