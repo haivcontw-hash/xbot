@@ -2334,8 +2334,10 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
             const historyEntries = expandWalletTokenHistoryEntries(entries);
             const sortedHistoryEntries = sortWalletTokenHistoryEntries(historyEntries);
             const formattedEntries = [];
+            const historyDays = getWalletTokenHistoryWindowDays();
+            const maxHistoryEntries = Math.max(1, Math.min(historyDays, sortedHistoryEntries.length));
 
-            for (let i = 0; i < sortedHistoryEntries.length && formattedEntries.length < 6; i += 1) {
+            for (let i = 0; i < sortedHistoryEntries.length && formattedEntries.length < maxHistoryEntries; i += 1) {
                 const row = sortedHistoryEntries[i];
                 const previousRow = i + 1 < sortedHistoryEntries.length ? sortedHistoryEntries[i + 1] : null;
                 const formatted = formatWalletTokenHistoryEntry(row, previousRow, lang);
@@ -2345,7 +2347,6 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
             }
 
             result.listEntries = formattedEntries;
-            const historyDays = getWalletTokenHistoryWindowDays();
             const historyLabel = t(lang, 'wallet_token_action_history_last_days', { days: historyDays }) || actionLabel;
             result.listLabel = historyLabel;
             break;
