@@ -1785,7 +1785,8 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
             break;
         }
         case 'historical_price': {
-            result.listEntries = entries
+            const historyEntries = expandWalletTokenHistoryEntries(entries);
+            result.listEntries = historyEntries
                 .slice(0, 6)
                 .map(formatWalletTokenHistoryEntry)
                 .filter(Boolean);
@@ -1935,6 +1936,32 @@ function formatWalletTokenTimestamp(value) {
         return null;
     }
     return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
+function expandWalletTokenHistoryEntries(entries) {
+    if (!Array.isArray(entries)) {
+        return [];
+    }
+
+    const result = [];
+    for (const entry of entries) {
+        if (!entry) {
+            continue;
+        }
+
+        if (Array.isArray(entry.prices)) {
+            for (const priceRow of entry.prices) {
+                if (priceRow) {
+                    result.push(priceRow);
+                }
+            }
+            continue;
+        }
+
+        result.push(entry);
+    }
+
+    return result;
 }
 
 function formatWalletTokenHistoryEntry(row) {
