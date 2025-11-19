@@ -116,6 +116,31 @@ const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
+const WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS = (() => {
+    const value = Number(process.env.WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS || 15000);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15000;
+})();
+const WALLET_TOKEN_ACTION_HISTORY_CACHE_TTL_MS = (() => {
+    const value = Number(process.env.WALLET_TOKEN_ACTION_HISTORY_CACHE_TTL_MS || 120000);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 120000;
+})();
+const WALLET_TOKEN_ACTION_CACHE_STALE_GRACE_MS = (() => {
+    const value = Number(process.env.WALLET_TOKEN_ACTION_CACHE_STALE_GRACE_MS || 60000);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 60000;
+})();
+const WALLET_TOKEN_ACTION_CACHE_MAX_ENTRIES = (() => {
+    const value = Number(process.env.WALLET_TOKEN_ACTION_CACHE_MAX_ENTRIES || 256);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 256;
+})();
+const OKX_DEX_DEFAULT_MAX_RETRIES = (() => {
+    const value = Number(process.env.OKX_DEX_DEFAULT_MAX_RETRIES || 2);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 2;
+})();
+const OKX_DEX_DEFAULT_RETRY_DELAY_MS = (() => {
+    const value = Number(process.env.OKX_DEX_DEFAULT_RETRY_DELAY_MS || 400);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 400;
+})();
+const walletTokenActionCache = new Map();
 const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
@@ -1615,10 +1640,12 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     const baseQuery = buildOkxTokenQueryFromContext(context);
     const query = { ...baseQuery };
 
+    let handler = null;
     switch (actionKey) {
         case 'historical_price':
             query.limit = query.limit || 10;
-            return fetchWalletTokenHistoricalPricePayload(query, config);
+            handler = () => fetchWalletTokenHistoricalPricePayload(query, config);
+            break;
         case 'candles':
             query.bar = query.bar || '1m';
             query.limit = query.limit || 10;
@@ -1639,12 +1666,37 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
             break;
     }
 
-    return callOkxDexEndpoint(config.path, query, {
-        method: config.method || 'GET',
-        auth: hasOkxCredentials,
-        allowFallback: true,
-        bodyType: config.bodyType
-    });
+    if (!handler) {
+        handler = () => callOkxDexEndpoint(config.path, query, {
+            method: config.method || 'GET',
+            auth: hasOkxCredentials,
+            allowFallback: true,
+            bodyType: config.bodyType
+        });
+    }
+
+    const cacheKey = buildWalletTokenActionCacheKey(actionKey, context, query);
+    const cacheTtl = resolveWalletTokenActionCacheTtl(actionKey);
+    const cacheEntry = cacheKey ? getWalletTokenActionCacheEntry(cacheKey) : null;
+    const cachedValue = cacheEntry && !cacheEntry.expired ? cacheEntry.value : null;
+    const staleCacheValue = cacheEntry && cacheEntry.expired ? cacheEntry.value : null;
+
+    if (cachedValue) {
+        return cachedValue;
+    }
+
+    try {
+        const payload = await handler();
+        if (cacheKey && cacheTtl > 0 && payload) {
+            setWalletTokenActionCacheEntry(cacheKey, payload, cacheTtl);
+        }
+        return payload;
+    } catch (error) {
+        if (staleCacheValue) {
+            return staleCacheValue;
+        }
+        throw error;
+    }
 }
 
 async function fetchWalletTokenHistoricalPricePayload(query, config) {
@@ -1742,6 +1794,126 @@ function buildOkxTokenQueryFromContext(context, overrides = {}) {
     return query;
 }
 
+function resolveWalletTokenActionCacheTtl(actionKey) {
+    switch (actionKey) {
+        case 'historical_price':
+        case 'historical_candles':
+            return WALLET_TOKEN_ACTION_HISTORY_CACHE_TTL_MS;
+        default:
+            return WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS;
+    }
+}
+
+function buildWalletTokenActionCacheKey(actionKey, context, query = null) {
+    if (!actionKey) {
+        return null;
+    }
+
+    const chainContext = context?.chainContext || {};
+    const tokenAddress = resolveTokenContractAddress(context?.token) || context?.token?.address;
+    const normalizedToken = typeof tokenAddress === 'string' ? tokenAddress.toLowerCase() : '';
+    const normalizedQuery = normalizeWalletTokenCacheQuery(query);
+
+    try {
+        return JSON.stringify({
+            actionKey,
+            token: normalizedToken,
+            chain: chainContext.chainIndex ?? chainContext.chainId ?? chainContext.chainShortName ?? '',
+            wallet: context?.wallet || '',
+            query: normalizedQuery
+        });
+    } catch (error) {
+        return null;
+    }
+}
+
+function normalizeWalletTokenCacheQuery(query) {
+    if (!query || typeof query !== 'object') {
+        return null;
+    }
+
+    const entries = Object.entries(query)
+        .filter(([_, value]) => value !== undefined && value !== null)
+        .sort(([a], [b]) => a.localeCompare(b));
+
+    return entries.reduce((acc, [key, value]) => {
+        acc[key] = value;
+        return acc;
+    }, {});
+}
+
+function getWalletTokenActionCacheEntry(cacheKey) {
+    if (!cacheKey || !walletTokenActionCache.has(cacheKey)) {
+        return null;
+    }
+
+    const entry = walletTokenActionCache.get(cacheKey);
+    if (!entry) {
+        walletTokenActionCache.delete(cacheKey);
+        return null;
+    }
+
+    const now = Date.now();
+    const expired = typeof entry.expiresAt === 'number' && entry.expiresAt <= now;
+
+    return {
+        value: cloneJsonValue(entry.value),
+        expired
+    };
+}
+
+function setWalletTokenActionCacheEntry(cacheKey, payload, ttlMs) {
+    if (!cacheKey || !payload || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+        return;
+    }
+
+    pruneWalletTokenActionCache();
+
+    walletTokenActionCache.set(cacheKey, {
+        value: cloneJsonValue(payload),
+        expiresAt: Date.now() + ttlMs
+    });
+}
+
+function pruneWalletTokenActionCache() {
+    const now = Date.now();
+
+    for (const [cacheKey, entry] of walletTokenActionCache.entries()) {
+        if (!entry) {
+            walletTokenActionCache.delete(cacheKey);
+            continue;
+        }
+
+        const expiresAt = typeof entry.expiresAt === 'number' ? entry.expiresAt : 0;
+        if (expiresAt && expiresAt + WALLET_TOKEN_ACTION_CACHE_STALE_GRACE_MS < now) {
+            walletTokenActionCache.delete(cacheKey);
+        }
+    }
+
+    while (walletTokenActionCache.size > WALLET_TOKEN_ACTION_CACHE_MAX_ENTRIES) {
+        const oldestKey = walletTokenActionCache.keys().next().value;
+        if (oldestKey === undefined) {
+            break;
+        }
+        walletTokenActionCache.delete(oldestKey);
+    }
+}
+
+function cloneJsonValue(value) {
+    if (value === undefined || value === null) {
+        return value;
+    }
+    if (typeof value !== 'object') {
+        return value;
+    }
+
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (error) {
+        return value;
+    }
+}
+
 function isOkxMethodNotAllowedError(error) {
     if (!error || !error.message) {
         return false;
@@ -1761,6 +1933,37 @@ function isOkxMethodNotAllowedError(error) {
     return false;
 }
 
+function isOkxRateLimitError(error) {
+    if (!error || !error.message) {
+        return false;
+    }
+
+    const message = String(error.message).toLowerCase();
+    return message.includes('http 429') || message.includes('too many requests') || message.includes('rate limit');
+}
+
+function isOkxTransientResponseError(error) {
+    if (!error || !error.message) {
+        return false;
+    }
+
+    const message = String(error.message).toLowerCase();
+    if (message.includes('okx response code -1')) {
+        return true;
+    }
+    if (message.includes('timed out') || message.includes('etimedout')) {
+        return true;
+    }
+    if (message.includes('http 5')) {
+        return true;
+    }
+    return false;
+}
+
+function isOkxRetryableError(error) {
+    return isOkxRateLimitError(error) || isOkxTransientResponseError(error);
+}
+
 function isTelegramMessageNotModifiedError(error) {
     if (!error) {
         return false;
@@ -1777,8 +1980,17 @@ async function callOkxDexEndpoint(path, query, options = {}) {
         method = 'GET',
         auth = hasOkxCredentials,
         allowFallback = true,
-        bodyType = null
+        bodyType = null,
+        maxRetries = OKX_DEX_DEFAULT_MAX_RETRIES,
+        retryDelayMs = OKX_DEX_DEFAULT_RETRY_DELAY_MS
     } = options;
+
+    const resolvedMaxRetries = Number.isFinite(Number(maxRetries))
+        ? Math.max(0, Math.floor(Number(maxRetries)))
+        : OKX_DEX_DEFAULT_MAX_RETRIES;
+    const resolvedRetryDelayMs = Number.isFinite(Number(retryDelayMs))
+        ? Math.max(0, Math.floor(Number(retryDelayMs)))
+        : OKX_DEX_DEFAULT_RETRY_DELAY_MS;
 
     const preferredMethod = (method || 'GET').toUpperCase();
     const fallbackMethod = preferredMethod === 'POST' ? 'GET' : 'POST';
@@ -1789,24 +2001,39 @@ async function callOkxDexEndpoint(path, query, options = {}) {
     let lastError = null;
 
     for (const currentMethod of methods) {
-        try {
-            const requestBody = bodyType === 'array' && currentMethod !== 'GET'
-                ? Array.isArray(query)
-                    ? query
-                    : query
-                        ? [query]
-                        : []
-                : query;
+        for (let attempt = 0; attempt <= resolvedMaxRetries; attempt += 1) {
+            try {
+                const requestBody = bodyType === 'array' && currentMethod !== 'GET'
+                    ? Array.isArray(query)
+                        ? query
+                        : query
+                            ? [query]
+                            : []
+                    : query;
 
-            const requestOptions = currentMethod === 'GET'
-                ? { query, auth }
-                : { body: requestBody, auth };
+                const requestOptions = currentMethod === 'GET'
+                    ? { query, auth }
+                    : { body: requestBody, auth };
 
-            return await okxJsonRequest(currentMethod, path, requestOptions);
-        } catch (error) {
-            lastError = error;
-            if (!allowFallback || !isOkxMethodNotAllowedError(error)) {
-                throw error;
+                return await okxJsonRequest(currentMethod, path, requestOptions);
+            } catch (error) {
+                const methodNotAllowed = isOkxMethodNotAllowedError(error);
+                const canRetry = !methodNotAllowed && attempt < resolvedMaxRetries && isOkxRetryableError(error);
+
+                if (canRetry) {
+                    const backoff = resolvedRetryDelayMs * Math.max(1, attempt + 1);
+                    if (backoff > 0) {
+                        await delay(backoff);
+                    }
+                    continue;
+                }
+
+                lastError = error;
+                if (!allowFallback || !methodNotAllowed) {
+                    throw error;
+                }
+
+                break;
             }
         }
     }
