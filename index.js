@@ -726,7 +726,7 @@ function sortChainsForMenu(chains) {
     });
 }
 
-async function buildWalletChainMenu(lang) {
+async function buildWalletChainMenu(lang, walletAddress) {
     let chains = [];
     try {
         chains = await fetchOkxBalanceSupportedChains();
@@ -743,19 +743,54 @@ async function buildWalletChainMenu(lang) {
         const label = formatChainLabel(entry) || 'Chain';
         const chainId = Number(entry.chainId || entry.chainIndex || 196);
         const chainShort = encodeURIComponent(entry.chainShortName || entry.chainName || 'xlayer');
-        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}` };
+        const walletParam = walletAddress ? `|${encodeURIComponent(walletAddress)}` : '';
+        return { text: label, callback_data: `wallet_chain|${chainId}|${chainShort}${walletParam}` };
     });
 
     const inline_keyboard = [];
     for (let i = 0; i < buttons.length; i += 2) {
         inline_keyboard.push(buttons.slice(i, i + 2));
     }
+    inline_keyboard.push([{ text: t(lang, 'action_back'), callback_data: 'wallet_overview' }, { text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+
+    const contextLine = walletAddress ? t(lang, 'wallet_balance_wallet', { index: '1', wallet: escapeHtml(shortenAddress(walletAddress)) }) : null;
+    const lines = [t(lang, 'wallet_chain_prompt')];
+    if (contextLine) {
+        lines.push(contextLine);
+    }
+
+    return {
+        text: lines.join('\n'),
+        replyMarkup: { inline_keyboard },
+        chains: sorted
+    };
+}
+
+async function buildWalletSelectMenu(lang, chatId) {
+    const wallets = await db.getWalletsForUser(chatId);
+    if (!Array.isArray(wallets) || wallets.length === 0) {
+        return {
+            text: t(lang, 'mywallet_not_linked'),
+            replyMarkup: appendCloseButton(null, lang)
+        };
+    }
+
+    const lines = [
+        t(lang, 'mywallet_list_header', { count: wallets.length.toString() }),
+        t(lang, 'mywallet_list_footer')
+    ];
+
+    const inline_keyboard = [];
+    for (const wallet of wallets) {
+        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const shortAddr = shortenAddress(normalized);
+        inline_keyboard.push([{ text: `💼 ${shortAddr}`, callback_data: `wallet_pick|${normalized}` }]);
+    }
     inline_keyboard.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
 
     return {
-        text: t(lang, 'wallet_chain_prompt'),
-        replyMarkup: { inline_keyboard },
-        chains: sorted
+        text: lines.join('\n'),
+        replyMarkup: { inline_keyboard }
     };
 }
 
@@ -785,7 +820,14 @@ function formatChainLabel(entry) {
 }
 
 async function loadWalletOverviewEntries(chatId, options = {}) {
-    const wallets = await db.getWalletsForUser(chatId);
+    let wallets = await db.getWalletsForUser(chatId);
+    if (options.targetWallet) {
+        const target = normalizeAddressSafe(options.targetWallet) || options.targetWallet;
+        wallets = wallets.filter((wallet) => (normalizeAddressSafe(wallet) || wallet).toLowerCase() === (target || '').toLowerCase());
+        if (wallets.length === 0 && target) {
+            wallets = [target];
+        }
+    }
     const overview = await db.getWalletTokenOverview(chatId);
     const tokenMap = new Map();
     for (const entry of overview) {
@@ -6996,7 +7038,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         try {
-            const menu = await buildWalletChainMenu(lang);
+            const menu = await buildWalletSelectMenu(lang, chatId);
             await sendReply(msg, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
         } catch (error) {
             console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
@@ -7956,14 +7998,61 @@ function startTelegramBot() {
                 return;
             }
 
-            if (query.data === 'wallet_overview' || query.data === 'wallet_chain_menu') {
+            if (query.data === 'wallet_overview' || query.data.startsWith('wallet_chain_menu')) {
                 if (!chatId) {
                     await bot.answerCallbackQuery(queryId);
                     return;
                 }
+                const walletParam = query.data.startsWith('wallet_chain_menu')
+                    ? decodeURIComponent(query.data.split('|')[1] || '')
+                    : null;
 
                 try {
-                    const menu = await buildWalletChainMenu(callbackLang);
+                    if (walletParam) {
+                        const menu = await buildWalletChainMenu(callbackLang, walletParam);
+                        const options = {
+                            chat_id: chatId,
+                            message_id: query.message?.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        };
+
+                        if (options.message_id) {
+                            await bot.editMessageText(menu.text, options);
+                        } else {
+                            await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        }
+                    } else {
+                        const menu = await buildWalletSelectMenu(callbackLang, chatId);
+                        const options = {
+                            chat_id: chatId,
+                            message_id: query.message?.message_id,
+                            parse_mode: 'HTML',
+                            reply_markup: menu.replyMarkup
+                        };
+
+                        if (options.message_id) {
+                            await bot.editMessageText(menu.text, options);
+                        } else {
+                            await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        }
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[WalletChains] Failed to render wallet menu: ${error.message}`);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_overview_error'), show_alert: true });
+                }
+                return;
+            }
+
+            if (query.data.startsWith('wallet_pick|')) {
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const wallet = decodeURIComponent(query.data.split('|')[1] || '');
+                try {
+                    const menu = await buildWalletChainMenu(callbackLang, wallet);
                     const options = {
                         chat_id: chatId,
                         message_id: query.message?.message_id,
@@ -7978,7 +8067,7 @@ function startTelegramBot() {
                     }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
-                    console.error(`[WalletChains] Failed to render chain menu: ${error.message}`);
+                    console.error(`[WalletPick] Failed to render chains for ${wallet}: ${error.message}`);
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_overview_error'), show_alert: true });
                 }
                 return;
@@ -7992,6 +8081,7 @@ function startTelegramBot() {
                 const parts = query.data.split('|');
                 const chainId = Number(parts[1]);
                 const chainShort = parts[2] ? decodeURIComponent(parts[2]) : null;
+                const targetWallet = parts[3] ? decodeURIComponent(parts[3]) : null;
                 let chainEntry = null;
                 try {
                     const chains = await fetchOkxBalanceSupportedChains();
@@ -8014,17 +8104,19 @@ function startTelegramBot() {
                 const entries = await loadWalletOverviewEntries(chatId, {
                     chainContext,
                     forceLive: true,
-                    forceDex: true
+                    forceDex: true,
+                    targetWallet
                 });
                 const text = await buildWalletBalanceText(callbackLang, entries, { chainLabel });
                     const portfolioRows = entries
                         .map((entry) => ({ address: entry.address, url: buildPortfolioEmbedUrl(entry.address) }))
                         .filter((row) => row.address && row.url)
                         .map((row) => [{ text: t(callbackLang, 'wallet_action_portfolio', { wallet: shortenAddress(row.address) }), url: row.url }]);
+                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
                     const replyMarkup = appendCloseButton(
                         portfolioRows.length ? { inline_keyboard: portfolioRows } : null,
                         callbackLang,
-                        { backCallbackData: 'wallet_chain_menu' }
+                        { backCallbackData: backCallback }
                     );
 
                     let rendered = false;
@@ -8054,8 +8146,9 @@ function startTelegramBot() {
                 } catch (error) {
                     console.error(`[WalletChains] Failed to render holdings for chain ${chainId}: ${error.message}`);
                     const fallback = t(callbackLang, 'wallet_overview_wallet_no_token');
+                    const backCallback = targetWallet ? `wallet_chain_menu|${encodeURIComponent(targetWallet)}` : 'wallet_overview';
                     try {
-                        await bot.sendMessage(chatId, fallback, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang, { backCallbackData: 'wallet_chain_menu' }) });
+                        await bot.sendMessage(chatId, fallback, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang, { backCallbackData: backCallback }) });
                     } catch (sendError) {
                         console.warn(`[WalletChains] Fallback send failed: ${sendError.message}`);
                     }
