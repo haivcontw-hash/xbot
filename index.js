@@ -857,26 +857,27 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
     const dexSnapshot = await fetchOkxDexWalletHoldings(normalizedWallet, { chainContext });
     if (forceDex || (Array.isArray(dexSnapshot.tokens) && dexSnapshot.tokens.length > 0)) {
         const tokens = await mapWithConcurrency(dexSnapshot.tokens || [], WALLET_BALANCE_CONCURRENCY, async (holding) => {
-            if (!holding.amountRaw && !holding.rawBalance && !holding.coinAmount && !holding.balance) {
-                return null;
-            }
-
             const decimals = Number.isFinite(holding.decimals) ? holding.decimals : 18;
             let amountText = null;
             let numericAmount = null;
 
-            try {
-                amountText = formatBigIntValue(holding.amountRaw ?? holding.rawBalance, decimals, {
-                    maximumFractionDigits: Math.min(6, Math.max(2, decimals))
-                });
-                numericAmount = Number(ethers.formatUnits(holding.amountRaw ?? holding.rawBalance, decimals));
-            } catch (error) {
-                // ignore raw formatting errors
+            // Try to format a BigInt-style balance first
+            const rawCandidate = holding.amountRaw ?? holding.rawBalance ?? null;
+            if (rawCandidate !== null && rawCandidate !== undefined) {
+                try {
+                    const bigIntValue = typeof rawCandidate === 'bigint' ? rawCandidate : BigInt(rawCandidate);
+                    amountText = formatBigIntValue(bigIntValue, decimals, {
+                        maximumFractionDigits: Math.min(6, Math.max(2, decimals))
+                    });
+                    numericAmount = Number(ethers.formatUnits(bigIntValue, decimals));
+                } catch (error) {
+                    // ignore raw formatting errors
+                }
             }
 
             // Fallbacks when raw balance formatting failed or decimals are missing
-            if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined)) {
-                const fallbackAmount = holding.balance ?? holding.coinAmount;
+            if (!amountText && (holding.balance !== undefined || holding.coinAmount !== undefined || holding.amount !== undefined)) {
+                const fallbackAmount = holding.balance ?? holding.coinAmount ?? holding.amount;
                 if (fallbackAmount !== undefined && fallbackAmount !== null) {
                     amountText = String(fallbackAmount);
                 }
@@ -884,17 +885,20 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 if (!Number.isFinite(numericAmount) && Number.isFinite(numericFallback)) {
                     numericAmount = numericFallback;
                 }
-            }
-
-            if (!Number.isFinite(numericAmount)) {
-                const numericFallback = Number(holding.balance ?? holding.coinAmount);
-                if (Number.isFinite(numericFallback)) {
-                    numericAmount = numericFallback;
+                if (!numericAmount && Number.isFinite(decimals)) {
+                    const raw = decimalToRawBigInt(fallbackAmount, decimals);
+                    if (raw !== null) {
+                        try {
+                            numericAmount = Number(ethers.formatUnits(raw, decimals));
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
                 }
             }
 
             if (!amountText) {
-                amountText = String(holding.amountRaw ?? holding.rawBalance ?? holding.balance ?? holding.coinAmount ?? '0');
+                amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
             }
 
             const valueParts = [];
@@ -5601,11 +5605,15 @@ function normalizeDexHolding(row) {
         }
     }
 
+    const balanceText = row.balance ?? row.coinAmount ?? null;
+
     return {
         tokenAddress,
         decimals: Number.isFinite(decimals) ? decimals : undefined,
         symbol,
         name,
+        rawBalance,
+        balance: balanceText,
         amountRaw,
         currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
         priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
@@ -5721,7 +5729,11 @@ async function fetchOkxDexBalanceSnapshot(walletAddress, options = {}) {
         const rows = extractDexHoldingRows(response);
         holdings = rows
             .map((row) => normalizeDexHolding(row))
-            .filter((item) => item && item.amountRaw !== null && item.amountRaw !== undefined);
+            .filter((item) => item && (
+                item.amountRaw !== null && item.amountRaw !== undefined
+                || item.rawBalance !== undefined && item.rawBalance !== null
+                || item.balance !== undefined && item.balance !== null
+            ));
 
         const responseTotal = extractDexTotalValue(response);
         totalUsd = Number.isFinite(responseTotal) ? responseTotal : null;
