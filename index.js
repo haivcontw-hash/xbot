@@ -1004,7 +1004,10 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 tokenAddress: holding.tokenAddress,
                 tokenLabel: holding.symbol || holding.name || 'Token',
                 amountText,
-                valueText: valueParts.length ? valueParts.join(' / ') : null
+                valueText: valueParts.length ? valueParts.join(' / ') : null,
+                chainIndex: holding.chainIndex,
+                walletAddress: holding.walletAddress || normalizedWallet,
+                isRiskToken: holding.isRiskToken === true
             };
         });
 
@@ -1247,22 +1250,29 @@ async function buildWalletBalanceText(lang, entries, options = {}) {
         }
 
         for (const token of entry.tokens) {
-            if (token.amountText && token.valueText) {
-                lines.push(t(lang, 'wallet_balance_token_value', {
-                    token: escapeHtml(token.tokenLabel || 'Token'),
-                    amount: escapeHtml(token.amountText),
-                    symbol: escapeHtml(token.tokenLabel || 'Token'),
-                    value: escapeHtml(token.valueText)
-                }));
-            } else if (token.amountText) {
-                lines.push(t(lang, 'wallet_balance_token_amount', {
-                    token: escapeHtml(token.tokenLabel || 'Token'),
-                    amount: escapeHtml(token.amountText),
-                    symbol: escapeHtml(token.tokenLabel || 'Token')
-                }));
-            } else {
-                lines.push(t(lang, 'wallet_balance_token_pending', { token: escapeHtml(token.tokenLabel || 'Token') }));
-            }
+            const chainTag = token.chainIndex
+                ? `#${token.chainIndex}`
+                : (options.chainLabel || t(lang, 'wallet_balance_chain_unknown'));
+            const riskLabel = token.isRiskToken
+                ? t(lang, 'wallet_balance_risk_flagged')
+                : t(lang, 'wallet_balance_risk_safe');
+            const walletLabel = escapeHtml(shortenAddress(token.walletAddress || entry.address));
+            const contractLabel = token.tokenAddress
+                ? escapeHtml(shortenAddress(String(token.tokenAddress).replace(/^native:/, '')))
+                : t(lang, 'wallet_balance_contract_unknown');
+            const valueSuffix = token.valueText
+                ? ` | ${t(lang, 'wallet_balance_value_label', { value: escapeHtml(token.valueText) })}`
+                : '';
+
+            lines.push(t(lang, 'wallet_balance_token_table', {
+                chain: escapeHtml(chainTag),
+                token: escapeHtml(token.tokenLabel || 'Token'),
+                amount: escapeHtml(token.amountText || '0'),
+                risk: escapeHtml(riskLabel),
+                wallet: walletLabel,
+                contract: contractLabel,
+                value: valueSuffix
+            }));
         }
     }
 
@@ -5671,7 +5681,10 @@ function normalizeDexHolding(row) {
         balance: balanceText,
         amountRaw,
         currencyAmount: Number.isFinite(currencyAmount) ? currencyAmount : null,
-        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null
+        priceUsd: Number.isFinite(priceUsd) ? priceUsd : null,
+        chainIndex: row.chainIndex || row.chainId || row.chain || row.chain_id,
+        walletAddress: row.address || row.walletAddress,
+        isRiskToken: Boolean(row.isRiskToken)
     };
 }
 
