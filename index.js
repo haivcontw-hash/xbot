@@ -20,7 +20,7 @@ const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '') || `http://localhost:${API_PORT}`;
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'xlayer';
 const OKX_BANMAO_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
@@ -524,12 +524,6 @@ function createXlayerWebsocketProvider() {
             provider.on('error', (error) => {
                 console.warn(`[WSS] Lỗi kết nối WebSocket ${url}: ${error.message}`);
             });
-            provider.on('close', () => {
-                console.warn(`[WSS] WebSocket bị đóng: ${url}`);
-                if (xlayerWebsocketProvider === provider) {
-                    xlayerWebsocketProvider = null;
-                }
-            });
             console.log(`[WSS] Đã kết nối tới ${url}`);
             return provider;
         } catch (error) {
@@ -861,6 +855,12 @@ async function buildWalletSelectMenu(lang, chatId) {
 function buildPortfolioEmbedUrl(walletAddress) {
     const normalized = normalizeAddressSafe(walletAddress) || walletAddress;
     const base = PUBLIC_BASE_URL.replace(/\/$/, '');
+    if (!base || base.includes('localhost') || base.startsWith('http://127.')) {
+        return null;
+    }
+    if (!/^https?:\/\//i.test(base)) {
+        return null;
+    }
     return `${base}/webview/portfolio/${encodeURIComponent(normalized)}`;
 }
 
