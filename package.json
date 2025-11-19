@@ -1,7 +1,7 @@
 {
   "name": "banmao-bot-server",
   "version": "1.0.0",
-  "description": "Bot va API cho Banmao RPS",
+  "description": "Xlayer - BOT for the OKX Xlayer community",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
