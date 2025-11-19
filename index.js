@@ -124,8 +124,8 @@ const WALLET_TOKEN_ACTIONS = [
     { key: 'latest_price', labelKey: 'wallet_token_action_latest_price', path: '/api/v6/dex/market/price', method: 'POST' },
     { key: 'price_info', labelKey: 'wallet_token_action_price_info', path: '/api/v6/dex/market/price-info', method: 'POST' },
     { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST' },
-    { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'POST' },
-    { key: 'trades', labelKey: 'wallet_token_action_trades', path: '/api/v6/dex/market/trades', method: 'POST' }
+    { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'GET' },
+    { key: 'trades', labelKey: 'wallet_token_action_trades', path: '/api/v6/dex/market/trades', method: 'GET' }
 ];
 const WALLET_TOKEN_ACTION_LOOKUP = WALLET_TOKEN_ACTIONS.reduce((map, action) => {
     map[action.key] = action;
@@ -1620,12 +1620,11 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
             break;
     }
 
-    const method = (config.method || 'GET').toUpperCase();
-    const requestOptions = method === 'GET'
-        ? { query, auth: hasOkxCredentials }
-        : { body: query, auth: hasOkxCredentials };
-
-    return okxJsonRequest(method, config.path, requestOptions);
+    return callOkxDexEndpoint(config.path, query, {
+        method: config.method || 'GET',
+        auth: hasOkxCredentials,
+        allowFallback: true
+    });
 }
 
 function buildOkxTokenQueryFromContext(context, overrides = {}) {
@@ -1675,6 +1674,62 @@ function buildOkxTokenQueryFromContext(context, overrides = {}) {
     }
 
     return query;
+}
+
+function isOkxMethodNotAllowedError(error) {
+    if (!error || !error.message) {
+        return false;
+    }
+
+    const message = String(error.message).toLowerCase();
+    if (message.includes('http 405')) {
+        return true;
+    }
+    if (message.includes("request method 'get' not supported") || message.includes("request method 'post' not supported")) {
+        return true;
+    }
+    if (message.includes('method not allowed')) {
+        return true;
+    }
+
+    return false;
+}
+
+async function callOkxDexEndpoint(path, query, options = {}) {
+    const {
+        method = 'GET',
+        auth = hasOkxCredentials,
+        allowFallback = true
+    } = options;
+
+    const preferredMethod = (method || 'GET').toUpperCase();
+    const fallbackMethod = preferredMethod === 'POST' ? 'GET' : 'POST';
+    const methods = allowFallback && fallbackMethod !== preferredMethod
+        ? [preferredMethod, fallbackMethod]
+        : [preferredMethod];
+
+    let lastError = null;
+
+    for (const currentMethod of methods) {
+        try {
+            const requestOptions = currentMethod === 'GET'
+                ? { query, auth }
+                : { body: query, auth };
+
+            return await okxJsonRequest(currentMethod, path, requestOptions);
+        } catch (error) {
+            lastError = error;
+            if (!allowFallback || !isOkxMethodNotAllowedError(error)) {
+                throw error;
+            }
+        }
+    }
+
+    if (lastError) {
+        throw lastError;
+    }
+
+    return null;
 }
 
 function normalizeWalletTokenActionResult(actionKey, payload, lang) {
@@ -6189,7 +6244,7 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
 
     let priceInfoEntry = null;
     try {
-        const payload = await okxJsonRequest('POST', '/api/v6/dex/market/price-info', { body: query });
+        const payload = await callOkxDexEndpoint('/api/v6/dex/market/price-info', query, { method: 'POST' });
         priceInfoEntry = unwrapOkxFirst(payload);
     } catch (error) {
         errors.push(new Error(`[price-info:${chainLabel}] ${error.message}`));
@@ -6200,7 +6255,7 @@ async function fetchTokenMarketSnapshotForChain({ chainName, tokenAddress }) {
 
     if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
         try {
-            const payload = await okxJsonRequest('POST', '/api/v6/dex/market/price', { body: query });
+            const payload = await callOkxDexEndpoint('/api/v6/dex/market/price', query, { method: 'POST' });
             priceEntry = unwrapOkxFirst(payload);
             source = 'OKX DEX price';
         } catch (error) {
@@ -6267,7 +6322,7 @@ async function fetchBanmaoTokenProfile(options = {}) {
         query.tokenContractAddress = normalizedAddress;
     }
 
-    const payload = await okxJsonRequest('POST', '/api/v6/dex/market/token/basic-info', { body: query });
+    const payload = await callOkxDexEndpoint('/api/v6/dex/market/token/basic-info', query, { method: 'POST' });
     return unwrapOkxFirst(payload);
 }
 function decimalToRawBigInt(amount, decimals) {
