@@ -175,6 +175,23 @@ const WALLET_TOKEN_HISTORY_PERIOD_MS = {
     '60d': 60 * 24 * 60 * 60 * 1000,
     '90d': 90 * 24 * 60 * 60 * 1000
 };
+const WALLET_TOKEN_HISTORY_PERIOD_REQUEST_MAP = {
+    '30m': '30m',
+    '1h': '1h',
+    '12h': '1h',
+    '1d': '1d',
+    '7d': '1d',
+    '30d': '1d',
+    '60d': '1d',
+    '90d': '1d'
+};
+const WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS = {
+    '1m': 60 * 1000,
+    '5m': 5 * 60 * 1000,
+    '30m': 30 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000
+};
 const WALLET_TOKEN_HISTORY_PERIOD_OPTIONS = ['30m', '1h', '12h', '1d', '7d', '30d', '60d', '90d'];
 const WALLET_TOKEN_ACTIONS = [
     {
@@ -1713,13 +1730,15 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
 
     let handler = null;
     switch (actionKey) {
-        case 'historical_price':
-            if (!query.period && context?.historyPeriod) {
-                query.period = context.historyPeriod;
+        case 'historical_price': {
+            const requestedPeriod = context?.historyPeriod || query.period;
+            if (requestedPeriod) {
+                query.period = resolveWalletTokenHistoryRequestPeriod(requestedPeriod);
             }
-            applyWalletTokenHistoricalPriceIntervalDefaults(query);
-            handler = () => fetchWalletTokenHistoricalPricePayload(query, config);
+            applyWalletTokenHistoricalPriceIntervalDefaults(query, { targetPeriod: requestedPeriod });
+            handler = () => fetchWalletTokenHistoricalPricePayload(query, config, { targetPeriod: requestedPeriod });
             break;
+        }
         case 'candles':
             query.bar = query.bar || '1m';
             query.limit = query.limit || 10;
@@ -1773,12 +1792,13 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
     }
 }
 
-async function fetchWalletTokenHistoricalPricePayload(query, config) {
+async function fetchWalletTokenHistoricalPricePayload(query, config, { targetPeriod } = {}) {
     const combinedEntries = [];
     let cursor = query.cursor !== undefined ? query.cursor : null;
     let lastPayload = null;
     let lastFlattenedEntries = null;
     let lastUniquePriceCount = 0;
+    const normalizedTargetPeriod = normalizeWalletTokenHistoryPeriod(targetPeriod || query.period);
 
     for (let page = 0; page < WALLET_TOKEN_HISTORY_MAX_PAGES; page += 1) {
         const requestQuery = { ...query };
@@ -1804,8 +1824,9 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
         combinedEntries.push(...pageEntries);
 
         const flattenedEntries = expandWalletTokenHistoryEntries(combinedEntries);
-        const uniquePriceCount = countDistinctWalletTokenHistoryPrices(flattenedEntries);
-        lastFlattenedEntries = flattenedEntries;
+        const resampledEntries = resampleWalletTokenHistoryEntries(flattenedEntries, normalizedTargetPeriod);
+        const uniquePriceCount = countDistinctWalletTokenHistoryPrices(resampledEntries);
+        lastFlattenedEntries = resampledEntries;
         lastUniquePriceCount = uniquePriceCount;
         const nextCursor = extractOkxPayloadCursor(payload);
 
@@ -1816,48 +1837,50 @@ async function fetchWalletTokenHistoricalPricePayload(query, config) {
         cursor = nextCursor;
     }
 
-    const flattenedEntries = lastFlattenedEntries || expandWalletTokenHistoryEntries(combinedEntries);
+    const flattenedEntries = lastFlattenedEntries
+        || resampleWalletTokenHistoryEntries(expandWalletTokenHistoryEntries(combinedEntries), normalizedTargetPeriod);
     const uniquePriceCount = lastUniquePriceCount || countDistinctWalletTokenHistoryPrices(flattenedEntries);
 
     if (flattenedEntries.length === 0 || uniquePriceCount < WALLET_TOKEN_HISTORY_MIN_UNIQUE_PRICES) {
-        const fallbackPayload = await fetchWalletTokenHistoricalPriceFallback(query);
+        const fallbackPayload = await fetchWalletTokenHistoricalPriceFallback(query, { targetPeriod: normalizedTargetPeriod });
         if (fallbackPayload) {
             return fallbackPayload;
         }
     }
 
-    if (combinedEntries.length > 0) {
-        return { data: combinedEntries };
+    if (flattenedEntries.length > 0) {
+        return { data: flattenedEntries };
     }
 
     return lastPayload || { data: [] };
 }
 
-function applyWalletTokenHistoricalPriceIntervalDefaults(query) {
+function applyWalletTokenHistoricalPriceIntervalDefaults(query, { targetPeriod } = {}) {
     if (!query) {
         return;
     }
 
-    const normalizedLimit = normalizeWalletTokenHistoryLimit(query.limit);
-    query.limit = normalizedLimit;
+    const normalizedPeriod = normalizeWalletTokenHistoryPeriod(targetPeriod || query.period);
+    const requestPeriod = resolveWalletTokenHistoryRequestPeriod(normalizedPeriod);
+    const bucketMs = getWalletTokenHistoryBucketMs(normalizedPeriod);
+    const requestPeriodMs = getWalletTokenHistoryRequestPeriodMs(requestPeriod);
 
-    const normalizedPeriod = normalizeWalletTokenHistoryPeriod(query.period);
-    if (normalizedPeriod) {
-        query.period = normalizedPeriod;
-    }
+    const normalizedDisplayLimit = normalizeWalletTokenHistoryLimit(query.limit);
+    const fetchMultiplier = bucketMs && requestPeriodMs
+        ? Math.max(1, Math.ceil(bucketMs / requestPeriodMs))
+        : 1;
+    const fetchLimit = normalizeWalletTokenHistoryLimit(normalizedDisplayLimit * fetchMultiplier);
 
-    if (hasWalletTokenHistoryExplicitRange(query)) {
-        return;
-    }
+    query.limit = fetchLimit;
+    query.period = requestPeriod;
 
-    const periodMs = normalizedPeriod ? WALLET_TOKEN_HISTORY_PERIOD_MS[normalizedPeriod] : null;
-    if (!periodMs) {
+    if (hasWalletTokenHistoryExplicitRange(query) || !bucketMs) {
         return;
     }
 
     const now = Date.now();
-    const alignedEnd = Math.floor(now / periodMs) * periodMs;
-    const windowMs = Math.max(periodMs, normalizedLimit * periodMs);
+    const alignedEnd = Math.floor(now / bucketMs) * bucketMs;
+    const windowMs = Math.max(bucketMs, normalizedDisplayLimit * bucketMs);
     const begin = Math.max(0, alignedEnd - windowMs);
 
     query.end = String(alignedEnd);
@@ -1867,7 +1890,7 @@ function applyWalletTokenHistoricalPriceIntervalDefaults(query) {
     }
 }
 
-async function fetchWalletTokenHistoricalPriceFallback(query) {
+async function fetchWalletTokenHistoricalPriceFallback(query, { targetPeriod } = {}) {
     try {
         const fallbackQuery = buildWalletTokenHistoricalPriceFallbackQuery(query);
         const payload = await callOkxDexEndpoint('/api/v6/dex/market/historical-candles', fallbackQuery, {
@@ -1878,11 +1901,12 @@ async function fetchWalletTokenHistoricalPriceFallback(query) {
 
         const entries = unwrapOkxData(payload) || [];
         const normalizedEntries = convertWalletTokenCandlesToHistoryEntries(entries);
-        if (normalizedEntries.length === 0) {
+        const resampledEntries = resampleWalletTokenHistoryEntries(normalizedEntries, targetPeriod);
+        if (resampledEntries.length === 0) {
             return null;
         }
 
-        return { data: normalizedEntries };
+        return { data: resampledEntries };
     } catch (error) {
         console.warn(`[WalletToken] Failed to fetch historical price fallback: ${error.message}`);
         return null;
@@ -1924,6 +1948,36 @@ function normalizeWalletTokenHistoryPeriod(value) {
         return text;
     }
     return fallback;
+}
+
+function resolveWalletTokenHistoryRequestPeriod(period) {
+    const normalized = normalizeWalletTokenHistoryPeriod(period);
+    if (WALLET_TOKEN_HISTORY_PERIOD_REQUEST_MAP[normalized]) {
+        return WALLET_TOKEN_HISTORY_PERIOD_REQUEST_MAP[normalized];
+    }
+    if (WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS[normalized]) {
+        return normalized;
+    }
+    return WALLET_TOKEN_HISTORY_PERIOD_REQUEST_MAP[WALLET_TOKEN_HISTORY_DEFAULT_PERIOD]
+        || WALLET_TOKEN_HISTORY_DEFAULT_PERIOD
+        || '1d';
+}
+
+function getWalletTokenHistoryBucketMs(period) {
+    if (period && WALLET_TOKEN_HISTORY_PERIOD_MS[period]) {
+        return WALLET_TOKEN_HISTORY_PERIOD_MS[period];
+    }
+    if (WALLET_TOKEN_HISTORY_PERIOD_MS[WALLET_TOKEN_HISTORY_DEFAULT_PERIOD]) {
+        return WALLET_TOKEN_HISTORY_PERIOD_MS[WALLET_TOKEN_HISTORY_DEFAULT_PERIOD];
+    }
+    return null;
+}
+
+function getWalletTokenHistoryRequestPeriodMs(period) {
+    if (period && WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS[period]) {
+        return WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS[period];
+    }
+    return null;
 }
 
 function hasWalletTokenHistoryExplicitRange(query) {
@@ -2051,6 +2105,7 @@ function buildWalletTokenActionCacheKey(actionKey, context, query = null) {
             token: normalizedToken,
             chain: chainContext.chainIndex ?? chainContext.chainId ?? chainContext.chainShortName ?? '',
             wallet: context?.wallet || '',
+            historyPeriod: context?.historyPeriod || null,
             query: normalizedQuery
         });
     } catch (error) {
@@ -2531,6 +2586,43 @@ function expandWalletTokenHistoryEntries(entries) {
     }
 
     return result;
+}
+
+function resampleWalletTokenHistoryEntries(entries, targetPeriod) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    const normalizedTarget = normalizeWalletTokenHistoryPeriod(targetPeriod);
+    const bucketMs = getWalletTokenHistoryBucketMs(normalizedTarget);
+    const requestPeriod = resolveWalletTokenHistoryRequestPeriod(normalizedTarget);
+    const requestPeriodMs = getWalletTokenHistoryRequestPeriodMs(requestPeriod);
+
+    if (!bucketMs || !requestPeriodMs || bucketMs <= requestPeriodMs) {
+        return entries.slice();
+    }
+
+    const buckets = new Map();
+    for (const entry of entries) {
+        const timestamp = getWalletTokenHistoryTimestampValue(entry);
+        if (!Number.isFinite(timestamp)) {
+            continue;
+        }
+        const bucketKey = Math.floor(timestamp / bucketMs);
+        const existing = buckets.get(bucketKey);
+        if (!existing || timestamp > existing.timestamp) {
+            buckets.set(bucketKey, { entry, timestamp });
+        }
+    }
+
+    const aggregated = [];
+    for (const value of buckets.values()) {
+        if (value?.entry) {
+            aggregated.push(value.entry);
+        }
+    }
+
+    return aggregated;
 }
 
 function sortWalletTokenHistoryEntries(entries) {
