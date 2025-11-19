@@ -437,7 +437,7 @@
   "wallet_balance_chain_unknown": "Chain tidak diketahui",
   "wallet_balance_refresh_hint": "Saldo langsung dikirim lewat WebSocket dan otomatis diperbarui.",
   "wallet_portfolio_hint": "Ketuk tombol 🌐 untuk membuka tampilan web portofolio OKX untuk dompet mana pun.",
-  "wallet_dex_overview_title": "💼 Ringkasan DEX untuk {wallet}",
+  "wallet_dex_overview_title": "💼 Aset DEX",
   "wallet_dex_wallet_line": "👛 Dompet: {wallet}",
   "wallet_dex_total_value": "💰 Nilai USD: {value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",

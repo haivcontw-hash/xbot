@@ -437,7 +437,7 @@
   "wallet_balance_chain_unknown": "알 수 없는 체인",
   "wallet_balance_refresh_hint": "WebSocket으로 실시간 잔액을 받아 자동으로 새로고침합니다.",
   "wallet_portfolio_hint": "연결된 지갑의 OKX 포트폴리오 웹 보기를 열려면 🌐 버튼을 누르세요.",
-  "wallet_dex_overview_title": "💼 {wallet} 지갑 DEX 스냅샷",
+  "wallet_dex_overview_title": "💼 DEX 자산",
   "wallet_dex_wallet_line": "👛 지갑: {wallet}",
   "wallet_dex_total_value": "💰 총 USD 가치: {value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",

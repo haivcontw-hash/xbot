@@ -437,7 +437,7 @@
   "wallet_balance_chain_unknown": "Unknown chain",
   "wallet_balance_refresh_hint": "Live balances stream over WebSocket and refresh automatically.",
   "wallet_portfolio_hint": "Tap a 🌐 button to open the OKX portfolio web view for any linked wallet.",
-  "wallet_dex_overview_title": "💼 DEX snapshot for {wallet}",
+  "wallet_dex_overview_title": "💼 DEX assets",
   "wallet_dex_wallet_line": "👛 Wallet: {wallet}",
   "wallet_dex_total_value": "💰 Total USD value: {value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",

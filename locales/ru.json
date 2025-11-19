@@ -436,7 +436,7 @@
   "wallet_balance_chain_unknown": "Неизвестная сеть",
   "wallet_balance_refresh_hint": "Баланс поступает по WebSocket и обновляется автоматически.",
   "wallet_portfolio_hint": "Нажмите кнопку 🌐, чтобы открыть веб‑версию портфеля OKX для любого кошелька.",
-  "wallet_dex_overview_title": "💼 DEX-снимок кошелька {wallet}",
+  "wallet_dex_overview_title": "💼 Активы DEX",
   "wallet_dex_wallet_line": "👛 Кошелек: {wallet}",
   "wallet_dex_total_value": "💰 Общая стоимость в USD: {value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",

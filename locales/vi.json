@@ -437,7 +437,7 @@
   "wallet_balance_chain_unknown": "Không rõ chuỗi",
   "wallet_balance_refresh_hint": "Số dư được truyền qua WebSocket và tự làm mới liên tục.",
   "wallet_portfolio_hint": "Nhấn nút 🌐 để mở giao diện web OKX cho bất kỳ ví đã liên kết nào.",
-  "wallet_dex_overview_title": "💼 Ảnh chụp DEX của ví {wallet}",
+  "wallet_dex_overview_title": "💼 Tài sản DEX -",
   "wallet_dex_wallet_line": "👛 Ví: {wallet}",
   "wallet_dex_total_value": "💰 Tổng giá trị USD: {value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",

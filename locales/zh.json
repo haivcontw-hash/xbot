@@ -436,7 +436,7 @@
   "wallet_balance_chain_unknown": "未知链",
   "wallet_balance_refresh_hint": "余额通过 WebSocket 实时推送并自动刷新。",
   "wallet_portfolio_hint": "点击 🌐 按钮即可打开任意已绑定钱包的 OKX 资产网页视图。",
-  "wallet_dex_overview_title": "💼 钱包 {wallet} 的 DEX 快照",
+  "wallet_dex_overview_title": "💼 DEX 资产",
   "wallet_dex_wallet_line": "👛 钱包：{wallet}",
   "wallet_dex_total_value": "💰 总 USD 价值：{value}",
   "wallet_dex_token_header": "{index}. 🪙 <b>{symbol}</b> — {chain}",
