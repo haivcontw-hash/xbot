@@ -1325,6 +1325,69 @@ async function buildWalletBalanceText(lang, entries, options = {}) {
     return lines.join('\n');
 }
 
+async function fetchDexOverviewForWallet(walletAddress, options = {}) {
+    const normalized = normalizeAddressSafe(walletAddress);
+    if (!normalized) {
+        return { tokens: [], totalUsd: null };
+    }
+
+    try {
+        const snapshot = await fetchOkxDexBalanceSnapshot(normalized, options);
+        return { tokens: snapshot.tokens || [], totalUsd: snapshot.totalUsd ?? null };
+    } catch (error) {
+        console.warn(`[WalletDex] Failed to fetch snapshot for ${shortenAddress(normalized)}: ${error.message}`);
+        return { tokens: [], totalUsd: null };
+    }
+}
+
+function buildWalletDexOverviewText(lang, walletAddress, overview) {
+    const lines = [t(lang, 'wallet_dex_overview_title', { wallet: escapeHtml(shortenAddress(walletAddress)) })];
+
+    if (Number.isFinite(overview.totalUsd)) {
+        const formattedTotal = formatFiatValue(overview.totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        if (formattedTotal) {
+            lines.push(t(lang, 'wallet_dex_total_value', { value: escapeHtml(formattedTotal) }));
+        }
+    }
+
+    const tokens = Array.isArray(overview.tokens) ? overview.tokens : [];
+    if (tokens.length === 0) {
+        lines.push(t(lang, 'wallet_dex_no_tokens'));
+        return lines.join('\n');
+    }
+
+    for (const token of tokens) {
+        const chainIndex = token.chainIndex || token.chainId || token.chain || '—';
+        const symbol = token.symbol || token.tokenSymbol || token.tokenLabel || 'Token';
+        const balance = token.balance
+            || token.amountText
+            || token.amount
+            || token.rawBalance
+            || token.available
+            || token.currencyAmount
+            || '0';
+        const risk = token.isRiskToken || token.riskToken || token.tokenRisk
+            ? t(lang, 'wallet_dex_risk_yes')
+            : t(lang, 'wallet_dex_risk_no');
+        const contract = token.tokenContractAddress
+            || token.tokenAddress
+            || token.contractAddress
+            || token.token
+            || null;
+
+        lines.push(t(lang, 'wallet_dex_token_line', {
+            chain: escapeHtml(String(chainIndex)),
+            symbol: escapeHtml(String(symbol)),
+            balance: escapeHtml(String(balance)),
+            risk: escapeHtml(String(risk)),
+            address: escapeHtml(shortenAddress(walletAddress)),
+            contract: contract ? escapeHtml(shortenAddress(String(contract).replace(/^native:/, ''))) : t(lang, 'wallet_balance_contract_unknown')
+        }));
+    }
+
+    return lines.join('\n');
+}
+
 function resolveKnownTokenAddress(tokenKey) {
     if (!tokenKey) {
         return null;
@@ -8135,6 +8198,14 @@ function startTelegramBot() {
                         await bot.editMessageText(menu.text, options);
                     } else {
                         await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                    }
+
+                    try {
+                        const overview = await fetchDexOverviewForWallet(wallet, { forceDex: true });
+                        const dexText = buildWalletDexOverviewText(callbackLang, wallet, overview);
+                        await bot.sendMessage(chatId, dexText, { parse_mode: 'HTML', reply_markup: appendCloseButton(null, callbackLang) });
+                    } catch (overviewError) {
+                        console.warn(`[WalletPick] Failed to render dex overview for ${wallet}: ${overviewError.message}`);
                     }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
