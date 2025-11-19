@@ -1000,51 +1000,26 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             amountText = String(rawCandidate ?? holding.balance ?? holding.coinAmount ?? '0');
         }
 
-        let unitPriceUsd = Number.isFinite(Number(holding.tokenPrice)) ? Number(holding.tokenPrice) : null;
-        let priceInfo = null;
-        if (Number.isFinite(holding.priceUsd) && holding.priceUsd > 0) {
-            priceInfo = { priceUsd: holding.priceUsd, priceOkb: null, okbUsd: null, source: 'OKX balance' };
-        }
-        if (!priceInfo && holding.tokenAddress) {
-            priceInfo = await getTokenPriceInfo(holding.tokenAddress, holding.symbol || holding.name);
-        }
-        if (!priceInfo && Number.isFinite(Number(holding.tokenPrice))) {
-            priceInfo = { priceUsd: Number(holding.tokenPrice), priceOkb: null, okbUsd: null, source: 'OKX balance' };
-        }
-        if (!Number.isFinite(unitPriceUsd) && Number.isFinite(priceInfo?.priceUsd)) {
-            unitPriceUsd = priceInfo.priceUsd;
-        }
+        const unitPriceText = holding.tokenPrice !== undefined && holding.tokenPrice !== null
+            ? String(holding.tokenPrice)
+            : null;
+        const unitPriceUsd = Number.isFinite(Number(unitPriceText)) ? Number(unitPriceText) : null;
 
         let totalValueUsd = Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null;
         if ((!Number.isFinite(totalValueUsd) || totalValueUsd === null) && Number.isFinite(numericAmount) && Number.isFinite(unitPriceUsd)) {
             totalValueUsd = numericAmount * unitPriceUsd;
         }
 
-        const okbUnitPrice = Number.isFinite(priceInfo?.priceOkb) && priceInfo.priceOkb > 0
-            ? priceInfo.priceOkb
-            : (Number.isFinite(priceInfo?.okbUsd) && priceInfo.okbUsd > 0 && Number.isFinite(priceInfo?.priceUsd)
-                ? priceInfo.priceUsd / priceInfo.okbUsd
-                : null);
-        let okbValueText = null;
-        if (Number.isFinite(okbUnitPrice) && okbUnitPrice > 0 && Number.isFinite(numericAmount)) {
-            const okbValue = formatFiatValue(numericAmount * okbUnitPrice, {
-                minimumFractionDigits: 4,
-                maximumFractionDigits: 4
-            });
-            if (okbValue) {
-                okbValueText = `${okbValue} OKB`;
-            }
-        }
-
         return {
             tokenAddress: holding.tokenAddress,
             tokenLabel: holding.symbol || holding.name || 'Token',
             amountText,
-            valueText: okbValueText,
+            valueText: null,
             chainIndex: holding.chainIndex,
             walletAddress: holding.walletAddress || normalizedWallet,
             isRiskToken: holding.isRiskToken === true,
             unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
+            unitPriceText,
             totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
             currencyAmount: Number.isFinite(Number(holding.currencyAmount)) ? Number(holding.currencyAmount) : null
         };
@@ -1061,7 +1036,8 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
             const chainIndex = raw.chainIndex || raw.chainId || raw.chain || raw.chain_id;
             const walletAddr = raw.address || raw.walletAddress || normalizedWallet;
             const numericAmount = Number(raw.balance ?? raw.coinAmount ?? raw.amount ?? raw.rawBalance ?? raw.amountRaw ?? 0);
-            const unitPriceUsd = Number.isFinite(Number(raw.tokenPrice)) ? Number(raw.tokenPrice) : null;
+            const unitPriceText = raw.tokenPrice !== undefined && raw.tokenPrice !== null ? String(raw.tokenPrice) : null;
+            const unitPriceUsd = Number.isFinite(Number(unitPriceText)) ? Number(unitPriceText) : null;
             const totalValueUsd = Number.isFinite(numericAmount) && Number.isFinite(unitPriceUsd)
                 ? numericAmount * unitPriceUsd
                 : null;
@@ -1074,6 +1050,7 @@ async function fetchLiveWalletTokens(walletAddress, options = {}) {
                 walletAddress: walletAddr,
                 isRiskToken: Boolean(raw.isRiskToken),
                 unitPriceUsd: Number.isFinite(unitPriceUsd) ? unitPriceUsd : null,
+                unitPriceText,
                 totalValueUsd: Number.isFinite(totalValueUsd) ? totalValueUsd : null,
                 currencyAmount: Number.isFinite(Number(raw.currencyAmount)) ? Number(raw.currencyAmount) : null
             });
@@ -1262,15 +1239,11 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
         const formattedTotalUsd = Number.isFinite(totalUsd) && totalUsd > 0
             ? formatFiatValue(totalUsd, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
             : null;
-        const unitUsd = Number.isFinite(token.unitPriceUsd)
-            ? token.unitPriceUsd
-            : (Number.isFinite(Number(token.tokenPrice)) ? Number(token.tokenPrice) : null);
-        const formattedUnitUsd = Number.isFinite(unitUsd) && unitUsd > 0
-            ? formatFiatValue(unitUsd, { minimumFractionDigits: 2, maximumFractionDigits: 6 })
-            : null;
-
-        const priceLabel = formattedUnitUsd
-            ? escapeHtml(`≈ ${formattedUnitUsd} USD/token`)
+        const unitPriceRaw = token.unitPriceText
+            || (token.tokenPrice !== undefined && token.tokenPrice !== null ? String(token.tokenPrice) : null)
+            || (Number.isFinite(token.unitPriceUsd) ? String(token.unitPriceUsd) : null);
+        const priceLabel = unitPriceRaw
+            ? escapeHtml(`${unitPriceRaw} USD/token`)
             : escapeHtml(t(lang, 'wallet_dex_token_value_unknown'));
 
         const totalParts = [];
