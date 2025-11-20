@@ -547,6 +547,7 @@ const checkinAdminMenus = new Map();
 const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
+const txhashWizardStates = new Map();
 let checkinSchedulerTimer = null;
 
 function delay(ms) {
@@ -9994,6 +9995,31 @@ function startTelegramBot() {
         registerWizardStates.set(userKey, { promptMessageId: message.message_id });
         return message;
     }
+
+    async function startTxhashWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = txhashWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        const promptText = t(dmLang, 'txhash_help_prompt');
+        const placeholder = t(dmLang, 'txhash_help_placeholder');
+        const message = await bot.sendMessage(userId, promptText, {
+            reply_markup: {
+                force_reply: true,
+                input_field_placeholder: placeholder
+            }
+        });
+        txhashWizardStates.set(userKey, { promptMessageId: message.message_id });
+        return message;
+    }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
@@ -10621,9 +10647,17 @@ function startTelegramBot() {
             return { message: t(lang, 'help_action_executed') };
         },
         txhash: async (query, lang) => {
-            const synthetic = buildSyntheticCommandMessage(query);
-            await handleTxhashCommand(synthetic, null);
-            return { message: t(lang, 'help_action_executed') };
+            try {
+                await startTxhashWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start txhash wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
         },
         unregister: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
@@ -12615,6 +12649,35 @@ function startTelegramBot() {
                 } catch (error) {
                     console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
                     await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
+                }
+                return;
+            }
+
+            const txhashState = txhashWizardStates.get(userId);
+            if (txhashState && msg.chat?.id?.toString() === userId && msg.reply_to_message?.message_id === txhashState.promptMessageId) {
+                const rawHash = (msg.text || '').trim();
+                if (!rawHash) {
+                    await sendEphemeralMessage(userId, t(lang, 'txhash_help_invalid'));
+                    return;
+                }
+
+                try {
+                    if (txhashState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, txhashState.promptMessageId);
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
+
+                    scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
+                    const link = `https://www.oklink.com/multi-search#key=${encodeURIComponent(rawHash)}`;
+                    const formatted = t(lang, 'txhash_link', { url: escapeHtml(link) });
+                    await sendEphemeralMessage(userId, formatted, { parse_mode: 'HTML' }, 20000);
+                    txhashWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
+                    await sendEphemeralMessage(userId, t(lang, 'txhash_error'));
                 }
                 return;
             }
