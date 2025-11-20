@@ -3638,7 +3638,7 @@ function formatWalletHistoryEntry(entry, walletAddress, tokenSymbol, index = 0) 
 
 function formatTxhashDetail(detail, lang, options = {}) {
     const lines = [];
-    const mainAddress = normalizeAddressSafe(options.mainAddress) || null;
+    const mainAddress = resolveTxhashPrimaryAddress(detail, options.mainAddress);
     const mainLower = mainAddress ? mainAddress.toLowerCase() : null;
     const txHash = detail.txhash || detail.txHash || detail.hash || '—';
     const chain = detail.chainIndex ?? detail.chainId ?? '—';
@@ -3655,6 +3655,7 @@ function formatTxhashDetail(detail, lang, options = {}) {
 
     const computedFee = deriveTxFeeLabel(fee, gasUsed, gasPrice);
     const tokenTransferInsight = summarizeTokenTransfers(tokenTransfers, mainLower);
+    const primaryAction = buildTxhashActionSummary(tokenTransferInsight, lang);
 
     lines.push(t(lang, 'txhash_title'));
     lines.push(t(lang, 'txhash_hash_line', { hash: formatCopyableValueHtml(txHash) || escapeHtml(txHash) }));
@@ -3664,62 +3665,148 @@ function formatTxhashDetail(detail, lang, options = {}) {
         amount: escapeHtml(amountLabel)
     }));
 
-    lines.push(...formatTxhashInsight({
-        lang,
-        chain,
-        status,
-        methodId,
-        fee: computedFee,
-        mainAddress,
-        tokenTransferInsight
+    if (mainAddress) {
+        lines.push(t(lang, 'txhash_insight_wallet', {
+            wallet: formatCopyableValueHtml(mainAddress) || escapeHtml(mainAddress)
+        }));
+    } else {
+        lines.push(t(lang, 'txhash_insight_no_wallet'));
+    }
+
+    lines.push('', t(lang, 'txhash_action_title'));
+    lines.push(primaryAction);
+    lines.push(t(lang, 'txhash_insight_buy', {
+        summary: formatTxhashTotals(tokenTransferInsight.buys, lang)
+    }));
+    lines.push(t(lang, 'txhash_insight_sell', {
+        summary: formatTxhashTotals(tokenTransferInsight.sells, lang)
     }));
 
-    if (gasLimit || gasUsed || gasPrice) {
-        lines.push('', t(lang, 'txhash_gas_line', {
-            limit: gasLimit ? escapeHtml(String(gasLimit)) : '—',
-            used: gasUsed ? escapeHtml(String(gasUsed)) : '—',
-            price: gasPrice ? escapeHtml(String(gasPrice)) : '—'
-        }));
+    const hasFeeBlock = fee || computedFee || gasUsed || gasPrice || methodId || detail.l1OriginHash;
+    if (hasFeeBlock) {
+        lines.push('', t(lang, 'txhash_fee_header'));
+        if (fee || computedFee) {
+            lines.push(t(lang, 'txhash_fee_line', { fee: escapeHtml(String(fee || computedFee)) }));
+        }
+        if (gasUsed || gasPrice || gasLimit) {
+            lines.push(t(lang, 'txhash_gas_line', {
+                limit: gasLimit ? escapeHtml(String(gasLimit)) : '—',
+                used: gasUsed ? escapeHtml(String(gasUsed)) : '—',
+                price: gasPrice ? escapeHtml(String(gasPrice)) : '—'
+            }));
+        }
+        if (methodId) {
+            lines.push(t(lang, 'txhash_method_line', { method: escapeHtml(String(methodId)) }));
+        }
+        if (detail.l1OriginHash) {
+            lines.push(t(lang, 'txhash_l1_hash', {
+                hash: formatCopyableValueHtml(detail.l1OriginHash) || escapeHtml(String(detail.l1OriginHash))
+            }));
+        }
     }
 
-    if (fee || computedFee) {
-        lines.push(t(lang, 'txhash_fee_line', { fee: escapeHtml(String(fee || computedFee)) }));
-    }
-    if (methodId) {
-        lines.push(t(lang, 'txhash_method_line', { method: escapeHtml(String(methodId)) }));
-    }
-    if (detail.l1OriginHash) {
-        lines.push(t(lang, 'txhash_l1_hash', {
-            hash: formatCopyableValueHtml(detail.l1OriginHash) || escapeHtml(String(detail.l1OriginHash))
-        }));
-    }
-
-    const fromDetails = formatTxAddressDetails(detail.fromDetails, '👤', lang);
-    const toDetails = formatTxAddressDetails(detail.toDetails, '🎯', lang);
-    const internalDetails = formatInternalTxDetails(detail.internalTransactionDetails, lang);
+    lines.push('', t(lang, 'txhash_token_header'));
     const tokenDetails = formatTokenTransferDetails(detail.tokenTransferDetails, lang);
-
-    if (fromDetails.length > 0) {
-        lines.push('', t(lang, 'txhash_from_header'));
-        lines.push(...fromDetails);
-    }
-
-    if (toDetails.length > 0) {
-        lines.push('', t(lang, 'txhash_to_header'));
-        lines.push(...toDetails);
-    }
-
-    if (internalDetails.length > 0) {
-        lines.push('', t(lang, 'txhash_internal_header'));
-        lines.push(...internalDetails);
-    }
-
     if (tokenDetails.length > 0) {
-        lines.push('', t(lang, 'txhash_token_header'));
         lines.push(...tokenDetails);
+    } else {
+        lines.push(t(lang, 'txhash_token_none'));
     }
 
     return lines.join('\n');
+}
+
+function resolveTxhashPrimaryAddress(detail, providedAddress) {
+    const normalizedProvided = normalizeAddressSafe(providedAddress);
+    if (normalizedProvided) {
+        return normalizedProvided;
+    }
+
+    const counts = new Map();
+    const bump = (address, weight = 1) => {
+        const normalized = normalizeAddressSafe(address);
+        if (!normalized) return;
+        const current = counts.get(normalized) || 0;
+        counts.set(normalized, current + weight);
+    };
+
+    const maybeWeigh = (address, isContract) => bump(address, isContract ? 0.5 : 1);
+
+    if (Array.isArray(detail.tokenTransferDetails)) {
+        for (const row of detail.tokenTransferDetails) {
+            if (!row) continue;
+            maybeWeigh(row.from, row.isFromContract);
+            maybeWeigh(row.to, row.isToContract);
+        }
+    }
+
+    if (Array.isArray(detail.fromDetails)) {
+        for (const row of detail.fromDetails) {
+            if (!row) continue;
+            maybeWeigh(row.address, row.isContract);
+        }
+    }
+
+    if (Array.isArray(detail.toDetails)) {
+        for (const row of detail.toDetails) {
+            if (!row) continue;
+            maybeWeigh(row.address, row.isContract);
+        }
+    }
+
+    let bestAddress = null;
+    let bestScore = 0;
+    for (const [address, score] of counts.entries()) {
+        if (score > bestScore) {
+            bestAddress = address;
+            bestScore = score;
+        }
+    }
+
+    return bestAddress;
+}
+
+function buildTxhashActionSummary(tokenTransferInsight, lang) {
+    const pickTopToken = (map) => {
+        if (!map || !(map instanceof Map) || map.size === 0) return null;
+        let best = null;
+        for (const [symbol, bucket] of map.entries()) {
+            if (!best) {
+                best = { symbol, bucket };
+                continue;
+            }
+            const bestValue = best.bucket.hasNumeric ? best.bucket.totalNumeric : best.bucket.count;
+            const currentValue = bucket.hasNumeric ? bucket.totalNumeric : bucket.count;
+            if (currentValue > bestValue) {
+                best = { symbol, bucket };
+            }
+        }
+        if (!best) return null;
+        const amountText = best.bucket.hasNumeric
+            ? formatTokenQuantity(best.bucket.totalNumeric, { maximumFractionDigits: 8 })
+            : best.bucket.raw.join(' + ');
+        return { symbol: best.symbol, amount: amountText };
+    };
+
+    const topSell = pickTopToken(tokenTransferInsight?.sells);
+    const topBuy = pickTopToken(tokenTransferInsight?.buys);
+
+    if (topSell && topBuy) {
+        return t(lang, 'txhash_action_swap', {
+            sell: `${topSell.amount} ${topSell.symbol}`.trim(),
+            buy: `${topBuy.amount} ${topBuy.symbol}`.trim()
+        });
+    }
+
+    if (topSell) {
+        return t(lang, 'txhash_action_sell', { sell: `${topSell.amount} ${topSell.symbol}`.trim() });
+    }
+
+    if (topBuy) {
+        return t(lang, 'txhash_action_buy', { buy: `${topBuy.amount} ${topBuy.symbol}`.trim() });
+    }
+
+    return t(lang, 'txhash_action_none');
 }
 
 function normalizeTxStatusText(status) {
@@ -3819,45 +3906,6 @@ function formatTxhashTotals(map, lang) {
         parts.push(`${amount} ${count}`);
     }
     return parts.length > 0 ? parts.join(' • ') : t(lang, 'txhash_insight_none');
-}
-
-function formatTxhashInsight(context) {
-    const { lang, chain, status, methodId, fee, mainAddress, tokenTransferInsight } = context;
-    const lines = [];
-
-    lines.push('', t(lang, 'txhash_insight_title'));
-    if (mainAddress) {
-        lines.push(t(lang, 'txhash_insight_wallet', {
-            wallet: formatCopyableValueHtml(mainAddress) || escapeHtml(mainAddress)
-        }));
-    } else {
-        lines.push(t(lang, 'txhash_insight_no_wallet'));
-    }
-
-    lines.push(t(lang, 'txhash_insight_status', {
-        chain: escapeHtml(String(chain)),
-        status: escapeHtml(String(status)),
-        method: methodId ? escapeHtml(String(methodId)) : '—'
-    }));
-
-    if (fee) {
-        lines.push(t(lang, 'txhash_insight_fee', { fee: escapeHtml(String(fee)) }));
-    }
-
-    lines.push(t(lang, 'txhash_insight_buy', {
-        summary: formatTxhashTotals(tokenTransferInsight.buys, lang)
-    }));
-    lines.push(t(lang, 'txhash_insight_sell', {
-        summary: formatTxhashTotals(tokenTransferInsight.sells, lang)
-    }));
-
-    if (tokenTransferInsight.otherCount > 0 && mainAddress) {
-        lines.push(t(lang, 'txhash_insight_other_transfers', {
-            count: tokenTransferInsight.otherCount
-        }));
-    }
-
-    return lines;
 }
 
 function formatTxAddressDetails(entries, icon, lang) {
@@ -9984,14 +10032,14 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     const mainAddress = msg.from?.id ? await resolvePrimaryUserWallet(msg.from.id) : null;
 
     if (!txHash) {
-        await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang) });
+        await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
         return;
     }
 
     try {
         const detail = await fetchOkxTxhashDetail(txHash);
         if (!detail) {
-            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
+            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
             return;
         }
 
@@ -10002,7 +10050,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             await sendReply(msg, first, {
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
-                reply_markup: buildCloseKeyboard(lang)
+                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
             });
         }
 
@@ -10010,12 +10058,12 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             await sendReply(msg, extra, {
                 parse_mode: 'HTML',
                 disable_web_page_preview: true,
-                reply_markup: buildCloseKeyboard(lang)
+                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
             });
         }
     } catch (error) {
         console.error(`[Txhash] Failed to fetch txhash ${txHash}: ${error.message}`);
-        await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
+        await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
     }
 }
 
@@ -10937,6 +10985,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'txhash_back') {
+                await bot.answerCallbackQuery(queryId);
+                if (chatId) {
+                    const helpText = buildHelpText(callbackLang);
+                    await bot.sendMessage(chatId, helpText, {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: true,
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                }
+                return;
+            }
+
             if (query.data === 'ui_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -12881,22 +12942,29 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                         }
                     }
 
-                    scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
                     const detail = await fetchOkxTxhashDetail(rawHash);
                     if (!detail) {
-                        await sendEphemeralMessage(userId, t(lang, 'txhash_error'));
+                        await sendReply(msg, t(lang, 'txhash_error'), {
+                            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+                        });
                         return;
                     }
 
                     const formatted = formatTxhashDetail(detail, lang, { mainAddress });
                     const chunks = splitTelegramMessageText(formatted);
                     for (const chunk of chunks) {
-                        await sendEphemeralMessage(userId, chunk, { parse_mode: 'HTML', disable_web_page_preview: true }, 30000);
+                        await bot.sendMessage(userId, chunk, {
+                            parse_mode: 'HTML',
+                            disable_web_page_preview: true,
+                            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+                        });
                     }
                     txhashWizardStates.delete(userId);
                 } catch (error) {
                     console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
-                    await sendEphemeralMessage(userId, t(lang, 'txhash_error'));
+                    await sendReply(msg, t(lang, 'txhash_error'), {
+                        reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+                    });
                 }
                 return;
             }
