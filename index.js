@@ -3725,10 +3725,19 @@ function resolveTxhashPrimaryAddress(detail, providedAddress) {
         return normalizedProvided;
     }
 
+    if (Array.isArray(detail.fromDetails)) {
+        for (const row of detail.fromDetails) {
+            if (!row || row.isContract) continue;
+            const normalized = normalizeAddressSafe(row.address);
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+
     if (Array.isArray(detail.tokenTransferDetails)) {
         for (const row of detail.tokenTransferDetails) {
-            if (!row) continue;
-            if (row.isFromContract) continue;
+            if (!row || row.isFromContract) continue;
             const normalized = normalizeAddressSafe(row.from);
             if (normalized) {
                 return normalized;
@@ -3744,20 +3753,20 @@ function resolveTxhashPrimaryAddress(detail, providedAddress) {
         counts.set(normalized, current + weight);
     };
 
-    const maybeWeigh = (address, isContract) => bump(address, isContract ? 0.5 : 1);
-
-    if (Array.isArray(detail.tokenTransferDetails)) {
-        for (const row of detail.tokenTransferDetails) {
-            if (!row) continue;
-            maybeWeigh(row.from, row.isFromContract);
-            maybeWeigh(row.to, row.isToContract);
-        }
-    }
+    const maybeWeigh = (address, isContract, weight = 1) => bump(address, isContract ? weight * 0.5 : weight);
 
     if (Array.isArray(detail.fromDetails)) {
         for (const row of detail.fromDetails) {
             if (!row) continue;
-            maybeWeigh(row.address, row.isContract);
+            maybeWeigh(row.address, row.isContract, 2);
+        }
+    }
+
+    if (Array.isArray(detail.tokenTransferDetails)) {
+        for (const row of detail.tokenTransferDetails) {
+            if (!row) continue;
+            maybeWeigh(row.from, row.isFromContract, 1.5);
+            maybeWeigh(row.to, row.isToContract);
         }
     }
 
@@ -8923,6 +8932,141 @@ async function fetchOkxTxhashDetail(txHash, options = {}) {
     return unwrapOkxFirst(payload);
 }
 
+async function collectTxhashChainEntries() {
+    const directory = await ensureOkxChainDirectory();
+    const combined = dedupeOkxChainEntries([
+        ...(directory?.aggregator || []),
+        ...(directory?.market || [])
+    ]);
+
+    return combined.filter((entry) => Number.isFinite(entry.chainIndex));
+}
+
+function sortTxhashChainEntries(entries = []) {
+    const priority = (entry) => {
+        const keys = entry?.keys || [];
+        const aliases = entry?.aliases || [];
+        const values = [...keys, ...aliases, entry.chainShortName, entry.chainName]
+            .filter(Boolean)
+            .map((value) => value.toString().toLowerCase());
+        const isXlayer = values.some((value) => value.includes('xlayer') || value.includes('x-layer'));
+        return isXlayer ? 0 : 1;
+    };
+
+    return [...entries].sort((a, b) => {
+        const pa = priority(a);
+        const pb = priority(b);
+        if (pa !== pb) {
+            return pa - pb;
+        }
+
+        const nameA = (a?.chainShortName || a?.chainName || '').toString().toLowerCase();
+        const nameB = (b?.chainShortName || b?.chainName || '').toString().toLowerCase();
+        return nameA.localeCompare(nameB);
+    });
+}
+
+function buildTxhashChainKeyboard(lang, entries = []) {
+    const sorted = sortTxhashChainEntries(entries).slice(0, 12);
+    const buttons = sorted.map((entry) => {
+        const label = entry.chainShortName || entry.chainName || `#${entry.chainIndex}`;
+        return {
+            text: t(lang, 'txhash_chain_option', { chain: label, index: entry.chainIndex }),
+            callback_data: `txhash_chain:${entry.chainIndex}`
+        };
+    });
+
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    if (rows.length === 0) {
+        return buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' });
+    }
+
+    return appendCloseButton({ inline_keyboard: rows }, lang, { backCallbackData: 'txhash_back' });
+}
+
+function buildTxhashHashPromptText(lang, chainLabel, pendingHash = null) {
+    const parts = [t(lang, 'txhash_hash_prompt', { chain: chainLabel })];
+    if (pendingHash) {
+        parts.push(t(lang, 'txhash_hash_prefill', { hash: pendingHash }));
+    }
+    return parts.join('\n');
+}
+
+async function deliverTxhashDetail({ chatId, lang, txHash, chainIndex, replyContextMessage = null }) {
+    if (!chatId) {
+        return;
+    }
+
+    try {
+        const detail = await fetchOkxTxhashDetail(txHash, { chainIndex });
+        if (!detail) {
+            await sendMessageRespectingThread(chatId, replyContextMessage, t(lang, 'txhash_error'), {
+                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+            });
+            return;
+        }
+
+        const formatted = formatTxhashDetail(detail, lang, {});
+        const chunks = splitTelegramMessageText(formatted);
+        const replyMarkup = buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' });
+
+        for (const chunk of chunks) {
+            await sendMessageRespectingThread(chatId, replyContextMessage, chunk, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: replyMarkup
+            });
+        }
+    } catch (error) {
+        console.error(`[Txhash] Failed to fetch txhash ${txHash}: ${error.message}`);
+        await sendMessageRespectingThread(chatId, replyContextMessage, t(lang, 'txhash_error'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+        });
+    }
+}
+
+async function startTxhashFlow({ chatId, userId, lang, sourceMessage = null, pendingHash = null } = {}) {
+    const targetChatId = sourceMessage?.chat?.id ?? chatId;
+    const userKey = userId ? userId.toString() : targetChatId?.toString();
+    if (!targetChatId || !userKey) {
+        return;
+    }
+
+    let chainEntries;
+    try {
+        chainEntries = await collectTxhashChainEntries();
+    } catch (error) {
+        console.error(`[Txhash] Failed to load chain directory: ${error.message}`);
+    }
+
+    if (!Array.isArray(chainEntries) || chainEntries.length === 0) {
+        await sendMessageRespectingThread(targetChatId, sourceMessage, t(lang, 'txhash_chain_missing'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+        });
+        return;
+    }
+
+    const keyboard = buildTxhashChainKeyboard(lang, chainEntries);
+    const promptText = t(lang, 'txhash_chain_prompt');
+    const message = sourceMessage
+        ? await sendReply(sourceMessage, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard })
+        : await bot.sendMessage(targetChatId, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
+
+    txhashWizardStates.set(userKey, {
+        stage: 'chain',
+        chatId: targetChatId.toString(),
+        lang,
+        pendingHash: pendingHash || null,
+        replyContextMessage: sourceMessage,
+        promptMessageId: message?.message_id || null,
+        chainOptions: chainEntries
+    });
+}
+
 async function tryFetchOkxMarketTicker() {
     if (!OKX_MARKET_INSTRUMENT) {
         return null;
@@ -10051,62 +10195,20 @@ async function handleOkx402StatusCommand(msg) {
     }
 }
 
-async function resolvePrimaryUserWallet(userId) {
-    if (!userId) {
-        return null;
-    }
-
-    try {
-        const wallets = await db.getWalletsForUser(userId.toString());
-        return Array.isArray(wallets) && wallets.length > 0 ? wallets[0] : null;
-    } catch (error) {
-        console.warn(`[Txhash] Unable to resolve primary wallet for ${userId}: ${error.message}`);
-        return null;
-    }
-}
-
 async function handleTxhashCommand(msg, explicitHash = null) {
     const lang = await getLang(msg);
     const text = msg.text || '';
     const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
 
     const txHash = explicitHash || (match ? match[1] : null);
-    const mainAddress = msg.from?.id ? await resolvePrimaryUserWallet(msg.from.id) : null;
 
-    if (!txHash) {
-        await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
-        return;
-    }
-
-    try {
-        const detail = await fetchOkxTxhashDetail(txHash);
-        if (!detail) {
-            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
-            return;
-        }
-
-        const formatted = formatTxhashDetail(detail, lang, { mainAddress });
-        const chunks = splitTelegramMessageText(formatted);
-        const first = chunks.shift();
-        if (first) {
-            await sendReply(msg, first, {
-                parse_mode: 'HTML',
-                disable_web_page_preview: true,
-                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
-            });
-        }
-
-        for (const extra of chunks) {
-            await sendReply(msg, extra, {
-                parse_mode: 'HTML',
-                disable_web_page_preview: true,
-                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
-            });
-        }
-    } catch (error) {
-        console.error(`[Txhash] Failed to fetch txhash ${txHash}: ${error.message}`);
-        await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' }) });
-    }
+    await startTxhashFlow({
+        chatId: msg.chat.id,
+        userId: msg.from?.id,
+        lang,
+        sourceMessage: msg,
+        pendingHash: txHash || null
+    });
 }
 
     async function handleRulesCommand(msg) {
@@ -10309,16 +10411,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             }
         }
 
-        const promptText = t(dmLang, 'txhash_help_prompt');
-        const placeholder = t(dmLang, 'txhash_help_placeholder');
-        const message = await bot.sendMessage(userId, promptText, {
-            reply_markup: {
-                force_reply: true,
-                input_field_placeholder: placeholder
-            }
-        });
-        txhashWizardStates.set(userKey, { promptMessageId: message.message_id });
-        return message;
+        await startTxhashFlow({ chatId: userId, userId, lang: dmLang });
+        return null;
     }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
@@ -11037,6 +11131,49 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                         reply_markup: buildCloseKeyboard(callbackLang)
                     });
                 }
+                return;
+            }
+
+            if (query.data && query.data.startsWith('txhash_chain:')) {
+                const userKey = query.from.id.toString();
+                const rawIndex = query.data.split(':')[1];
+                const selectedIndex = Number(rawIndex);
+
+                const currentState = txhashWizardStates.get(userKey) || {};
+                const chainEntries = currentState.chainOptions || await collectTxhashChainEntries();
+                const chainEntry = chainEntries.find((entry) => Number(entry?.chainIndex) === Number(selectedIndex));
+
+                if (!chainEntry) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_missing'), show_alert: true });
+                    return;
+                }
+
+                const chainLabel = chainEntry.chainShortName || chainEntry.chainName || `#${chainEntry.chainIndex}`;
+                const promptText = buildTxhashHashPromptText(callbackLang, chainLabel, currentState.pendingHash);
+                const placeholder = t(callbackLang, 'txhash_help_placeholder');
+
+                const targetChatId = currentState.chatId || chatId || query.from.id.toString();
+                const prompt = await sendMessageRespectingThread(targetChatId, currentState.replyContextMessage || query.message, promptText, {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: placeholder
+                    },
+                    allow_sending_without_reply: true
+                });
+
+                txhashWizardStates.set(userKey, {
+                    stage: 'hash',
+                    chatId: targetChatId.toString(),
+                    lang: callbackLang,
+                    pendingHash: currentState.pendingHash || null,
+                    replyContextMessage: currentState.replyContextMessage || query.message,
+                    promptMessageId: prompt?.message_id || null,
+                    chainIndex: chainEntry.chainIndex,
+                    chainLabel,
+                    chainOptions: chainEntries
+                });
+
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_selected', { chain: chainLabel }) });
                 return;
             }
 
@@ -12967,45 +13104,46 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             }
 
             const txhashState = txhashWizardStates.get(userId);
-            if (txhashState && msg.chat?.id?.toString() === userId && msg.reply_to_message?.message_id === txhashState.promptMessageId) {
+            if (
+                txhashState &&
+                txhashState.stage === 'hash' &&
+                msg.chat?.id?.toString() === txhashState.chatId &&
+                msg.reply_to_message?.message_id === txhashState.promptMessageId
+            ) {
                 const rawHash = (msg.text || '').trim();
+                const effectiveLang = txhashState.lang || lang;
+
                 if (!rawHash) {
-                    await sendEphemeralMessage(userId, t(lang, 'txhash_help_invalid'));
+                    if (msg.chat.type === 'private') {
+                        await sendEphemeralMessage(userId, t(effectiveLang, 'txhash_help_invalid'));
+                    } else {
+                        await sendMessageRespectingThread(txhashState.chatId, msg, t(effectiveLang, 'txhash_help_invalid'), {
+                            reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                        });
+                    }
+                    return;
+                }
+
+                if (!txhashState.chainIndex) {
+                    await sendMessageRespectingThread(txhashState.chatId, msg, t(effectiveLang, 'txhash_chain_missing'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                    });
                     return;
                 }
 
                 try {
-                    const mainAddress = await resolvePrimaryUserWallet(userId);
-                    if (txhashState.promptMessageId) {
-                        try {
-                            await bot.deleteMessage(msg.chat.id, txhashState.promptMessageId);
-                        } catch (error) {
-                            // ignore
-                        }
-                    }
-
-                    const detail = await fetchOkxTxhashDetail(rawHash);
-                    if (!detail) {
-                        await sendReply(msg, t(lang, 'txhash_error'), {
-                            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
-                        });
-                        return;
-                    }
-
-                    const formatted = formatTxhashDetail(detail, lang, { mainAddress });
-                    const chunks = splitTelegramMessageText(formatted);
-                    for (const chunk of chunks) {
-                        await bot.sendMessage(userId, chunk, {
-                            parse_mode: 'HTML',
-                            disable_web_page_preview: true,
-                            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
-                        });
-                    }
+                    await deliverTxhashDetail({
+                        chatId: txhashState.chatId,
+                        lang: effectiveLang,
+                        txHash: rawHash,
+                        chainIndex: txhashState.chainIndex,
+                        replyContextMessage: txhashState.replyContextMessage || msg
+                    });
                     txhashWizardStates.delete(userId);
                 } catch (error) {
                     console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
-                    await sendReply(msg, t(lang, 'txhash_error'), {
-                        reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+                    await sendReply(msg, t(effectiveLang, 'txhash_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
                     });
                 }
                 return;
