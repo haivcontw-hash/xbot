@@ -2714,21 +2714,23 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang, context = nu
             break;
         }
         case 'candles': {
-            result.listEntries = entries
-                .slice(0, WALLET_TOKEN_CANDLE_RECENT_LIMIT)
-                .map(formatWalletTokenCandleEntry)
-                .filter(Boolean);
-            result.listLabel = t(lang, 'wallet_token_action_candles_label_recent', { hours: 24 }) || actionLabel;
+            const candleInsights = buildWalletTokenCandleInsights(entries, lang, {
+                windowLabel: t(lang, 'wallet_token_action_candles_label_recent', { hours: 24 }),
+                defaultWindowLabel: '24h'
+            });
+            result.listEntries = candleInsights.entries;
+            result.listLabel = candleInsights.label || actionLabel;
             break;
         }
         case 'historical_candles': {
-            result.listEntries = entries
-                .slice(0, WALLET_TOKEN_CANDLE_DAY_SPAN)
-                .map(formatWalletTokenCandleEntry)
-                .filter(Boolean);
-            result.listLabel = t(lang, 'wallet_token_action_historical_candles_label', {
-                days: WALLET_TOKEN_CANDLE_DAY_SPAN
-            }) || actionLabel;
+            const candleInsights = buildWalletTokenCandleInsights(entries, lang, {
+                windowLabel: t(lang, 'wallet_token_action_historical_candles_label', {
+                    days: WALLET_TOKEN_CANDLE_DAY_SPAN
+                }),
+                defaultWindowLabel: `${WALLET_TOKEN_CANDLE_DAY_SPAN}D`
+            });
+            result.listEntries = candleInsights.entries;
+            result.listLabel = candleInsights.label || actionLabel;
             break;
         }
         case 'token_info': {
@@ -3278,41 +3280,201 @@ function formatWalletTokenPriceInfoEntry(row, index = 0) {
     return `${index + 1}. ${label}${parts.length > 0 ? ` — ${parts.join(' | ')}` : ''}`;
 }
 
-function formatWalletTokenCandleEntry(row) {
-    if (!row) {
+function buildWalletTokenCandleInsights(entries, lang, options = {}) {
+    const { windowLabel, defaultWindowLabel } = options;
+    const normalizedCandles = normalizeWalletTokenCandles(entries);
+    const analysis = analyzeWalletTokenCandles(normalizedCandles);
+
+    if (!analysis || normalizedCandles.length === 0) {
+        return { entries: [], label: windowLabel || defaultWindowLabel };
+    }
+
+    const label = (windowLabel || defaultWindowLabel || '').trim();
+    const summary = formatWalletTokenCandleSummary(normalizedCandles, analysis, lang, label);
+    const detail = formatWalletTokenCandleDetailLines(analysis, lang);
+
+    return {
+        entries: [summary, ...detail].filter(Boolean),
+        label,
+    };
+}
+
+function normalizeWalletTokenCandles(entries) {
+    if (!Array.isArray(entries)) {
+        return [];
+    }
+
+    const normalized = [];
+
+    for (const row of entries) {
+        if (!row) {
+            continue;
+        }
+
+        let timestamp;
+        let open;
+        let high;
+        let low;
+        let close;
+        let volume;
+
+        if (Array.isArray(row)) {
+            [timestamp, open, high, low, close, volume] = row;
+        } else {
+            timestamp = row.ts || row.timestamp || row.time;
+            open = row.open || row.o;
+            high = row.high || row.h;
+            low = row.low || row.l;
+            close = row.close || row.c;
+            volume = row.volume || row.v;
+        }
+
+        if (timestamp === undefined || timestamp === null) {
+            continue;
+        }
+
+        normalized.push({
+            time: timestamp,
+            open: Number(open),
+            high: Number(high),
+            low: Number(low),
+            close: Number(close),
+            volume: Number(volume),
+        });
+    }
+
+    return normalized.filter((row) => Number.isFinite(row.open) && Number.isFinite(row.close));
+}
+
+function analyzeWalletTokenCandles(candles) {
+    if (!Array.isArray(candles) || candles.length === 0) {
         return null;
     }
 
-    let timestamp;
-    let open;
-    let high;
-    let low;
-    let close;
-    let volume;
+    const sorted = [...candles].sort((a, b) => (b.time || 0) - (a.time || 0));
+    const newest = sorted[0];
+    const oldest = sorted[sorted.length - 1];
 
-    if (Array.isArray(row)) {
-        [timestamp, open, high, low, close, volume] = row;
-    } else {
-        timestamp = row.ts || row.timestamp || row.time;
-        open = row.open || row.o;
-        high = row.high || row.h;
-        low = row.low || row.l;
-        close = row.close || row.c;
-        volume = row.volume || row.v;
+    const startPrice = oldest.open;
+    const finalPrice = newest.close;
+
+    const stats = sorted.reduce(
+        (acc, candle) => {
+            acc.overallHigh = Math.max(acc.overallHigh, candle.high);
+            acc.overallLow = Math.min(acc.overallLow, candle.low);
+            acc.totalVolume += Number.isFinite(candle.volume) ? candle.volume : 0;
+
+            if (Number.isFinite(candle.volume) && candle.volume > acc.maxVolume.volume) {
+                acc.maxVolume = { volume: candle.volume, time: candle.time };
+            }
+
+            return acc;
+        },
+        {
+            overallHigh: -Infinity,
+            overallLow: Infinity,
+            totalVolume: 0,
+            maxVolume: { volume: 0, time: null },
+        }
+    );
+
+    const netChange = finalPrice - startPrice;
+    const percentChange = startPrice !== 0 ? (netChange / startPrice) * 100 : 0;
+
+    return {
+        startPrice,
+        finalPrice,
+        netChange,
+        percentChange,
+        ...stats,
+    };
+}
+
+function formatWalletTokenCandleSummary(candles, analysis, lang, windowLabel = '') {
+    const trend = describeWalletTokenCandleTrend(analysis.percentChange, lang);
+    const start = formatCandleNumber(analysis.startPrice);
+    const end = formatCandleNumber(analysis.finalPrice);
+    const pct = formatPercent(analysis.percentChange);
+    const label = windowLabel ? ` (${windowLabel})` : '';
+
+    return [
+        t(lang, 'wallet_token_action_candles_summary_title', { window: windowLabel || 'Candle' }) ||
+            `📊 Candle analysis${label}`,
+        t(lang, 'wallet_token_action_candles_summary_change', {
+            start,
+            end,
+            percent: pct,
+            trend,
+        }) || `💹 O→C: ${start} → ${end} (${pct}) — ${trend}`,
+    ]
+        .filter(Boolean)
+        .join('\n');
+}
+
+function formatWalletTokenCandleDetailLines(analysis, lang) {
+    if (!analysis) {
+        return [];
     }
 
-    const label = formatWalletTokenTimestamp(timestamp) || timestamp;
-    const parts = [
-        `O ${open ?? '—'}`,
-        `H ${high ?? '—'}`,
-        `L ${low ?? '—'}`,
-        `C ${close ?? '—'}`
-    ];
-    if (volume !== undefined && volume !== null) {
-        parts.push(`V ${volume}`);
+    const low = formatCandleNumber(analysis.overallLow);
+    const high = formatCandleNumber(analysis.overallHigh);
+    const totalVolume = formatCandleVolume(analysis.totalVolume);
+    const maxVolume = formatCandleVolume(analysis.maxVolume.volume);
+    const maxVolumeTime = formatWalletTokenTimestamp(analysis.maxVolume.time) || '—';
+
+    const rangeLine =
+        t(lang, 'wallet_token_action_candles_summary_range', { low, high }) || `📈 Range: L ${low} / H ${high}`;
+    const volumeLine =
+        t(lang, 'wallet_token_action_candles_summary_volume', {
+            total: totalVolume,
+            peak: maxVolume,
+            time: maxVolumeTime,
+        }) || `🔊 Vol: ${totalVolume} | Peak ${maxVolume} @ ${maxVolumeTime}`;
+
+    const insightLine = t(lang, 'wallet_token_action_candles_summary_support', { low, high });
+
+    return [rangeLine, volumeLine, insightLine].filter(Boolean);
+}
+
+function describeWalletTokenCandleTrend(percentChange, lang) {
+    if (!Number.isFinite(percentChange)) {
+        return '';
     }
 
-    return label ? `${label}: ${parts.join(' / ')}` : parts.join(' / ');
+    const pct = formatPercent(percentChange);
+    if (percentChange >= 5) {
+        return t(lang, 'wallet_token_action_candles_summary_trend_strong_up', { percent: pct }) ||
+            `🚀 Strong upside (${pct})`;
+    }
+    if (percentChange <= -5) {
+        return t(lang, 'wallet_token_action_candles_summary_trend_strong_down', { percent: pct }) ||
+            `🚨 Heavy sell-off (${pct})`;
+    }
+    if (percentChange > 0) {
+        return t(lang, 'wallet_token_action_candles_summary_trend_up', { percent: pct }) || `🟢 Mild rise (${pct})`;
+    }
+    return t(lang, 'wallet_token_action_candles_summary_trend_down', { percent: pct }) || `🔴 Slight dip (${pct})`;
+}
+
+function formatCandleNumber(value, decimals = 8) {
+    if (!Number.isFinite(value)) {
+        return '—';
+    }
+    return Number(value).toFixed(decimals);
+}
+
+function formatPercent(value) {
+    if (!Number.isFinite(value)) {
+        return '0.00%';
+    }
+    return `${value.toFixed(2)}%`;
+}
+
+function formatCandleVolume(value) {
+    if (!Number.isFinite(value)) {
+        return '—';
+    }
+    return new Intl.NumberFormat('en-US').format(Math.round(value));
 }
 
 function buildWalletTokenTokenInfoEntries(entry) {
