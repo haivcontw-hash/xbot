@@ -9794,49 +9794,18 @@ function startTelegramBot() {
     async function handleTxhashCommand(msg, explicitHash = null) {
         const lang = await getLang(msg);
         const text = msg.text || '';
-        const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))(?:\s+([^\s]+))?/i);
+        const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
 
         const txHash = explicitHash || (match ? match[1] : null);
-        const chainArg = match ? match[2] : null;
 
         if (!txHash) {
             await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang) });
             return;
         }
 
-        const chainIndexCandidate = Number(chainArg);
-        const chainIndex = Number.isFinite(chainIndexCandidate)
-            ? chainIndexCandidate
-            : Number.isFinite(OKX_CHAIN_INDEX)
-                ? OKX_CHAIN_INDEX
-                : OKX_CHAIN_INDEX_FALLBACK;
-
-        const query = { txHash, chainIndex };
-
-        try {
-            const payload = await callOkxDexEndpoint(
-                '/api/v6/dex/post-transaction/transaction-detail-by-txhash',
-                query,
-                { method: 'GET', allowFallback: false }
-            );
-
-            const detail = unwrapOkxFirst(payload);
-            if (!detail) {
-                throw new Error('Empty transaction detail');
-            }
-
-            const textBody = formatTxhashDetail(detail, lang);
-            const chunks = splitTelegramMessageText(textBody);
-            const primary = chunks.shift() || '';
-            await sendReply(msg, primary, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
-
-            for (const chunk of chunks) {
-                await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
-            }
-        } catch (error) {
-            console.error(`[TxHash] Failed to fetch tx ${txHash}: ${error.message}`);
-            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
-        }
+        const link = `https://www.oklink.com/multi-search#key=${encodeURIComponent(txHash)}`;
+        const formatted = t(lang, 'txhash_link', { url: escapeHtml(link) });
+        await sendReply(msg, formatted, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
     }
 
     async function handleRulesCommand(msg) {
