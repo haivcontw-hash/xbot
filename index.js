@@ -3777,7 +3777,8 @@ function formatTokenTransferDetails(entries, lang) {
         const from = row.from ? formatCopyableValueHtml(row.from) || escapeHtml(row.from) : '—';
         const to = row.to ? formatCopyableValueHtml(row.to) || escapeHtml(row.to) : '—';
         const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : '—';
-        const symbol = row.symbol || row.tokenSymbol || 'TOKEN';
+        const symbol = escapeHtml(row.symbol || row.tokenSymbol || 'TOKEN');
+        const amountLabel = `${amount} ${symbol}`.trim();
         const fromFlag = row.isFromContract ? t(lang, 'txhash_contract_flag') : '';
         const toFlag = row.isToContract ? t(lang, 'txhash_contract_flag') : '';
         const tokenContract = row.tokenContractAddress
@@ -3785,10 +3786,12 @@ function formatTokenTransferDetails(entries, lang) {
             : null;
 
         const lines = [];
-        lines.push(`💱 #${index + 1} — ${amount} ${escapeHtml(symbol)}`.trim());
-        lines.push(`${from}${fromFlag} → ${to}${toFlag}`);
+        lines.push(`💱 #${index + 1} — ${symbol}`.trim());
+        lines.push(`📤 ${t(lang, 'txhash_from_label', { address: `${from}${fromFlag}` })}`);
+        lines.push(`📥 ${t(lang, 'txhash_to_label', { address: `${to}${toFlag}` })}`);
+        lines.push(`💰 ${t(lang, 'txhash_amount_token_line', { amount: amountLabel })}`);
         if (tokenContract) {
-            lines.push(`📄 ${tokenContract}`);
+            lines.push(`📄 ${t(lang, 'txhash_token_contract_line', { contract: tokenContract })}`);
         }
         return lines.join('\n');
     }).filter(Boolean);
@@ -8664,6 +8667,31 @@ async function fetchOkx402Supported() {
         .filter(Boolean);
 }
 
+async function fetchOkxTxhashDetail(txHash, options = {}) {
+    if (!txHash || typeof txHash !== 'string') {
+        return null;
+    }
+
+    const normalized = txHash.trim();
+    if (!normalized) {
+        return null;
+    }
+
+    const chainIndex = Number.isFinite(options.chainIndex)
+        ? Number(options.chainIndex)
+        : (Number.isFinite(OKX_CHAIN_INDEX) ? Number(OKX_CHAIN_INDEX) : OKX_CHAIN_INDEX_FALLBACK);
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/post-transaction/transaction-detail-by-txhash', {
+        query: {
+            txHash: normalized,
+            chainIndex: chainIndex || undefined
+        },
+        expectOkCode: false
+    });
+
+    return unwrapOkxFirst(payload);
+}
+
 async function tryFetchOkxMarketTicker() {
     if (!OKX_MARKET_INSTRUMENT) {
         return null;
@@ -9792,22 +9820,48 @@ function startTelegramBot() {
         }
     }
 
-    async function handleTxhashCommand(msg, explicitHash = null) {
-        const lang = await getLang(msg);
-        const text = msg.text || '';
-        const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+async function handleTxhashCommand(msg, explicitHash = null) {
+    const lang = await getLang(msg);
+    const text = msg.text || '';
+    const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
 
-        const txHash = explicitHash || (match ? match[1] : null);
+    const txHash = explicitHash || (match ? match[1] : null);
 
-        if (!txHash) {
-            await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang) });
+    if (!txHash) {
+        await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang) });
+        return;
+    }
+
+    try {
+        const detail = await fetchOkxTxhashDetail(txHash);
+        if (!detail) {
+            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
             return;
         }
 
-        const link = `https://www.oklink.com/multi-search#key=${encodeURIComponent(txHash)}`;
-        const formatted = t(lang, 'txhash_link', { url: escapeHtml(link) });
-        await sendReply(msg, formatted, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+        const formatted = formatTxhashDetail(detail, lang);
+        const chunks = splitTelegramMessageText(formatted);
+        const first = chunks.shift();
+        if (first) {
+            await sendReply(msg, first, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: buildCloseKeyboard(lang)
+            });
+        }
+
+        for (const extra of chunks) {
+            await sendReply(msg, extra, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: buildCloseKeyboard(lang)
+            });
+        }
+    } catch (error) {
+        console.error(`[Txhash] Failed to fetch txhash ${txHash}: ${error.message}`);
+        await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
     }
+}
 
     async function handleRulesCommand(msg) {
         const chatId = msg.chat.id.toString();
@@ -12671,9 +12725,17 @@ function startTelegramBot() {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    const link = `https://www.oklink.com/multi-search#key=${encodeURIComponent(rawHash)}`;
-                    const formatted = t(lang, 'txhash_link', { url: escapeHtml(link) });
-                    await sendEphemeralMessage(userId, formatted, { parse_mode: 'HTML' }, 20000);
+                    const detail = await fetchOkxTxhashDetail(rawHash);
+                    if (!detail) {
+                        await sendEphemeralMessage(userId, t(lang, 'txhash_error'));
+                        return;
+                    }
+
+                    const formatted = formatTxhashDetail(detail, lang);
+                    const chunks = splitTelegramMessageText(formatted);
+                    for (const chunk of chunks) {
+                        await sendEphemeralMessage(userId, chunk, { parse_mode: 'HTML', disable_web_page_preview: true }, 30000);
+                    }
                     txhashWizardStates.delete(userId);
                 } catch (error) {
                     console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
