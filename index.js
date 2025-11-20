@@ -116,6 +116,7 @@ const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
+const tokenHolderParamStates = new Map();
 const WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS = (() => {
     const value = Number(process.env.WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS || 15000);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15000;
@@ -185,6 +186,7 @@ const WALLET_TOKEN_HISTORY_PERIOD_REQUEST_MAP = {
     '60d': '1d',
     '90d': '1d'
 };
+const TOKEN_HOLDER_LOOP_MAX_PAGES = 50;
 const WALLET_TOKEN_HISTORY_REQUEST_PERIOD_MS = {
     '1m': 60 * 1000,
     '5m': 5 * 60 * 1000,
@@ -2869,6 +2871,189 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang, context = nu
     }
 
     return result;
+}
+
+function parseTokenHolderParams(text) {
+    if (!text || typeof text !== 'string') {
+        return null;
+    }
+
+    const parts = text.trim().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) {
+        return null;
+    }
+
+    const page = Number(parts[0]);
+    const limit = Number(parts[1]);
+
+    if (!Number.isFinite(page) || !Number.isFinite(limit)) {
+        return null;
+    }
+
+    const normalizedPage = Math.max(1, Math.floor(page));
+    const normalizedLimit = Math.min(50, Math.max(1, Math.floor(limit)));
+    return { page: normalizedPage, limit: normalizedLimit };
+}
+
+async function fetchTokenHolderPositions(context, { page = 1, limit = 20 } = {}) {
+    const tokenAddress = resolveTokenContractAddress(context?.token);
+    if (!tokenAddress) {
+        throw new Error('wallet_token_missing_contract');
+    }
+
+    const chainShortName = context?.chainContext?.chainShortName || OKX_CHAIN_SHORT_NAME || 'xlayer';
+    const query = {
+        chainShortName,
+        tokenContractAddress: tokenAddress,
+        page: Math.max(1, Math.floor(page || 1)),
+        limit: Math.min(50, Math.max(1, Math.floor(limit || 20)))
+    };
+
+    const payload = await okxJsonRequest('GET', '/api/v5/xlayer/token/position-list', {
+        query,
+        auth: hasOkxCredentials,
+        expectOkCode: true
+    });
+
+    const entry = unwrapOkxFirst(payload) || payload || {};
+    const positionList = Array.isArray(entry.positionList) ? entry.positionList : [];
+
+    return {
+        ...entry,
+        positionList,
+        page: Number.isFinite(Number(entry.page)) ? Number(entry.page) : query.page,
+        limit: Number.isFinite(Number(entry.limit)) ? Number(entry.limit) : query.limit,
+        totalPage: Number.isFinite(Number(entry.totalPage)) ? Number(entry.totalPage) : null
+    };
+}
+
+function buildTokenHolderKeyboard({ tokenId, page, limit, totalPage, lang }) {
+    const rows = [];
+    const nextPage = Number.isFinite(page) ? page + 1 : 2;
+    const safeLimit = Number.isFinite(limit) ? limit : 20;
+
+    if (!totalPage || (Number.isFinite(nextPage) && (!Number.isFinite(totalPage) || nextPage <= totalPage))) {
+        rows.push([{ text: t(lang, 'token_holder_button_next'), callback_data: `token_holder_page|${tokenId}|${nextPage}|${safeLimit}|${totalPage || ''}` }]);
+    }
+
+    rows.push([{ text: t(lang, 'token_holder_button_loop'), callback_data: `token_holder_loop|${tokenId}|${Math.max(1, page || 1)}|${safeLimit}|${totalPage || ''}` }]);
+    rows.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
+
+    return { inline_keyboard: rows };
+}
+
+function buildTokenHolderMessage({ context, lang, payload, includeControls = true }) {
+    const symbol = describeDexTokenValue(context?.token || {}, lang).symbolLabel || 'Token';
+    const chainLabel = payload.chainFullName || payload.chainShortName || context?.chainLabel || formatDexChainLabel(context?.chainContext, lang);
+    const supplyText = payload.circulatingSupply !== undefined && payload.circulatingSupply !== null
+        ? formatFiatValue(payload.circulatingSupply, { maximumFractionDigits: 0 })
+        : null;
+
+    const page = Number.isFinite(payload.page) ? payload.page : 1;
+    const limit = Number.isFinite(payload.limit) ? payload.limit : payload.positionList.length;
+    const totalPage = Number.isFinite(payload.totalPage) ? payload.totalPage : null;
+
+    const lines = [];
+    lines.push(t(lang, 'token_holder_result_title', { symbol: escapeHtml(symbol) }));
+    lines.push(t(lang, 'token_holder_result_pagination', { page, total: totalPage || '?' }));
+    lines.push(t(lang, 'token_holder_result_limit', { limit }));
+    lines.push(t(lang, 'token_holder_result_chain', { chain: escapeHtml(chainLabel || '—') }));
+    if (supplyText) {
+        lines.push(t(lang, 'token_holder_result_supply', { supply: escapeHtml(supplyText) }));
+    }
+    lines.push('');
+
+    if (payload.positionList.length === 0) {
+        lines.push(t(lang, 'token_holder_result_empty'));
+    } else {
+        payload.positionList.forEach((entry, idx) => {
+            const rank = Number.isFinite(entry.rank) ? entry.rank : idx + 1;
+            const holder = entry.holderAddress || entry.address || '-';
+            const amount = entry.amount !== undefined && entry.amount !== null ? entry.amount : entry.value;
+            const valueUsd = entry.valueUsd !== undefined && entry.valueUsd !== null ? entry.valueUsd : null;
+            const change = entry.positionChange24h !== undefined && entry.positionChange24h !== null
+                ? formatPercentage(entry.positionChange24h, { signDisplay: 'exceptZero' })
+                : null;
+            const addressLabel = formatCopyableValueHtml(shortenAddress(holder));
+            const amountLabel = amount !== undefined && amount !== null ? String(amount) : '—';
+            const valueLabel = valueUsd !== null ? formatFiatValue(valueUsd, { maximumFractionDigits: 2 }) : null;
+            const changeLabel = change ? ` (${change} /24h)` : '';
+
+            lines.push(`🏷️ #${rank} • ${addressLabel}`);
+            lines.push(`💰 ${amountLabel}${valueLabel ? ` (${valueLabel})` : ''}${changeLabel}`);
+            lines.push('');
+        });
+    }
+
+    const text = splitTelegramMessageText(lines.join('\n'));
+    const replyMarkup = includeControls && context?.tokenCallbackId
+        ? buildTokenHolderKeyboard({
+            tokenId: context.tokenCallbackId,
+            page,
+            limit,
+            totalPage,
+            lang
+        })
+        : buildCloseKeyboard(lang, { backCallbackData: 'token_back' });
+
+    return { text: text[0] || '', extraTexts: text.slice(1), replyMarkup };
+}
+
+async function deliverTokenHolderPositions({ chatId, lang, context, page = 1, limit = 20, replyContextMessage = null }) {
+    const payload = await fetchTokenHolderPositions(context, { page, limit });
+    const message = buildTokenHolderMessage({ context, lang, payload, includeControls: true });
+
+    const sent = await sendMessageRespectingThread(chatId, replyContextMessage, message.text, {
+        parse_mode: 'HTML',
+        reply_markup: message.replyMarkup,
+        disable_web_page_preview: true
+    });
+
+    if (Array.isArray(message.extraTexts) && message.extraTexts.length > 0) {
+        await sendWalletTokenExtraTexts(bot, chatId, message.extraTexts, { source: replyContextMessage || sent, replyMarkup: message.replyMarkup });
+    }
+}
+
+async function deliverTokenHolderLoop({ chatId, lang, context, startPage = 1, limit = 20, totalPage = null, replyContextMessage = null }) {
+    const pages = [];
+    let currentPage = Math.max(1, Math.floor(startPage));
+    let maxPage = Number.isFinite(totalPage) && totalPage > 0 ? Math.floor(totalPage) : null;
+
+    for (let i = 0; i < TOKEN_HOLDER_LOOP_MAX_PAGES; i += 1) {
+        if (maxPage && currentPage > maxPage) {
+            break;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const payload = await fetchTokenHolderPositions(context, { page: currentPage, limit });
+        pages.push(payload);
+        maxPage = maxPage || (Number.isFinite(payload.totalPage) ? payload.totalPage : null);
+        if (!maxPage || currentPage >= maxPage) {
+            break;
+        }
+        if (!Array.isArray(payload.positionList) || payload.positionList.length === 0) {
+            break;
+        }
+        currentPage += 1;
+    }
+
+    if (pages.length === 0) {
+        await sendMessageRespectingThread(chatId, replyContextMessage, t(lang, 'token_holder_error'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' })
+        });
+        return;
+    }
+
+    for (const payload of pages) {
+        const message = buildTokenHolderMessage({ context, lang, payload, includeControls: false });
+        // eslint-disable-next-line no-await-in-loop
+        const sent = await sendMessageRespectingThread(chatId, replyContextMessage, message.text, {
+            parse_mode: 'HTML',
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' }),
+            disable_web_page_preview: true
+        });
+        // eslint-disable-next-line no-await-in-loop
+        await sendWalletTokenExtraTexts(bot, chatId, message.extraTexts, { source: replyContextMessage || sent, replyMarkup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' }) });
+    }
 }
 
 function buildWalletTokenPriceMetrics(entry, actionKey) {
@@ -9380,7 +9565,15 @@ async function startTxhashFlow({ chatId, userId, lang, sourceMessage = null, pen
     });
 }
 
-async function deliverTokenDetail({ chatId, lang, chainEntry = null, chainIndex = null, contractAddress, replyContextMessage = null }) {
+async function deliverTokenDetail({
+    chatId,
+    lang,
+    chainEntry = null,
+    chainIndex = null,
+    contractAddress,
+    replyContextMessage = null,
+    tokenLookupMode = false
+}) {
     const normalizedAddress = normalizeAddressSafe(contractAddress) || contractAddress;
     if (!normalizedAddress) {
         await sendMessageRespectingThread(chatId, replyContextMessage || null, t(lang, 'token_help_invalid'), {
@@ -9413,6 +9606,7 @@ async function deliverTokenDetail({ chatId, lang, chainEntry = null, chainIndex 
     const baseContext = {
         chainContext,
         chainLabel: formatDexChainLabel(chainContext, lang),
+        tokenLookupMode: tokenLookupMode === true,
         token: {
             tokenAddress: normalizedAddress,
             tokenContractAddress: normalizedAddress,
@@ -9490,7 +9684,8 @@ async function startTokenFlow({ chatId, userId, lang, sourceMessage = null, pend
         pendingAddress: pendingAddress || null,
         replyContextMessage: sourceMessage,
         promptMessageId: message?.message_id || null,
-        chainOptions: chainEntries
+        chainOptions: chainEntries,
+        tokenLookupMode: true
     });
 }
 
@@ -11712,6 +11907,48 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                 return;
             }
 
+            if (query.data && (query.data.startsWith('token_holder_page|') || query.data.startsWith('token_holder_loop|'))) {
+                const [, tokenId, pageRaw, limitRaw, totalRaw] = query.data.split('|');
+                const mode = query.data.startsWith('token_holder_loop|') ? 'loop' : 'page';
+                const page = Number(pageRaw);
+                const limit = Number(limitRaw);
+                const totalPage = Number(totalRaw);
+                const context = resolveWalletTokenContext(tokenId, { extend: true });
+
+                if (!context) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_holder_error'), show_alert: true });
+                    return;
+                }
+
+                try {
+                    if (mode === 'loop') {
+                        await deliverTokenHolderLoop({
+                            chatId,
+                            lang: callbackLang,
+                            context,
+                            startPage: Number.isFinite(page) && page > 0 ? page : 1,
+                            limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+                            totalPage: Number.isFinite(totalPage) && totalPage > 0 ? totalPage : null,
+                            replyContextMessage: query.message
+                        });
+                    } else {
+                        await deliverTokenHolderPositions({
+                            chatId,
+                            lang: callbackLang,
+                            context,
+                            page: Number.isFinite(page) && page > 0 ? page : 1,
+                            limit: Number.isFinite(limit) && limit > 0 ? limit : 20,
+                            replyContextMessage: query.message
+                        });
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
+                } catch (error) {
+                    console.error(`[TokenHolder] Failed to render holders: ${error.message}`);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_holder_error'), show_alert: true });
+                }
+                return;
+            }
+
             if (query.data === 'ui_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -11970,6 +12207,28 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                 const context = resolveWalletTokenContext(tokenId, { extend: true });
                 if (!context || !actionKey) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_token_action_error'), show_alert: true });
+                    return;
+                }
+
+                if (actionKey === 'holder' && context.tokenLookupMode) {
+                    const prompt = await sendMessageRespectingThread(chatId, query.message, t(callbackLang, 'token_holder_prompt'), {
+                        reply_markup: {
+                            force_reply: true,
+                            input_field_placeholder: t(callbackLang, 'token_holder_prompt_placeholder')
+                        },
+                        allow_sending_without_reply: true
+                    });
+                    const userKey = query.from?.id?.toString();
+                    if (userKey) {
+                        tokenHolderParamStates.set(userKey, {
+                            tokenId,
+                            chatId: chatId.toString(),
+                            lang: callbackLang,
+                            promptMessageId: prompt?.message_id || null,
+                            replyContextMessage: query.message
+                        });
+                    }
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_holder_prompt_cta') });
                     return;
                 }
 
@@ -13691,6 +13950,50 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                 return;
             }
 
+            const holderState = tokenHolderParamStates.get(userId);
+            if (
+                holderState &&
+                msg.chat?.id?.toString() === holderState.chatId &&
+                msg.reply_to_message?.message_id === holderState.promptMessageId
+            ) {
+                const effectiveLang = holderState.lang || lang;
+                const parsed = parseTokenHolderParams(msg.text || '');
+
+                if (!parsed) {
+                    await sendMessageRespectingThread(holderState.chatId, msg, t(effectiveLang, 'token_holder_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                    return;
+                }
+
+                const context = resolveWalletTokenContext(holderState.tokenId, { extend: true });
+                tokenHolderParamStates.delete(userId);
+
+                if (!context) {
+                    await sendMessageRespectingThread(holderState.chatId, msg, t(effectiveLang, 'token_holder_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                    return;
+                }
+
+                try {
+                    await deliverTokenHolderPositions({
+                        chatId: holderState.chatId,
+                        lang: effectiveLang,
+                        context,
+                        page: parsed.page,
+                        limit: parsed.limit,
+                        replyContextMessage: holderState.replyContextMessage || msg
+                    });
+                } catch (error) {
+                    console.error(`[TokenHolderPrompt] Failed to fetch holders: ${error.message}`);
+                    await sendMessageRespectingThread(holderState.chatId, msg, t(effectiveLang, 'token_holder_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                }
+                return;
+            }
+
             const tokenState = tokenWizardStates.get(userId);
             if (
                 tokenState &&
@@ -13725,7 +14028,8 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                         chainEntry: tokenState.chainEntry,
                         chainIndex: tokenState.chainIndex,
                         contractAddress: rawAddress,
-                        replyContextMessage: tokenState.replyContextMessage || msg
+                        replyContextMessage: tokenState.replyContextMessage || msg,
+                        tokenLookupMode: tokenState.tokenLookupMode === true
                     });
                     tokenWizardStates.delete(userId);
                 } catch (error) {
