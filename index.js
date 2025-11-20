@@ -3652,9 +3652,12 @@ function formatTxhashDetail(detail, lang, options = {}) {
     const fee = detail.txFee || detail.fee || null;
     const methodId = detail.methodId || null;
     const tokenTransfers = Array.isArray(detail.tokenTransferDetails) ? detail.tokenTransferDetails : [];
+    const internalTransfers = Array.isArray(detail.internalTransactionDetails)
+        ? detail.internalTransactionDetails
+        : [];
 
     const computedFee = deriveTxFeeLabel(fee, gasUsed, gasPrice);
-    const tokenTransferInsight = summarizeTokenTransfers(tokenTransfers, mainLower);
+    const tokenTransferInsight = summarizeTokenTransfers(tokenTransfers, mainLower, internalTransfers, symbol);
     const primaryAction = buildTxhashActionSummary(tokenTransferInsight, lang);
 
     lines.push(t(lang, 'txhash_title'));
@@ -3720,6 +3723,17 @@ function resolveTxhashPrimaryAddress(detail, providedAddress) {
     const normalizedProvided = normalizeAddressSafe(providedAddress);
     if (normalizedProvided) {
         return normalizedProvided;
+    }
+
+    if (Array.isArray(detail.tokenTransferDetails)) {
+        for (const row of detail.tokenTransferDetails) {
+            if (!row) continue;
+            if (row.isFromContract) continue;
+            const normalized = normalizeAddressSafe(row.from);
+            if (normalized) {
+                return normalized;
+            }
+        }
     }
 
     const counts = new Map();
@@ -3840,7 +3854,7 @@ function deriveTxFeeLabel(fee, gasUsed, gasPrice) {
     return null;
 }
 
-function summarizeTokenTransfers(entries, mainLower) {
+function summarizeTokenTransfers(entries, mainLower, internalEntries = [], nativeSymbol = 'TOKEN') {
     const result = {
         buys: new Map(),
         sells: new Map(),
@@ -3849,33 +3863,9 @@ function summarizeTokenTransfers(entries, mainLower) {
         otherCount: 0
     };
 
-    if (!Array.isArray(entries)) {
-        return result;
-    }
-
-    for (const row of entries) {
-        if (!row) continue;
-        const fromLower = row.from ? row.from.toLowerCase() : null;
-        const toLower = row.to ? row.to.toLowerCase() : null;
-        const symbol = (row.symbol || row.tokenSymbol || 'TOKEN').toUpperCase();
-        const amountText = row.amount !== undefined && row.amount !== null ? String(row.amount) : '—';
-        const amountNumeric = normalizeNumeric(row.amount);
-        let bucketKey = null;
-
-        if (mainLower && toLower === mainLower) {
-            bucketKey = 'buys';
-            result.buyCount += 1;
-        } else if (mainLower && fromLower === mainLower) {
-            bucketKey = 'sells';
-            result.sellCount += 1;
-        } else {
-            result.otherCount += 1;
-        }
-
-        if (!bucketKey) {
-            continue;
-        }
-
+    const addToBucket = (symbol, amountValue, bucketKey) => {
+        const amountText = amountValue !== undefined && amountValue !== null ? String(amountValue) : '—';
+        const amountNumeric = normalizeNumeric(amountValue);
         const bucket = result[bucketKey].get(symbol) || {
             count: 0,
             totalNumeric: 0,
@@ -3891,6 +3881,58 @@ function summarizeTokenTransfers(entries, mainLower) {
         }
 
         result[bucketKey].set(symbol, bucket);
+    };
+
+    if (Array.isArray(entries)) {
+        for (const row of entries) {
+            if (!row) continue;
+            const fromLower = row.from ? row.from.toLowerCase() : null;
+            const toLower = row.to ? row.to.toLowerCase() : null;
+            const symbol = (row.symbol || row.tokenSymbol || 'TOKEN').toUpperCase();
+            let bucketKey = null;
+
+            if (mainLower && toLower === mainLower) {
+                bucketKey = 'buys';
+                result.buyCount += 1;
+            } else if (mainLower && fromLower === mainLower) {
+                bucketKey = 'sells';
+                result.sellCount += 1;
+            } else {
+                result.otherCount += 1;
+            }
+
+            if (!bucketKey) {
+                continue;
+            }
+
+            addToBucket(symbol, row.amount, bucketKey);
+        }
+    }
+
+    if (Array.isArray(internalEntries)) {
+        const nativeKey = (nativeSymbol || 'NATIVE').toUpperCase();
+        for (const row of internalEntries) {
+            if (!row) continue;
+            const fromLower = row.from ? row.from.toLowerCase() : null;
+            const toLower = row.to ? row.to.toLowerCase() : null;
+            let bucketKey = null;
+
+            if (mainLower && toLower === mainLower) {
+                bucketKey = 'buys';
+                result.buyCount += 1;
+            } else if (mainLower && fromLower === mainLower) {
+                bucketKey = 'sells';
+                result.sellCount += 1;
+            } else {
+                result.otherCount += 1;
+            }
+
+            if (!bucketKey) {
+                continue;
+            }
+
+            addToBucket(nativeKey, row.amount, bucketKey);
+        }
     }
 
     return result;
