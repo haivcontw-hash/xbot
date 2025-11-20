@@ -234,11 +234,12 @@ const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
     return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
 })();
 const WALLET_TOKEN_HOLDER_LIMIT = 20;
-const WALLET_TOKEN_TRADE_LIMIT = 100;
+const WALLET_TOKEN_TRADE_LIMIT = 1;
+const WALLET_TOKEN_TX_HISTORY_LIMIT = 20;
 const WALLET_TOKEN_CANDLE_DAY_SPAN = 7;
 const WALLET_TOKEN_CANDLE_RECENT_LIMIT = 24;
 const WALLET_TOKEN_CANDLE_RECENT_BAR = '1H';
-const WALLET_TOKEN_PRICE_INFO_HISTORY_DAYS = 7;
+const WALLET_TOKEN_PRICE_INFO_HISTORY_DAYS = 1;
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -267,6 +268,12 @@ const WALLET_TOKEN_ACTIONS = [
         path: '/api/v6/dex/market/price-info',
         method: 'POST',
         bodyType: 'array'
+    },
+    {
+        key: 'wallet_history',
+        labelKey: 'wallet_token_action_wallet_history',
+        path: '/api/v6/dex/post-transaction/transactions-by-address',
+        method: 'GET'
     },
     { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST', bodyType: 'array' },
     { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'GET' }
@@ -540,6 +547,9 @@ const checkinAdminMenus = new Map();
 const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
+const txhashWizardStates = new Map();
+const rmchatBotMessages = new Map();
+const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
 
 function delay(ms) {
@@ -574,6 +584,42 @@ async function sendEphemeralMessage(chatId, text, options = {}, delayMs = 15000)
     const message = await bot.sendMessage(chatId, text, options);
     scheduleMessageDeletion(chatId, message.message_id, delayMs);
     return message;
+}
+
+function rememberRmchatMessage(collection, chatId, messageId, limit = 300) {
+    if (!chatId || !messageId) {
+        return;
+    }
+
+    const key = chatId.toString();
+    const existing = collection.get(key) || [];
+    if (!existing.includes(messageId)) {
+        const next = [...existing, messageId];
+        while (next.length > limit) {
+            next.shift();
+        }
+        collection.set(key, next);
+    }
+}
+
+async function purgeRmchatMessages(collection, chatId) {
+    if (!chatId) {
+        return 0;
+    }
+
+    const key = chatId.toString();
+    const ids = collection.get(key) || [];
+    let deleted = 0;
+    for (const id of ids) {
+        try {
+            await bot.deleteMessage(chatId, id);
+            deleted += 1;
+        } catch (error) {
+            // ignore missing permissions or missing messages
+        }
+    }
+    collection.delete(key);
+    return deleted;
 }
 
 function normalizeAddress(value) {
@@ -630,6 +676,13 @@ if (!TELEGRAM_TOKEN) {
 // db.init() sẽ được gọi trong hàm main()
 const app = express();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+const originalSendMessage = bot.sendMessage.bind(bot);
+bot.sendMessage = async (chatId, text, options = {}) => {
+    const message = await originalSendMessage(chatId, text, options);
+    rememberRmchatMessage(rmchatBotMessages, chatId, message?.message_id);
+    return message;
+};
 
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
@@ -1737,10 +1790,12 @@ function splitTelegramMessageText(text, limit = TELEGRAM_MESSAGE_SAFE_LENGTH) {
     return chunks.length > 0 ? chunks : [''];
 }
 
-async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
+async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts, options = {}) {
     if (!botInstance || !chatId || !Array.isArray(extraTexts) || extraTexts.length === 0) {
         return;
     }
+
+    const { source = null, replyMarkup = null } = options;
 
     for (const chunk of extraTexts) {
         const text = typeof chunk === 'string' ? chunk : '';
@@ -1748,7 +1803,11 @@ async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
             continue;
         }
         try {
-            await botInstance.sendMessage(chatId, text, { parse_mode: 'HTML' });
+            const messageOptions = buildThreadedOptions(source, { parse_mode: 'HTML' });
+            if (replyMarkup) {
+                messageOptions.reply_markup = replyMarkup;
+            }
+            await botInstance.sendMessage(chatId, text, messageOptions);
         } catch (error) {
             console.warn(`[WalletToken] Failed to send extra chunk: ${error.message}`);
             break;
@@ -1793,7 +1852,7 @@ async function buildWalletTokenActionResult(actionKey, context, lang) {
     }
 
     const payload = await fetchWalletTokenActionPayload(actionKey, context);
-    return normalizeWalletTokenActionResult(actionKey, payload, lang);
+    return normalizeWalletTokenActionResult(actionKey, payload, lang, context);
 }
 
 async function fetchWalletTokenActionPayload(actionKey, context) {
@@ -1849,6 +1908,23 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
         case 'latest_price':
             query.limit = Math.min(WALLET_TOKEN_TRADE_LIMIT, query.limit || WALLET_TOKEN_TRADE_LIMIT);
             break;
+        case 'wallet_history': {
+            const walletAddress = context?.wallet;
+            if (!walletAddress) {
+                throw new Error('wallet_token_missing_wallet');
+            }
+
+            query.address = query.address || walletAddress;
+            query.tokenContractAddress = query.tokenContractAddress || tokenAddress;
+
+            const chainFilter = query.chainIndex ?? query.chainId ?? query.chainShortName;
+            if (chainFilter !== undefined && chainFilter !== null) {
+                query.chains = chainFilter;
+            }
+
+            query.limit = Math.min(WALLET_TOKEN_TX_HISTORY_LIMIT, query.limit || WALLET_TOKEN_TX_HISTORY_LIMIT);
+            break;
+        }
         case 'price_info':
             if (query.limit === undefined || query.limit === null) {
                 delete query.limit;
@@ -2573,7 +2649,7 @@ function extractOkxPayloadCursor(payload) {
     return null;
 }
 
-function normalizeWalletTokenActionResult(actionKey, payload, lang) {
+function normalizeWalletTokenActionResult(actionKey, payload, lang, context = null) {
     const config = WALLET_TOKEN_ACTION_LOOKUP[actionKey];
     const actionLabel = config ? t(lang, config.labelKey) : actionKey;
     const result = {
@@ -2704,6 +2780,46 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
                 if (fallbackEntry) {
                     result.listEntries.push(fallbackEntry);
                 }
+            }
+            break;
+        }
+        case 'wallet_history': {
+            const walletAddress = context?.wallet || null;
+            const tokenAddress = resolveTokenContractAddress(context?.token) || null;
+            const tokenSymbol = describeDexTokenValue(context?.token || {}, lang).symbolLabel || primaryEntry?.symbol;
+
+            const historyEntries = collectWalletHistoryEntries(payload, tokenAddress);
+            const { entries: limitedEntries, buyStats, sellStats } = summarizeWalletHistoryEntries(
+                historyEntries,
+                walletAddress,
+                tokenSymbol
+            );
+
+            result.metrics.push({
+                label: t(lang, 'wallet_token_action_wallet_history_metric_buys'),
+                value: t(lang, 'wallet_token_action_wallet_history_metric_value', {
+                    count: buyStats.count,
+                    total: buyStats.total,
+                    symbol: tokenSymbol || 'TOKEN'
+                })
+            });
+
+            result.metrics.push({
+                label: t(lang, 'wallet_token_action_wallet_history_metric_sells'),
+                value: t(lang, 'wallet_token_action_wallet_history_metric_value', {
+                    count: sellStats.count,
+                    total: sellStats.total,
+                    symbol: tokenSymbol || 'TOKEN'
+                })
+            });
+
+            result.listEntries = limitedEntries.map((entry, index) =>
+                formatWalletHistoryEntry(entry, walletAddress, tokenSymbol, index)
+            );
+            if (result.listEntries.length > 0) {
+                result.listLabel = t(lang, 'wallet_token_action_wallet_history_list_label', {
+                    count: result.listEntries.length
+                }) || actionLabel;
             }
             break;
         }
@@ -3389,6 +3505,583 @@ function formatWalletTokenTradeEntry(row, index = 0) {
     return lines.join('\n');
 }
 
+function collectWalletHistoryEntries(payload, tokenAddress) {
+    const rawEntries = unwrapOkxData(payload) || [];
+    const tokenLower = typeof tokenAddress === 'string' ? tokenAddress.toLowerCase() : null;
+    const result = [];
+
+    for (const group of rawEntries) {
+        if (!group) {
+            continue;
+        }
+
+        const transactions = Array.isArray(group.transactionList)
+            ? group.transactionList
+            : Array.isArray(group.transactions)
+                ? group.transactions
+                : Array.isArray(group.transaction_list)
+                    ? group.transaction_list
+                    : null;
+
+        if (Array.isArray(transactions)) {
+            for (const tx of transactions) {
+                if (!tx) continue;
+                if (tokenLower && tx.tokenContractAddress && tx.tokenContractAddress.toLowerCase() !== tokenLower) {
+                    continue;
+                }
+                result.push(tx);
+            }
+            continue;
+        }
+
+        if (group.txHash) {
+            if (tokenLower && group.tokenContractAddress && group.tokenContractAddress.toLowerCase() !== tokenLower) {
+                continue;
+            }
+            result.push(group);
+        }
+    }
+
+    return result;
+}
+
+function summarizeWalletHistoryEntries(entries, walletAddress, tokenSymbol) {
+    const walletLower = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : null;
+    const sorted = [...entries].sort((a, b) => {
+        const aTime = Number(a?.txTime || a?.timestamp || a?.time || 0);
+        const bTime = Number(b?.txTime || b?.timestamp || b?.time || 0);
+        return Number.isFinite(bTime) && Number.isFinite(aTime) ? bTime - aTime : 0;
+    });
+
+    const limited = sorted.slice(0, WALLET_TOKEN_TX_HISTORY_LIMIT);
+    const buyStats = { count: 0, total: 0 };
+    const sellStats = { count: 0, total: 0 };
+
+    for (const entry of limited) {
+        const direction = classifyWalletHistoryDirection(entry, walletLower);
+        const amount = resolveWalletHistoryAmount(entry, walletLower);
+
+        if (direction === 'buy') {
+            buyStats.count += 1;
+            if (Number.isFinite(amount)) {
+                buyStats.total += amount;
+            }
+        } else if (direction === 'sell') {
+            sellStats.count += 1;
+            if (Number.isFinite(amount)) {
+                sellStats.total += amount;
+            }
+        }
+    }
+
+    return { entries: limited, buyStats, sellStats, tokenSymbol };
+}
+
+function classifyWalletHistoryDirection(entry, walletLower) {
+    if (!entry || !walletLower) {
+        return null;
+    }
+
+    const fromAddrs = Array.isArray(entry.from)
+        ? entry.from.map((item) => item?.address?.toLowerCase()).filter(Boolean)
+        : [];
+    const toAddrs = Array.isArray(entry.to)
+        ? entry.to.map((item) => item?.address?.toLowerCase()).filter(Boolean)
+        : [];
+
+    if (toAddrs.includes(walletLower)) {
+        return 'buy';
+    }
+    if (fromAddrs.includes(walletLower)) {
+        return 'sell';
+    }
+
+    return null;
+}
+
+function resolveWalletHistoryAmount(entry, walletLower) {
+    if (!entry) {
+        return null;
+    }
+
+    const direct = normalizeNumeric(entry.amount);
+    if (Number.isFinite(direct)) {
+        return direct;
+    }
+
+    const findAmount = (rows = []) => {
+        for (const row of rows) {
+            if (!row || !row.address) continue;
+            const isMatch = walletLower ? row.address.toLowerCase() === walletLower : true;
+            if (!isMatch) continue;
+            const numeric = normalizeNumeric(row.amount);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+        return null;
+    };
+
+    const toAmount = findAmount(entry.to);
+    if (Number.isFinite(toAmount)) {
+        return toAmount;
+    }
+
+    const fromAmount = findAmount(entry.from);
+    if (Number.isFinite(fromAmount)) {
+        return fromAmount;
+    }
+
+    return null;
+}
+
+function formatWalletHistoryEntry(entry, walletAddress, tokenSymbol, index = 0) {
+    if (!entry) {
+        return null;
+    }
+
+    const walletLower = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : null;
+    const direction = classifyWalletHistoryDirection(entry, walletLower);
+    const amount = resolveWalletHistoryAmount(entry, walletLower);
+    const amountLabel = amount !== null && amount !== undefined
+        ? `${amount} ${tokenSymbol || entry.symbol || ''}`.trim()
+        : '—';
+
+    const fromAddrs = Array.isArray(entry.from) ? entry.from.map((item) => item?.address).filter(Boolean) : [];
+    const toAddrs = Array.isArray(entry.to) ? entry.to.map((item) => item?.address).filter(Boolean) : [];
+    const txHash = entry.txHash || entry.txhash || entry.hash;
+    const txFee = entry.txFee || entry.fee;
+    const status = entry.txStatus || entry.status || '—';
+    const timestampLabel = formatWalletTokenTimestamp(entry.txTime || entry.timestamp || entry.time) || 'Tx';
+
+    const lines = [];
+    lines.push('—'.repeat(28));
+    const prefix = direction === 'buy' ? '🟢 Buy' : direction === 'sell' ? '🔴 Sell' : '⚪️ Tx';
+    lines.push(`${prefix} #${index + 1} — ${timestampLabel}`);
+    lines.push(`💰 ${escapeHtml(amountLabel)}`);
+    lines.push(`📡 Status: ${escapeHtml(String(status))}`);
+    if (txFee !== undefined && txFee !== null && txFee !== '') {
+        lines.push(`⛽ Fee: ${escapeHtml(String(txFee))}`);
+    }
+
+    if (fromAddrs.length > 0) {
+        const formatted = fromAddrs.map((addr) => formatCopyableValueHtml(addr) || escapeHtml(addr));
+        lines.push(`👤 From: ${formatted.join(', ')}`);
+    }
+
+    if (toAddrs.length > 0) {
+        const formatted = toAddrs.map((addr) => formatCopyableValueHtml(addr) || escapeHtml(addr));
+        lines.push(`🎯 To: ${formatted.join(', ')}`);
+    }
+
+    if (txHash) {
+        lines.push(`🔗 Tx: ${formatCopyableValueHtml(txHash) || escapeHtml(txHash)}`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatTxhashDetail(detail, lang, options = {}) {
+    const lines = [];
+    const mainAddress = resolveTxhashPrimaryAddress(detail, options.mainAddress);
+    const mainLower = mainAddress ? mainAddress.toLowerCase() : null;
+    const txHash = detail.txhash || detail.txHash || detail.hash || '—';
+    const chain = detail.chainIndex ?? detail.chainId ?? '—';
+    const status = normalizeTxStatusText(detail.txStatus);
+    const amount = detail.amount !== undefined && detail.amount !== null ? detail.amount : '0';
+    const symbol = detail.symbol || 'TOKEN';
+    const amountLabel = `${amount} ${symbol}`.trim();
+    const gasLimit = detail.gasLimit || detail.gas || null;
+    const gasUsed = detail.gasUsed || null;
+    const gasPrice = detail.gasPrice || null;
+    const fee = detail.txFee || detail.fee || null;
+    const methodId = detail.methodId || null;
+    const tokenTransfers = Array.isArray(detail.tokenTransferDetails) ? detail.tokenTransferDetails : [];
+    const internalTransfers = Array.isArray(detail.internalTransactionDetails)
+        ? detail.internalTransactionDetails
+        : [];
+
+    const computedFee = deriveTxFeeLabel(fee, gasUsed, gasPrice);
+    const tokenTransferInsight = summarizeTokenTransfers(tokenTransfers, mainLower, internalTransfers, symbol);
+    const primaryAction = buildTxhashActionSummary(tokenTransferInsight, lang);
+
+    lines.push(t(lang, 'txhash_title'));
+    lines.push(t(lang, 'txhash_hash_line', { hash: formatCopyableValueHtml(txHash) || escapeHtml(txHash) }));
+    lines.push(t(lang, 'txhash_summary_line', {
+        chain: escapeHtml(String(chain)),
+        status: escapeHtml(status),
+        amount: escapeHtml(amountLabel)
+    }));
+
+    if (mainAddress) {
+        lines.push(t(lang, 'txhash_insight_wallet', {
+            wallet: formatCopyableValueHtml(mainAddress) || escapeHtml(mainAddress)
+        }));
+    } else {
+        lines.push(t(lang, 'txhash_insight_no_wallet'));
+    }
+
+    lines.push('', t(lang, 'txhash_action_title'));
+    lines.push(primaryAction);
+    lines.push(t(lang, 'txhash_insight_buy', {
+        summary: formatTxhashTotals(tokenTransferInsight.buys, lang)
+    }));
+    lines.push(t(lang, 'txhash_insight_sell', {
+        summary: formatTxhashTotals(tokenTransferInsight.sells, lang)
+    }));
+
+    const hasFeeBlock = fee || computedFee || gasUsed || gasPrice || methodId || detail.l1OriginHash;
+    if (hasFeeBlock) {
+        lines.push('', t(lang, 'txhash_fee_header'));
+        if (fee || computedFee) {
+            lines.push(t(lang, 'txhash_fee_line', { fee: escapeHtml(String(fee || computedFee)) }));
+        }
+        if (gasUsed || gasPrice || gasLimit) {
+            lines.push(t(lang, 'txhash_gas_line', {
+                limit: gasLimit ? escapeHtml(String(gasLimit)) : '—',
+                used: gasUsed ? escapeHtml(String(gasUsed)) : '—',
+                price: gasPrice ? escapeHtml(String(gasPrice)) : '—'
+            }));
+        }
+        if (methodId) {
+            lines.push(t(lang, 'txhash_method_line', { method: escapeHtml(String(methodId)) }));
+        }
+        if (detail.l1OriginHash) {
+            lines.push(t(lang, 'txhash_l1_hash', {
+                hash: formatCopyableValueHtml(detail.l1OriginHash) || escapeHtml(String(detail.l1OriginHash))
+            }));
+        }
+    }
+
+    lines.push('', t(lang, 'txhash_token_header'));
+    const tokenDetails = formatTokenTransferDetails(detail.tokenTransferDetails, lang);
+    if (tokenDetails.length > 0) {
+        lines.push(...tokenDetails);
+    } else {
+        lines.push(t(lang, 'txhash_token_none'));
+    }
+
+    return lines.join('\n');
+}
+
+function resolveTxhashPrimaryAddress(detail, providedAddress) {
+    const normalizedProvided = normalizeAddressSafe(providedAddress);
+    if (normalizedProvided) {
+        return normalizedProvided;
+    }
+
+    if (Array.isArray(detail.fromDetails)) {
+        for (const row of detail.fromDetails) {
+            if (!row || row.isContract) continue;
+            const normalized = normalizeAddressSafe(row.address);
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+
+    if (Array.isArray(detail.tokenTransferDetails)) {
+        for (const row of detail.tokenTransferDetails) {
+            if (!row || row.isFromContract) continue;
+            const normalized = normalizeAddressSafe(row.from);
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+
+    const counts = new Map();
+    const bump = (address, weight = 1) => {
+        const normalized = normalizeAddressSafe(address);
+        if (!normalized) return;
+        const current = counts.get(normalized) || 0;
+        counts.set(normalized, current + weight);
+    };
+
+    const maybeWeigh = (address, isContract, weight = 1) => bump(address, isContract ? weight * 0.5 : weight);
+
+    if (Array.isArray(detail.fromDetails)) {
+        for (const row of detail.fromDetails) {
+            if (!row) continue;
+            maybeWeigh(row.address, row.isContract, 2);
+        }
+    }
+
+    if (Array.isArray(detail.tokenTransferDetails)) {
+        for (const row of detail.tokenTransferDetails) {
+            if (!row) continue;
+            maybeWeigh(row.from, row.isFromContract, 1.5);
+            maybeWeigh(row.to, row.isToContract);
+        }
+    }
+
+    if (Array.isArray(detail.toDetails)) {
+        for (const row of detail.toDetails) {
+            if (!row) continue;
+            maybeWeigh(row.address, row.isContract);
+        }
+    }
+
+    let bestAddress = null;
+    let bestScore = 0;
+    for (const [address, score] of counts.entries()) {
+        if (score > bestScore) {
+            bestAddress = address;
+            bestScore = score;
+        }
+    }
+
+    return bestAddress;
+}
+
+function buildTxhashActionSummary(tokenTransferInsight, lang) {
+    const pickTopToken = (map) => {
+        if (!map || !(map instanceof Map) || map.size === 0) return null;
+        let best = null;
+        for (const [symbol, bucket] of map.entries()) {
+            if (!best) {
+                best = { symbol, bucket };
+                continue;
+            }
+            const bestValue = best.bucket.hasNumeric ? best.bucket.totalNumeric : best.bucket.count;
+            const currentValue = bucket.hasNumeric ? bucket.totalNumeric : bucket.count;
+            if (currentValue > bestValue) {
+                best = { symbol, bucket };
+            }
+        }
+        if (!best) return null;
+        const amountText = best.bucket.hasNumeric
+            ? formatTokenQuantity(best.bucket.totalNumeric, { maximumFractionDigits: 8 })
+            : best.bucket.raw.join(' + ');
+        return { symbol: best.symbol, amount: amountText };
+    };
+
+    const topSell = pickTopToken(tokenTransferInsight?.sells);
+    const topBuy = pickTopToken(tokenTransferInsight?.buys);
+
+    if (topSell && topBuy) {
+        return t(lang, 'txhash_action_swap', {
+            sell: `${topSell.amount} ${topSell.symbol}`.trim(),
+            buy: `${topBuy.amount} ${topBuy.symbol}`.trim()
+        });
+    }
+
+    if (topSell) {
+        return t(lang, 'txhash_action_sell', { sell: `${topSell.amount} ${topSell.symbol}`.trim() });
+    }
+
+    if (topBuy) {
+        return t(lang, 'txhash_action_buy', { buy: `${topBuy.amount} ${topBuy.symbol}`.trim() });
+    }
+
+    return t(lang, 'txhash_action_none');
+}
+
+function normalizeTxStatusText(status) {
+    if (status === 1 || status === '1' || status === 'pending') {
+        return 'pending';
+    }
+    if (status === 2 || status === '2' || status === 'success') {
+        return 'success';
+    }
+    if (status === 3 || status === '3' || status === 'fail' || status === 'failed') {
+        return 'fail';
+    }
+    return status ? String(status) : '—';
+}
+
+function deriveTxFeeLabel(fee, gasUsed, gasPrice) {
+    if (fee !== undefined && fee !== null && fee !== '') {
+        return String(fee);
+    }
+
+    const gasUsedNumeric = normalizeNumeric(gasUsed);
+    const gasPriceNumeric = normalizeNumeric(gasPrice);
+
+    if (Number.isFinite(gasUsedNumeric) && Number.isFinite(gasPriceNumeric)) {
+        const total = gasUsedNumeric * gasPriceNumeric;
+        if (Number.isFinite(total)) {
+            return formatTokenQuantity(total, { maximumFractionDigits: 8 });
+        }
+    }
+
+    return null;
+}
+
+function summarizeTokenTransfers(entries, mainLower, internalEntries = [], nativeSymbol = 'TOKEN') {
+    const result = {
+        buys: new Map(),
+        sells: new Map(),
+        buyCount: 0,
+        sellCount: 0,
+        otherCount: 0
+    };
+
+    const addToBucket = (symbol, amountValue, bucketKey) => {
+        const amountText = amountValue !== undefined && amountValue !== null ? String(amountValue) : '—';
+        const amountNumeric = normalizeNumeric(amountValue);
+        const bucket = result[bucketKey].get(symbol) || {
+            count: 0,
+            totalNumeric: 0,
+            hasNumeric: false,
+            raw: []
+        };
+
+        bucket.count += 1;
+        bucket.raw.push(amountText);
+        if (Number.isFinite(amountNumeric)) {
+            bucket.totalNumeric += amountNumeric;
+            bucket.hasNumeric = true;
+        }
+
+        result[bucketKey].set(symbol, bucket);
+    };
+
+    if (Array.isArray(entries)) {
+        for (const row of entries) {
+            if (!row) continue;
+            const fromLower = row.from ? row.from.toLowerCase() : null;
+            const toLower = row.to ? row.to.toLowerCase() : null;
+            const symbol = (row.symbol || row.tokenSymbol || 'TOKEN').toUpperCase();
+            let bucketKey = null;
+
+            if (mainLower && toLower === mainLower) {
+                bucketKey = 'buys';
+                result.buyCount += 1;
+            } else if (mainLower && fromLower === mainLower) {
+                bucketKey = 'sells';
+                result.sellCount += 1;
+            } else {
+                result.otherCount += 1;
+            }
+
+            if (!bucketKey) {
+                continue;
+            }
+
+            addToBucket(symbol, row.amount, bucketKey);
+        }
+    }
+
+    if (Array.isArray(internalEntries)) {
+        const nativeKey = (nativeSymbol || 'NATIVE').toUpperCase();
+        for (const row of internalEntries) {
+            if (!row) continue;
+            const fromLower = row.from ? row.from.toLowerCase() : null;
+            const toLower = row.to ? row.to.toLowerCase() : null;
+            let bucketKey = null;
+
+            if (mainLower && toLower === mainLower) {
+                bucketKey = 'buys';
+                result.buyCount += 1;
+            } else if (mainLower && fromLower === mainLower) {
+                bucketKey = 'sells';
+                result.sellCount += 1;
+            } else {
+                result.otherCount += 1;
+            }
+
+            if (!bucketKey) {
+                continue;
+            }
+
+            addToBucket(nativeKey, row.amount, bucketKey);
+        }
+    }
+
+    return result;
+}
+
+function formatTxhashTotals(map, lang) {
+    const parts = [];
+    for (const [symbol, bucket] of map.entries()) {
+        const amount = bucket.hasNumeric
+            ? `${formatTokenQuantity(bucket.totalNumeric, { maximumFractionDigits: 8 })} ${symbol}`
+            : `${bucket.raw.join(' + ')} ${symbol}`;
+        const count = t(lang, 'txhash_insight_count_suffix', { count: bucket.count });
+        parts.push(`${amount} ${count}`);
+    }
+    return parts.length > 0 ? parts.join(' • ') : t(lang, 'txhash_insight_none');
+}
+
+function formatTxAddressDetails(entries, icon, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const parts = [];
+        const address = row.address ? formatCopyableValueHtml(row.address) || escapeHtml(row.address) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : null;
+        const contractFlag = row.isContract ? t(lang, 'txhash_contract_flag') : '';
+        parts.push(`${icon} #${index + 1} — ${address} ${contractFlag}`.trim());
+        if (amount) {
+            parts.push(t(lang, 'txhash_amount_line', { amount }));
+        }
+        if (row.vinIndex || row.preVoutIndex || row.voutIndex) {
+            const vin = row.vinIndex ? `vin ${escapeHtml(String(row.vinIndex))}` : null;
+            const pre = row.preVoutIndex ? `pre ${escapeHtml(String(row.preVoutIndex))}` : null;
+            const vout = row.voutIndex ? `vout ${escapeHtml(String(row.voutIndex))}` : null;
+            const meta = [vin, pre, vout].filter(Boolean).join(' | ');
+            if (meta) {
+                parts.push(meta);
+            }
+        }
+        if (row.txhash) {
+            parts.push(`↩️ ${formatCopyableValueHtml(row.txhash) || escapeHtml(String(row.txhash))}`);
+        }
+        return parts.join('\n');
+    }).filter(Boolean);
+}
+
+function formatInternalTxDetails(entries, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const from = row.from ? formatCopyableValueHtml(row.from) || escapeHtml(row.from) : '—';
+        const to = row.to ? formatCopyableValueHtml(row.to) || escapeHtml(row.to) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : '—';
+        const status = normalizeTxStatusText(row.txStatus);
+        const fromFlag = row.isFromContract ? t(lang, 'txhash_contract_flag') : '';
+        const toFlag = row.isToContract ? t(lang, 'txhash_contract_flag') : '';
+        return `🔁 #${index + 1} — ${from}${fromFlag} → ${to}${toFlag} | ${amount} | ${status}`;
+    }).filter(Boolean);
+}
+
+function formatTokenTransferDetails(entries, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const from = row.from ? formatCopyableValueHtml(row.from) || escapeHtml(row.from) : '—';
+        const to = row.to ? formatCopyableValueHtml(row.to) || escapeHtml(row.to) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : '—';
+        const symbol = escapeHtml(row.symbol || row.tokenSymbol || 'TOKEN');
+        const amountLabel = `${amount} ${symbol}`.trim();
+        const fromFlag = row.isFromContract ? t(lang, 'txhash_contract_flag') : '';
+        const toFlag = row.isToContract ? t(lang, 'txhash_contract_flag') : '';
+        const tokenContract = row.tokenContractAddress
+            ? formatCopyableValueHtml(row.tokenContractAddress) || escapeHtml(String(row.tokenContractAddress))
+            : null;
+
+        const lines = [];
+        lines.push(`💱 #${index + 1} — ${symbol}`.trim());
+        lines.push(`📤 ${t(lang, 'txhash_from_label', { address: `${from}${fromFlag}` })}`);
+        lines.push(`📥 ${t(lang, 'txhash_to_label', { address: `${to}${toFlag}` })}`);
+        lines.push(`💰 ${t(lang, 'txhash_amount_token_line', { amount: amountLabel })}`);
+        if (tokenContract) {
+            lines.push(`📄 ${t(lang, 'txhash_token_contract_line', { contract: tokenContract })}`);
+        }
+        return lines.join('\n');
+    }).filter(Boolean);
+}
+
 function resolveKnownTokenAddress(tokenKey) {
     if (!tokenKey) {
         return null;
@@ -3512,10 +4205,11 @@ const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
-    rules: { command: '/rules', icon: '📜', descKey: 'help_command_rules' },
+    rmchat: { command: '/rmchat', icon: '🧹', descKey: 'help_command_rmchat' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
+    txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
     help: { command: '/help', icon: '❓', descKey: 'help_command_help' },
@@ -3532,23 +4226,17 @@ const HELP_GROUP_DETAILS = {
         descKey: 'help_group_onboarding_desc',
         commands: ['start', 'help']
     },
-    account: {
-        icon: '🆔',
-        titleKey: 'help_group_account_title',
-        descKey: 'help_group_account_desc',
-        commands: ['register', 'mywallet', 'unregister']
+    xlayer_check: {
+        icon: '🛰️',
+        titleKey: 'help_group_xlayer_check_title',
+        descKey: 'help_group_xlayer_check_desc',
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash']
     },
     language: {
         icon: '🌐',
         titleKey: 'help_group_language_title',
         descKey: 'help_group_language_desc',
         commands: ['language']
-    },
-    insights: {
-        icon: '📈',
-        titleKey: 'help_group_insights_title',
-        descKey: 'help_group_insights_desc',
-        commands: ['rules', 'okxchains', 'okx402status']
     },
     support: {
         icon: '🎁',
@@ -3602,7 +4290,7 @@ const ADMIN_SUBCOMMANDS = [
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        groups: ['onboarding', 'account', 'language', 'insights', 'support']
+        groups: ['onboarding', 'xlayer_check', 'language', 'support']
     },
     {
         titleKey: 'help_section_checkin_title',
@@ -3617,97 +4305,64 @@ const HELP_ADMIN_SECTIONS = [
     }
 ];
 
-function wrapText(input, width) {
-    const raw = typeof input === 'string' ? input.trim() : '';
-    if (!raw) {
-        return [''];
-    }
-
-    if (raw.length <= width) {
-        return [raw];
-    }
-
-    const words = raw.split(/\s+/);
-    const lines = [];
-    let current = '';
-
-    for (const word of words) {
-        const proposed = current ? `${current} ${word}` : word;
-        if (proposed.length <= width) {
-            current = proposed;
-        } else {
-            if (current) {
-                lines.push(current);
-            }
-            if (word.length > width) {
-                lines.push(word);
-                current = '';
-            } else {
-                current = word;
-            }
-        }
-    }
-
-    if (current) {
-        lines.push(current);
-    }
-
-    return lines;
-}
-
-function buildHelpRows(lang, groupKeys) {
-    const entries = [];
-    let commandWidth = 0;
-    const maxDescWidth = 54;
-
-    for (const key of groupKeys) {
-        const detail = HELP_GROUP_DETAILS[key];
-        if (!detail) {
-            continue;
-        }
-        const title = t(lang, detail.titleKey);
-        const commandLabel = `${detail.icon} ${title}`;
-        commandWidth = Math.max(commandWidth, commandLabel.length);
-        const descriptionParts = [t(lang, detail.descKey)];
-        const commandList = (detail.commands || [])
-            .map((cmdKey) => HELP_COMMAND_DETAILS[cmdKey]?.command)
-            .filter(Boolean)
-            .join(', ');
-        if (commandList) {
-            descriptionParts.push(t(lang, 'help_group_command_hint', { commands: commandList }));
-        }
-        const description = descriptionParts.filter(Boolean).join(' ');
-        const wrappedDescription = wrapText(description, maxDescWidth);
-        entries.push({ commandLabel, descriptionLines: wrappedDescription });
-    }
-
-    if (entries.length === 0) {
+function buildHelpGroupCard(lang, groupKey) {
+    const detail = HELP_GROUP_DETAILS[groupKey];
+    if (!detail) {
         return '';
     }
 
-    const descWidth = Math.min(maxDescWidth, Math.max(...entries.map((entry) => entry.descriptionLines.reduce((max, line) => Math.max(max, line.length), 0)), 10));
-    const commandColWidth = Math.min(28, Math.max(commandWidth, 12));
-    const top = `┌─${'─'.repeat(commandColWidth)}┬─${'─'.repeat(descWidth)}┐`;
-    const bottom = `└─${'─'.repeat(commandColWidth)}┴─${'─'.repeat(descWidth)}┘`;
-    const separator = `├─${'─'.repeat(commandColWidth)}┼─${'─'.repeat(descWidth)}┤`;
-
-    const lines = [top];
-
-    entries.forEach((entry, index) => {
-        entry.descriptionLines.forEach((line, lineIndex) => {
-            const commandCell = lineIndex === 0 ? entry.commandLabel : '';
-            const paddedCommand = commandCell.padEnd(commandColWidth, ' ');
-            const paddedDesc = line.padEnd(descWidth, ' ');
-            lines.push(`│ ${paddedCommand} │ ${paddedDesc} │`);
-        });
-
-        if (index < entries.length - 1) {
-            lines.push(separator);
+    const measureDisplayLength = (text) => Array.from(text || '').length;
+    const padDisplayText = (text, width) => {
+        const raw = text || '';
+        const len = measureDisplayLength(raw);
+        if (len >= width) {
+            return raw;
         }
+        return raw + ' '.repeat(width - len);
+    };
+
+    const title = t(lang, detail.titleKey);
+    const desc = detail.descKey ? t(lang, detail.descKey) : '';
+    const lines = [`${detail.icon} <b>${escapeHtml(title)}</b>`];
+
+    if (desc) {
+        lines.push(`<i>${escapeHtml(desc)}</i>`);
+    }
+
+    const baseCommands = (detail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+    const commands = detail === HELP_GROUP_DETAILS.xlayer_check
+        ? Array.from(new Set([...baseCommands, 'txhash'].filter((key) => HELP_COMMAND_DETAILS[key])))
+        : baseCommands;
+    const headerCommand = t(lang, 'help_table_command_header');
+    const headerDesc = t(lang, 'help_table_description_header');
+
+    const commandRows = commands.map((key) => {
+        const command = HELP_COMMAND_DETAILS[key];
+        const label = command?.command ? `${command.icon ? `${command.icon} ` : ''}${command.command}` : '';
+        const description = command?.descKey ? t(lang, command.descKey) : '';
+        return { label, description };
     });
 
-    lines.push(bottom);
-    return `<pre>${escapeHtml(lines.join('\n'))}</pre>`;
+    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.label)) : [0];
+    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.description)) : [0];
+    const commandWidth = Math.min(Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0), 32);
+    const descWidth = Math.min(Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0), 70);
+
+    const tableLines = [];
+    tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} │ ${padDisplayText(headerDesc, descWidth)}`);
+    tableLines.push(`├ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+    commandRows.forEach((row) => {
+        const safeLabel = escapeHtml(padDisplayText(row.label, commandWidth));
+        const safeDesc = escapeHtml(padDisplayText(row.description || '-', descWidth));
+        tableLines.push(`│ ${safeLabel} │ ${safeDesc}`);
+    });
+    tableLines.push(`└ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+
+    lines.push('<pre>');
+    lines.push(tableLines.join('\n'));
+    lines.push('</pre>');
+
+    return lines.filter(Boolean).join('\n');
 }
 
 function buildHelpText(lang, view = 'user') {
@@ -3719,12 +4374,15 @@ function buildHelpText(lang, view = 'user') {
     lines.push(`<i>${escapeHtml(t(lang, hintKey))}</i>`);
 
     for (const section of sections) {
-        const table = buildHelpRows(lang, section.groups || []);
-        if (!table) {
+        const groupCards = (section.groups || [])
+            .map((groupKey) => buildHelpGroupCard(lang, groupKey))
+            .filter(Boolean);
+        if (groupCards.length === 0) {
             continue;
         }
 
-        lines.push('', `<b>${escapeHtml(t(lang, section.titleKey))}</b>`, table);
+        lines.push('', `<b>${escapeHtml(t(lang, section.titleKey))}</b>`);
+        lines.push(groupCards.join('\n\n'));
     }
 
     if (view === 'admin') {
@@ -3793,8 +4451,8 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     const activeGroup = validGroups.includes(selectedGroup) ? selectedGroup : (validGroups[0] || null);
     const inline_keyboard = [];
 
+    const groupButtons = [];
     for (const section of sections) {
-        const row = [];
         for (const groupKey of section.groups || []) {
             const detail = HELP_GROUP_DETAILS[groupKey];
             if (!detail) {
@@ -3802,18 +4460,22 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
             }
             const title = t(lang, detail.titleKey);
             const isActive = groupKey === activeGroup;
-            const prefix = isActive ? '🔽' : '•';
-            row.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
-        }
-        if (row.length > 0) {
-            inline_keyboard.push(row);
+            const prefix = isActive ? '✅' : '•';
+            groupButtons.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
         }
     }
 
+    for (let i = 0; i < groupButtons.length; i += 2) {
+        inline_keyboard.push(groupButtons.slice(i, i + 2));
+    }
+
     const activeDetail = activeGroup ? HELP_GROUP_DETAILS[activeGroup] : null;
-    const commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
+    let commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
+    if (activeGroup === 'xlayer_check' && HELP_COMMAND_DETAILS.txhash && !commands.includes('txhash')) {
+        commands = [...commands, 'txhash'];
+    }
     if (commands.length > 0) {
-        inline_keyboard.push([{ text: `⬇️ ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
+        inline_keyboard.push([{ text: `📌 ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
         for (let i = 0; i < commands.length; i += 2) {
             const row = [];
             for (let j = i; j < Math.min(i + 2, commands.length); j += 1) {
@@ -3831,12 +4493,12 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     }
 
     if (view === 'admin') {
-        inline_keyboard.push([{ text: t(lang, 'help_button_user'), callback_data: 'help_view|user' }]);
+        inline_keyboard.push([{ text: `🙋‍♂️ ${t(lang, 'help_button_user')}`, callback_data: 'help_view|user' }]);
     } else {
-        inline_keyboard.push([{ text: t(lang, 'help_button_admin'), callback_data: 'help_view|admin' }]);
+        inline_keyboard.push([{ text: `🛠️ ${t(lang, 'help_button_admin')}`, callback_data: 'help_view|admin' }]);
     }
 
-    inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
+    inline_keyboard.push([{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'help_close' }]);
     return { inline_keyboard };
 }
 
@@ -4003,6 +4665,17 @@ function buildUserMention(user) {
         parseMode: 'HTML'
     };
 }
+
+bot.on('message', (msg) => {
+    const chatId = msg?.chat?.id;
+    if (!chatId || !msg?.message_id) {
+        return;
+    }
+
+    if (!msg.from?.is_bot) {
+        rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
+    }
+});
 
 function buildAdminProfileLink(userId, displayName) {
     const safeName = escapeHtml(displayName || userId?.toString() || 'user');
@@ -8254,7 +8927,8 @@ async function fetchOkxSupportedChains() {
 
     return {
         aggregator: formatList(directory?.aggregator || []),
-        market: formatList(directory?.market || [])
+        market: formatList(directory?.market || []),
+        balance: formatList(directory?.balance || [])
     };
 }
 
@@ -8288,6 +8962,214 @@ async function fetchOkx402Supported() {
             return null;
         })
         .filter(Boolean);
+}
+
+async function fetchOkxTxhashDetail(txHash, options = {}) {
+    if (!txHash || typeof txHash !== 'string') {
+        return null;
+    }
+
+    const normalized = txHash.trim();
+    if (!normalized) {
+        return null;
+    }
+
+    const chainIndex = Number.isFinite(options.chainIndex)
+        ? Number(options.chainIndex)
+        : (Number.isFinite(OKX_CHAIN_INDEX) ? Number(OKX_CHAIN_INDEX) : OKX_CHAIN_INDEX_FALLBACK);
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/post-transaction/transaction-detail-by-txhash', {
+        query: {
+            txHash: normalized,
+            chainIndex: chainIndex || undefined
+        },
+        expectOkCode: false
+    });
+
+    return unwrapOkxFirst(payload);
+}
+
+async function collectTxhashChainEntries() {
+    const directory = await ensureOkxChainDirectory();
+    const combined = dedupeOkxChainEntries([
+        ...(directory?.aggregator || []),
+        ...(directory?.market || []),
+        ...(directory?.balance || [])
+    ]);
+
+    return combined.filter((entry) => Number.isFinite(entry.chainIndex));
+}
+
+function sortTxhashChainEntries(entries = []) {
+    const priority = (entry) => {
+        const keys = entry?.keys || [];
+        const aliases = entry?.aliases || [];
+        const values = [...keys, ...aliases, entry.chainShortName, entry.chainName]
+            .filter(Boolean)
+            .map((value) => value.toString().toLowerCase());
+        const isXlayer = values.some((value) => value.includes('xlayer') || value.includes('x-layer'));
+        return isXlayer ? 0 : 1;
+    };
+
+    return [...entries].sort((a, b) => {
+        const pa = priority(a);
+        const pb = priority(b);
+        if (pa !== pb) {
+            return pa - pb;
+        }
+
+        const nameA = (a?.chainShortName || a?.chainName || '').toString().toLowerCase();
+        const nameB = (b?.chainShortName || b?.chainName || '').toString().toLowerCase();
+        return nameA.localeCompare(nameB);
+    });
+}
+
+function buildTxhashChainKeyboard(lang, entries = []) {
+    const sorted = sortTxhashChainEntries(entries);
+    const buttons = sorted.map((entry) => {
+        const label = entry.chainShortName || entry.chainName || `#${entry.chainIndex}`;
+        return {
+            text: t(lang, 'txhash_chain_option', { chain: label, index: entry.chainIndex }),
+            callback_data: `txhash_chain:${entry.chainIndex}`
+        };
+    });
+
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    if (rows.length === 0) {
+        return buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' });
+    }
+
+    return appendCloseButton({ inline_keyboard: rows }, lang, { backCallbackData: 'txhash_back' });
+}
+
+function buildTxhashHashPromptText(lang, chainLabel, pendingHash = null) {
+    const parts = [t(lang, 'txhash_hash_prompt', { chain: chainLabel })];
+    if (pendingHash) {
+        parts.push(t(lang, 'txhash_hash_prefill', { hash: pendingHash }));
+    }
+    return parts.join('\n');
+}
+
+function buildRmchatKeyboard(lang) {
+    const inline_keyboard = [
+        [{ text: t(lang, 'rmchat_option_bot'), callback_data: 'rmchat:bot' }],
+        [{ text: t(lang, 'rmchat_option_user'), callback_data: 'rmchat:user' }],
+        [{ text: t(lang, 'rmchat_option_all'), callback_data: 'rmchat:all' }]
+    ];
+
+    return appendCloseButton({ inline_keyboard }, lang, { backCallbackData: 'help_back' });
+}
+
+async function executeRmchatAction({ chatId, lang, scope }) {
+    if (!chatId) {
+        return t(lang, 'rmchat_error');
+    }
+
+    let botRemoved = 0;
+    let userRemoved = 0;
+    let dataWiped = false;
+
+    if (scope === 'bot' || scope === 'all') {
+        botRemoved = await purgeRmchatMessages(rmchatBotMessages, chatId);
+    }
+
+    if (scope === 'user' || scope === 'all') {
+        userRemoved = await purgeRmchatMessages(rmchatUserMessages, chatId);
+    }
+
+    if (scope === 'all') {
+        try {
+            await db.wipeChatFootprint(chatId.toString());
+            dataWiped = true;
+        } catch (error) {
+            console.error(`[Rmchat] Failed to wipe data for ${chatId}: ${error.message}`);
+        }
+    }
+
+    if (botRemoved === 0 && userRemoved === 0 && !dataWiped) {
+        return t(lang, 'rmchat_no_messages');
+    }
+
+    return t(lang, 'rmchat_result', {
+        botCount: botRemoved,
+        userCount: userRemoved,
+        dataWiped: dataWiped ? t(lang, 'rmchat_data_yes') : t(lang, 'rmchat_data_no')
+    });
+}
+
+async function deliverTxhashDetail({ chatId, lang, txHash, chainIndex, replyContextMessage = null }) {
+    if (!chatId) {
+        return;
+    }
+
+    try {
+        const detail = await fetchOkxTxhashDetail(txHash, { chainIndex });
+        if (!detail) {
+            await sendMessageRespectingThread(chatId, replyContextMessage, t(lang, 'txhash_error'), {
+                reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+            });
+            return;
+        }
+
+        const formatted = formatTxhashDetail(detail, lang, {});
+        const chunks = splitTelegramMessageText(formatted);
+        const replyMarkup = buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' });
+
+        for (const chunk of chunks) {
+            await sendMessageRespectingThread(chatId, replyContextMessage, chunk, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: replyMarkup
+            });
+        }
+    } catch (error) {
+        console.error(`[Txhash] Failed to fetch txhash ${txHash}: ${error.message}`);
+        await sendMessageRespectingThread(chatId, replyContextMessage, t(lang, 'txhash_error'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+        });
+    }
+}
+
+async function startTxhashFlow({ chatId, userId, lang, sourceMessage = null, pendingHash = null } = {}) {
+    const targetChatId = sourceMessage?.chat?.id ?? chatId;
+    const userKey = userId ? userId.toString() : targetChatId?.toString();
+    if (!targetChatId || !userKey) {
+        return;
+    }
+
+    let chainEntries;
+    try {
+        chainEntries = await collectTxhashChainEntries();
+    } catch (error) {
+        console.error(`[Txhash] Failed to load chain directory: ${error.message}`);
+    }
+
+    if (!Array.isArray(chainEntries) || chainEntries.length === 0) {
+        await sendMessageRespectingThread(targetChatId, sourceMessage, t(lang, 'txhash_chain_missing'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'txhash_back' })
+        });
+        return;
+    }
+
+    const keyboard = buildTxhashChainKeyboard(lang, chainEntries);
+    const promptText = t(lang, 'txhash_chain_prompt');
+    const message = sourceMessage
+        ? await sendReply(sourceMessage, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard })
+        : await bot.sendMessage(targetChatId, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
+
+    txhashWizardStates.set(userKey, {
+        stage: 'chain',
+        chatId: targetChatId.toString(),
+        lang,
+        pendingHash: pendingHash || null,
+        replyContextMessage: sourceMessage,
+        promptMessageId: message?.message_id || null,
+        chainOptions: chainEntries
+    });
 }
 
 async function tryFetchOkxMarketTicker() {
@@ -8522,9 +9404,10 @@ async function ensureOkxChainDirectory() {
 }
 
 async function loadOkxChainDirectory() {
-    const [aggregator, market] = await Promise.allSettled([
+    const [aggregator, market, balance] = await Promise.allSettled([
         okxJsonRequest('GET', '/api/v6/dex/aggregator/supported/chain', { query: {}, expectOkCode: false }),
-        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false })
+        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false }),
+        okxJsonRequest('GET', '/api/v6/dex/balance/supported/chain', { query: {}, expectOkCode: false })
     ]);
 
     const normalizeList = (payload) => {
@@ -8541,7 +9424,8 @@ async function loadOkxChainDirectory() {
 
     return {
         aggregator: normalizeList(aggregator),
-        market: normalizeList(market)
+        market: normalizeList(market),
+        balance: normalizeList(balance)
     };
 }
 
@@ -9384,6 +10268,7 @@ function startTelegramBot() {
 
             const aggregatorLines = (directory.aggregator || []).slice(0, 20);
             const marketLines = (directory.market || []).slice(0, 20);
+            const balanceLines = (directory.balance || []).slice(0, 20);
 
             const lines = [
                 t(lang, 'okxchains_title'),
@@ -9391,7 +10276,10 @@ function startTelegramBot() {
                 aggregatorLines.length > 0 ? aggregatorLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
                 '',
                 t(lang, 'okxchains_market_heading'),
-                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
+                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
+                '',
+                t(lang, 'okxchains_balance_heading'),
+                balanceLines.length > 0 ? balanceLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
             ];
 
             sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
@@ -9401,42 +10289,50 @@ function startTelegramBot() {
         }
     }
 
-    async function handleOkx402StatusCommand(msg) {
-        const lang = await getLang(msg);
-        try {
-            const supported = await fetchOkx402Supported();
-            const lines = [
-                t(lang, 'okx402_title'),
-                supported && supported.length > 0
-                    ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
-                    : t(lang, 'okx402_not_supported')
-            ];
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
-        } catch (error) {
-            console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
-            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
-        }
+async function handleOkx402StatusCommand(msg) {
+    const lang = await getLang(msg);
+    try {
+        const supported = await fetchOkx402Supported();
+        const lines = [
+            t(lang, 'okx402_title'),
+            supported && supported.length > 0
+                ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
+                : t(lang, 'okx402_not_supported')
+        ];
+        sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+    } catch (error) {
+        console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
+        sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
     }
+}
 
-    async function handleRulesCommand(msg) {
+async function handleTxhashCommand(msg, explicitHash = null) {
+    const lang = await getLang(msg);
+    const text = msg.text || '';
+    const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+
+    const txHash = explicitHash || (match ? match[1] : null);
+
+    await startTxhashFlow({
+        chatId: msg.chat.id,
+        userId: msg.from?.id,
+        lang,
+        sourceMessage: msg,
+        pendingHash: txHash || null
+    });
+}
+
+    async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
-        if (!isGroupChat) {
-            await sendReply(msg, t(lang, 'rules_private_hint'));
-            return;
-        }
+        const text = [
+            t(lang, 'rmchat_title'),
+            t(lang, 'rmchat_intro')
+        ].join('\n\n');
 
-        const rules = await db.getGroupRules(chatId);
-        if (!rules) {
-            await sendReply(msg, t(lang, 'rules_not_configured'));
-            return;
-        }
-
-        const text = [t(lang, 'rules_title'), '', rules].join('\n');
         await sendReply(msg, text, {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: t(lang, 'rules_button_close'), callback_data: 'rules_close' }]] }
+            parse_mode: 'HTML',
+            reply_markup: buildRmchatKeyboard(lang)
         });
     }
 
@@ -9604,6 +10500,23 @@ function startTelegramBot() {
         registerWizardStates.set(userKey, { promptMessageId: message.message_id });
         return message;
     }
+
+    async function startTxhashWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = txhashWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        await startTxhashFlow({ chatId: userId, userId, lang: dmLang });
+        return null;
+    }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
@@ -9694,6 +10607,10 @@ function startTelegramBot() {
 
     bot.onText(/\/okxchains/, async (msg) => {
         await handleOkxChainsCommand(msg);
+    });
+
+    bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        await handleTxhashCommand(msg, null);
     });
 
     function parseDurationText(value) {
@@ -10156,8 +11073,8 @@ function startTelegramBot() {
         await handleOkx402StatusCommand(msg);
     });
 
-    bot.onText(/\/rules/, async (msg) => {
-        await handleRulesCommand(msg);
+    bot.onText(/\/rmchat/, async (msg) => {
+        await handleRmchatCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
@@ -10206,9 +11123,9 @@ function startTelegramBot() {
             await handleMyWalletCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
-        rules: async (query, lang) => {
+        rmchat: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
-            await handleRulesCommand(synthetic);
+            await handleRmchatCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         donate: async (query, lang) => {
@@ -10225,6 +11142,19 @@ function startTelegramBot() {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleOkx402StatusCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
+        },
+        txhash: async (query, lang) => {
+            try {
+                await startTxhashWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start txhash wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
         },
         unregister: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
@@ -10294,6 +11224,62 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'txhash_back') {
+                await bot.answerCallbackQuery(queryId);
+                if (chatId) {
+                    const helpText = buildHelpText(callbackLang);
+                    await bot.sendMessage(chatId, helpText, {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: true,
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                }
+                return;
+            }
+
+            if (query.data && query.data.startsWith('txhash_chain:')) {
+                const userKey = query.from.id.toString();
+                const rawIndex = query.data.split(':')[1];
+                const selectedIndex = Number(rawIndex);
+
+                const currentState = txhashWizardStates.get(userKey) || {};
+                const chainEntries = currentState.chainOptions || await collectTxhashChainEntries();
+                const chainEntry = chainEntries.find((entry) => Number(entry?.chainIndex) === Number(selectedIndex));
+
+                if (!chainEntry) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_missing'), show_alert: true });
+                    return;
+                }
+
+                const chainLabel = chainEntry.chainShortName || chainEntry.chainName || `#${chainEntry.chainIndex}`;
+                const promptText = buildTxhashHashPromptText(callbackLang, chainLabel, currentState.pendingHash);
+                const placeholder = t(callbackLang, 'txhash_help_placeholder');
+
+                const targetChatId = currentState.chatId || chatId || query.from.id.toString();
+                const prompt = await sendMessageRespectingThread(targetChatId, currentState.replyContextMessage || query.message, promptText, {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: placeholder
+                    },
+                    allow_sending_without_reply: true
+                });
+
+                txhashWizardStates.set(userKey, {
+                    stage: 'hash',
+                    chatId: targetChatId.toString(),
+                    lang: callbackLang,
+                    pendingHash: currentState.pendingHash || null,
+                    replyContextMessage: currentState.replyContextMessage || query.message,
+                    promptMessageId: prompt?.message_id || null,
+                    chainIndex: chainEntry.chainIndex,
+                    chainLabel,
+                    chainOptions: chainEntries
+                });
+
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_selected', { chain: chainLabel }) });
+                return;
+            }
+
             if (query.data === 'ui_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -10306,15 +11292,17 @@ function startTelegramBot() {
                 return;
             }
 
-            if (query.data === 'rules_close') {
-                if (query.message?.chat?.id && query.message?.message_id) {
-                    try {
-                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
-                    } catch (error) {
-                        // ignore cleanup errors
-                    }
+            if (query.data && query.data.startsWith('rmchat:')) {
+                const scope = query.data.split(':')[1];
+                const chatKey = query.message?.chat?.id;
+                const resultText = await executeRmchatAction({ chatId: chatKey, lang: callbackLang, scope });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'rmchat_action_done'), show_alert: false });
+                if (chatKey) {
+                    await sendMessageRespectingThread(chatKey, query.message, resultText, {
+                        parse_mode: 'HTML',
+                        reply_markup: buildRmchatKeyboard(callbackLang)
+                    });
                 }
-                await bot.answerCallbackQuery(queryId);
                 return;
             }
 
@@ -10556,8 +11544,11 @@ function startTelegramBot() {
                 try {
                     const actionResult = await buildWalletTokenActionResult(actionKey, context, callbackLang);
                     const menu = buildWalletTokenMenu(context, callbackLang, { actionResult });
+                    const shouldSendNew = (menu.extraTexts && menu.extraTexts.length > 0) || (menu.text && menu.text.length > 1200);
+                    const sendOptions = buildThreadedOptions(query.message, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
                     let rendered = false;
-                    if (query.message?.message_id) {
+
+                    if (!shouldSendNew && query.message?.message_id) {
                         try {
                             await bot.editMessageText(menu.text, {
                                 chat_id: chatId,
@@ -10575,11 +11566,14 @@ function startTelegramBot() {
                     }
 
                     if (!rendered) {
-                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        await bot.sendMessage(chatId, menu.text, sendOptions);
                         rendered = true;
                     }
 
-                    await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
+                    await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, {
+                        source: query.message,
+                        replyMarkup: menu.replyMarkup
+                    });
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
                     console.error(`[WalletToken] Failed to run ${actionKey}: ${error.message}`);
@@ -10605,8 +11599,12 @@ function startTelegramBot() {
                 }
 
                 const menu = buildWalletTokenMenu(context, callbackLang);
-                await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
-                await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
+                const sendOptions = buildThreadedOptions(query.message, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                await bot.sendMessage(chatId, menu.text, sendOptions);
+                await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, {
+                    source: query.message,
+                    replyMarkup: menu.replyMarkup
+                });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
             }
@@ -12206,6 +13204,52 @@ function startTelegramBot() {
                 } catch (error) {
                     console.error(`[RegisterWizard] Failed to save wallet for ${userId}: ${error.message}`);
                     await sendEphemeralMessage(userId, t(lang, 'register_help_error'));
+                }
+                return;
+            }
+
+            const txhashState = txhashWizardStates.get(userId);
+            if (
+                txhashState &&
+                txhashState.stage === 'hash' &&
+                msg.chat?.id?.toString() === txhashState.chatId &&
+                msg.reply_to_message?.message_id === txhashState.promptMessageId
+            ) {
+                const rawHash = (msg.text || '').trim();
+                const effectiveLang = txhashState.lang || lang;
+
+                if (!rawHash) {
+                    if (msg.chat.type === 'private') {
+                        await sendEphemeralMessage(userId, t(effectiveLang, 'txhash_help_invalid'));
+                    } else {
+                        await sendMessageRespectingThread(txhashState.chatId, msg, t(effectiveLang, 'txhash_help_invalid'), {
+                            reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                        });
+                    }
+                    return;
+                }
+
+                if (!txhashState.chainIndex) {
+                    await sendMessageRespectingThread(txhashState.chatId, msg, t(effectiveLang, 'txhash_chain_missing'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                    });
+                    return;
+                }
+
+                try {
+                    await deliverTxhashDetail({
+                        chatId: txhashState.chatId,
+                        lang: effectiveLang,
+                        txHash: rawHash,
+                        chainIndex: txhashState.chainIndex,
+                        replyContextMessage: txhashState.replyContextMessage || msg
+                    });
+                    txhashWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
+                    await sendReply(msg, t(effectiveLang, 'txhash_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                    });
                 }
                 return;
             }
