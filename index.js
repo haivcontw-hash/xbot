@@ -45,6 +45,7 @@ const XLAYER_WS_URLS = (process.env.XLAYER_WS_URLS || 'wss://xlayerws.okx.com|ws
 const TOKEN_PRICE_CACHE_TTL = Number(process.env.TOKEN_PRICE_CACHE_TTL || 60 * 1000);
 const DEFAULT_COMMUNITY_WALLET = '0x92809f2837f708163d375960063c8a3156fceacb';
 const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || DEFAULT_COMMUNITY_WALLET;
+const DEVELOPER_DONATION_ADDRESS = '0x92809f2837f708163d375960063c8a3156fceacb';
 const DEFAULT_DEAD_WALLET_ADDRESS = '0x000000000000000000000000000000000000dEaD';
 const DEAD_WALLET_ADDRESS = normalizeAddress(process.env.DEAD_WALLET_ADDRESS) || DEFAULT_DEAD_WALLET_ADDRESS;
 const OKX_OKB_TOKEN_ADDRESSES = (() => {
@@ -3942,6 +3943,8 @@ function formatTxhashDetail(detail, lang, options = {}) {
         lines.push(t(lang, 'txhash_token_none'));
     }
 
+    lines.push('', t(lang, 'txhash_lookup_hint'));
+
     return lines.join('\n');
 }
 
@@ -4568,17 +4571,33 @@ function buildHelpText(lang, view = 'user') {
     return lines.filter(Boolean).join('\n');
 }
 
-function buildDonateMessage(lang) {
+function buildDonateMessage(lang, { variant = 'community', groupSettings = null } = {}) {
     const lines = [];
     lines.push(`❤️ <b>${escapeHtml(t(lang, 'donate_title'))}</b>`);
     lines.push(`<i>${escapeHtml(t(lang, 'donate_description'))}</i>`);
 
+    if (variant === 'developer') {
+        lines.push('');
+        const label = t(lang, 'donate_developer_wallet_label');
+        lines.push(`<b>${escapeHtml(label)}</b>`);
+        lines.push(`<code>${escapeHtml(DEVELOPER_DONATION_ADDRESS)}</code>`);
+        lines.push(`<i>${escapeHtml(t(lang, 'donate_developer_wallet_desc'))}</i>`);
+        lines.push(`<i>${escapeHtml(t(lang, 'donate_developer_wallet_warning'))}</i>`);
+        lines.push('', `<i>${escapeHtml(t(lang, 'donate_footer'))}</i>`);
+        return lines.filter(Boolean).join('\n');
+    }
+
+    const donationSettings = groupSettings?.donation || {};
+    const communityAddress = donationSettings.address || COMMUNITY_WALLET_ADDRESS;
+    const communityNote = donationSettings.note || null;
+
     const sections = [
         {
             labelKey: 'donate_community_wallet_label',
-            descKey: 'donate_community_wallet_desc',
+            descKey: communityNote ? null : 'donate_community_wallet_desc',
+            desc: communityNote ? communityNote : null,
             warningKey: 'donate_community_wallet_warning',
-            address: COMMUNITY_WALLET_ADDRESS
+            address: communityAddress
         },
         {
             labelKey: 'donate_dead_wallet_label',
@@ -4602,6 +4621,9 @@ function buildDonateMessage(lang) {
         if (section.descKey) {
             lines.push(`<i>${escapeHtml(t(lang, section.descKey))}</i>`);
         }
+        if (section.desc) {
+            lines.push(`<i>${escapeHtml(section.desc)}</i>`);
+        }
         if (section.warningKey) {
             lines.push(`<i>${escapeHtml(t(lang, section.warningKey))}</i>`);
         }
@@ -4609,6 +4631,16 @@ function buildDonateMessage(lang) {
 
     lines.push('', `<i>${escapeHtml(t(lang, 'donate_footer'))}</i>`);
     return lines.filter(Boolean).join('\n');
+}
+
+function buildDonateKeyboard(lang) {
+    const inline_keyboard = [
+        [{ text: `/donatecm`, callback_data: 'donate_cmd|donatecm' }],
+        [{ text: `/donatedev`, callback_data: 'donate_cmd|donatedev' }],
+        [{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'donate_cmd|close' }]
+    ];
+
+    return { inline_keyboard };
 }
 
 function resolveHelpGroups(view = 'user') {
@@ -10575,8 +10607,80 @@ function startTelegramBot() {
 
     async function handleDonateCommand(msg) {
         const lang = await getLang(msg);
-        const text = buildDonateMessage(lang);
-        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: buildCloseKeyboard(lang) });
+        const chatId = msg.chat?.id?.toString();
+        const groupSettings = chatId ? await db.getGroupBotSettings(chatId) : null;
+        const text = buildDonateMessage(lang, { groupSettings });
+        await sendReply(msg, text, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: buildDonateKeyboard(lang)
+        });
+    }
+
+    async function handleDonateDevCommand(msg) {
+        const lang = await getLang(msg);
+        const text = buildDonateMessage(lang, { variant: 'developer' });
+        await sendReply(msg, text, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: buildDonateKeyboard(lang)
+        });
+    }
+
+    async function handleDonateCommunityManageCommand(msg, payload) {
+        const lang = await getLang(msg);
+        const chatId = msg.chat?.id?.toString();
+        const userId = msg.from?.id;
+        const chatType = msg.chat?.type;
+
+        if (!['group', 'supergroup'].includes(chatType)) {
+            await sendReply(msg, t(lang, 'donatecm_group_only'), { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
+        if (!chatId || !userId) {
+            return;
+        }
+
+        const isAdmin = await isGroupAdmin(chatId, userId);
+        if (!isAdmin) {
+            await bot.sendMessage(chatId, t(lang, 'donatecm_no_permission'), {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
+            return;
+        }
+
+        const args = (payload || '').trim();
+        if (!args) {
+            const settings = await db.getGroupBotSettings(chatId);
+            const donation = settings.donation || {};
+            const address = donation.address || COMMUNITY_WALLET_ADDRESS;
+            const note = donation.note || t(lang, 'donatecm_default_note');
+            const text = t(lang, 'donatecm_overview', {
+                address: escapeHtml(address),
+                note: escapeHtml(note)
+            });
+            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
+        const [addressRaw, ...noteParts] = args.split(/\s+/);
+        const normalized = normalizeAddressSafe(addressRaw);
+        if (!normalized) {
+            await sendReply(msg, t(lang, 'donatecm_invalid_wallet'), {
+                parse_mode: 'HTML',
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return;
+        }
+
+        const note = noteParts.join(' ').trim();
+        await db.updateGroupBotSettings(chatId, { donation: { address: normalized, note } });
+        await sendReply(msg, t(lang, 'donatecm_updated', { address: normalized, note: note || t(lang, 'donatecm_default_note') }), {
+            parse_mode: 'HTML',
+            reply_markup: buildCloseKeyboard(lang)
+        });
     }
 
     async function handleOkxChainsCommand(msg) {
@@ -10918,6 +11022,17 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         await handleDonateCommand(msg);
     });
 
+    // COMMAND: /donatedev - Cần async
+    bot.onText(/^\/donatedev(?:@[\w_]+)?$/, async (msg) => {
+        await handleDonateDevCommand(msg);
+    });
+
+    // COMMAND: /donatecm - Cần async
+    bot.onText(/^\/donatecm(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        const payload = match[1];
+        await handleDonateCommunityManageCommand(msg, payload);
+    });
+
     bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
@@ -11009,14 +11124,22 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         return null;
     }
 
-    async function sendAdminCommandList(targetChatId, lang, replyToMessageId = null) {
+    async function sendAdminCommandList(targetChatId, lang, replyToMessageId = null, options = {}) {
         try {
-            const cheatsheet = buildAdminCommandCheatsheet(lang);
-            await bot.sendMessage(targetChatId, cheatsheet.text, {
+            const defaultGroup = options.defaultGroup || getDefaultHelpGroup('admin');
+            const helpText = buildHelpText(lang, 'admin');
+            const replyMarkup = buildHelpKeyboard(lang, 'admin', defaultGroup);
+            const sent = await bot.sendMessage(targetChatId, helpText, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
                 reply_to_message_id: replyToMessageId,
                 allow_sending_without_reply: true,
-                reply_markup: cheatsheet.replyMarkup
+                reply_markup: replyMarkup
             });
+
+            if (sent?.chat?.id && sent?.message_id) {
+                saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'admin', group: defaultGroup });
+            }
         } catch (error) {
             console.error(`[AdminCommand] Failed to send cheatsheet to ${targetChatId}: ${error.message}`);
         }
@@ -11352,6 +11475,14 @@ async function handleTokenCommand(msg, explicitAddress = null) {
 
         if (chatType === 'private') {
             const lang = await getLang(msg);
+            const defaultGroup = mode === 'checkinadmin' ? 'admin_checkin' : getDefaultHelpGroup('admin');
+            const helpText = buildHelpText(lang, 'admin');
+            const replyMarkup = buildHelpKeyboard(lang, 'admin', defaultGroup);
+            const sent = await sendReply(msg, helpText, { parse_mode: 'HTML', reply_markup: replyMarkup });
+            if (sent?.chat?.id && sent?.message_id) {
+                saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'admin', group: defaultGroup });
+            }
+
             if (mode === 'checkinadmin') {
                 try {
                     await openAdminHub(userId, { fallbackLang });
@@ -11360,9 +11491,6 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
                     await sendReply(msg, t(lang, 'checkin_admin_command_error'));
                 }
-            } else {
-                const cheatsheet = buildAdminCommandCheatsheet(lang);
-                await sendReply(msg, cheatsheet.text, { reply_markup: cheatsheet.replyMarkup });
             }
             return;
         }
@@ -11394,7 +11522,7 @@ async function handleTokenCommand(msg, explicitAddress = null) {
             }
 
             try {
-                await sendAdminCommandList(chatId, replyLang, msg.message_id);
+                await sendAdminCommandList(chatId, replyLang, msg.message_id, { defaultGroup: 'admin_checkin' });
                 await openAdminHub(userId, { fallbackLang });
                 await sendAdminMenu(userId, chatId, { fallbackLang });
                 await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
@@ -11585,7 +11713,7 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         checkinadmin: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             synthetic.text = '/checkinadmin';
-            await handleAdminCommand(synthetic);
+            await handleAdminCommand(synthetic, { mode: 'checkinadmin' });
             return { message: t(lang, 'help_action_executed') };
         }
     };
@@ -12143,6 +12271,38 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     text: description ? `${label}: ${description}` : t(callbackLang, 'admin_action_unknown'),
                     show_alert: Boolean(description && description.length > 45)
                 });
+                return;
+            }
+
+            if (query.data.startsWith('donate_cmd|')) {
+                const [, payload] = query.data.split('|');
+                if (payload === 'close') {
+                    if (query.message?.chat?.id && query.message?.message_id) {
+                        try {
+                            await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const synthetic = buildSyntheticCommandMessage(query);
+                synthetic.text = `/${payload}`;
+                if (payload === 'donatedev') {
+                    await handleDonateDevCommand(synthetic);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'donate_action_opened') });
+                    return;
+                }
+
+                if (payload === 'donatecm') {
+                    await handleDonateCommunityManageCommand(synthetic);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'donate_action_opened') });
+                    return;
+                }
+
+                await bot.answerCallbackQuery(queryId);
                 return;
             }
 
