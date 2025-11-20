@@ -4040,7 +4040,10 @@ function buildHelpGroupCard(lang, groupKey) {
         lines.push(`<i>${escapeHtml(desc)}</i>`);
     }
 
-    const commands = (detail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+    const baseCommands = (detail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+    const commands = detail === HELP_GROUP_DETAILS.xlayer_check
+        ? Array.from(new Set([...baseCommands, 'txhash'].filter((key) => HELP_COMMAND_DETAILS[key])))
+        : baseCommands;
     const headerCommand = t(lang, 'help_table_command_header');
     const headerDesc = t(lang, 'help_table_description_header');
 
@@ -4178,7 +4181,10 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     }
 
     const activeDetail = activeGroup ? HELP_GROUP_DETAILS[activeGroup] : null;
-    const commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
+    let commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
+    if (activeGroup === 'xlayer_check' && HELP_COMMAND_DETAILS.txhash && !commands.includes('txhash')) {
+        commands = [...commands, 'txhash'];
+    }
     if (commands.length > 0) {
         inline_keyboard.push([{ text: `📌 ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
         for (let i = 0; i < commands.length; i += 2) {
