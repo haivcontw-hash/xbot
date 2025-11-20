@@ -16,6 +16,22 @@ const SCIENCE_TEMPLATES = {
         ru: 'Химия: какая формула описывает {concept}?',
         ko: '화학: 어떤 식이 {concept}을/를 나타내나요?',
         id: 'Kimia: Rumus mana yang mewakili {concept}?'
+    },
+    okx: {
+        en: 'OKX: {concept}',
+        vi: 'OKX: {concept}',
+        zh: 'OKX：{concept}',
+        ru: 'OKX: {concept}',
+        ko: 'OKX: {concept}',
+        id: 'OKX: {concept}'
+    },
+    crypto: {
+        en: 'Crypto: {concept}',
+        vi: 'Tiền mã hóa: {concept}',
+        zh: '加密货币：{concept}',
+        ru: 'Крипто: {concept}',
+        ko: '암호화폐: {concept}',
+        id: 'Kripto: {concept}'
     }
 };
 
@@ -32,6 +48,14 @@ function makeEntry(concept, formula) {
         concept: normalizeConcept(concept),
         formula
     };
+}
+
+function makeUniformConcept(text) {
+    const concept = {};
+    for (const lang of SUPPORTED_LANGS) {
+        concept[lang] = text;
+    }
+    return concept;
 }
 
 const physicsConcepts = [
@@ -2000,11 +2024,133 @@ const chemistryConcepts = [
     }, 'Cl₂ + 2OH^- → Cl^- + ClO^- + H₂O')
 ];
 
+function buildYearFactEntries(prefix, milestones) {
+    return milestones.flatMap((item) => {
+        const conceptEvent = makeUniformConcept(`${prefix} ${item.year}: ${item.title}`);
+        const conceptYear = makeUniformConcept(`${prefix} year for ${item.title}`);
+        return [
+            makeEntry(conceptEvent, item.detail),
+            makeEntry(conceptYear, String(item.year))
+        ];
+    });
+}
+
+const okxMilestones = [
+    { year: 2017, title: 'founding of OKX by Star Xu', detail: 'Star Xu launched OKX as a crypto exchange' },
+    { year: 2017, title: 'first BTC futures listed on OKX', detail: 'OKX listed BTC futures for global traders' },
+    { year: 2018, title: 'launch of the OKB utility token', detail: 'OKB was introduced as the OKX ecosystem token' },
+    { year: 2018, title: 'institutional API upgrade', detail: 'OKX rolled out faster institutional trading APIs' },
+    { year: 2018, title: 'creation of the risk shield fund', detail: 'OKX set aside an insurance fund for derivatives users' },
+    { year: 2019, title: 'Jumpstart token launch platform opened', detail: 'OKX Jumpstart began hosting token sales for new projects' },
+    { year: 2019, title: 'perpetual swaps expanded beyond BTC', detail: 'OKX added multi-asset perpetual swaps for traders' },
+    { year: 2019, title: 'tiered margin system rollout', detail: 'OKX introduced tiered margin to manage leverage safely' },
+    { year: 2019, title: 'mobile app redesign for derivatives', detail: 'OKX refreshed its app to spotlight futures and swaps' },
+    { year: 2019, title: 'matching engine latency improvement', detail: 'OKX upgraded the matching engine for sub-millisecond speed' },
+    { year: 2020, title: 'options trading desk opened', detail: 'OKX added crypto options to its derivatives suite' },
+    { year: 2020, title: 'Earn savings suite launched', detail: 'OKX released Earn to offer savings-style yields' },
+    { year: 2020, title: 'staking hub added to Earn', detail: 'OKX integrated staking products inside Earn' },
+    { year: 2020, title: 'OKChain public testnet release', detail: 'OKX opened the OKChain testnet to community users' },
+    { year: 2020, title: 'open-source OKChain node tools', detail: 'OKX published node tools for developers on OKChain' },
+    { year: 2020, title: 'unified account beta for cross-collateral', detail: 'OKX tested unified accounts to share collateral across products' },
+    { year: 2021, title: 'copy trading launched on futures', detail: 'OKX enabled copy trading for futures strategies' },
+    { year: 2021, title: 'portfolio margin mode released', detail: 'OKX delivered portfolio margin for sophisticated traders' },
+    { year: 2021, title: 'grid trading bot added', detail: 'OKX launched grid bots to automate range strategies' },
+    { year: 2021, title: 'Blockdream Ventures fund announced', detail: 'OKX created Blockdream Ventures to invest in builders' },
+    { year: 2021, title: 'DeFi hub launched for on-chain access', detail: 'OKX unveiled a DeFi hub inside its platform' },
+    { year: 2021, title: 'NFT marketplace opened in OKX app', detail: 'OKX released an NFT marketplace for primary and secondary sales' },
+    { year: 2021, title: 'Jumpstart mining campaigns introduced', detail: 'OKX added Jumpstart mining events for community rewards' },
+    { year: 2021, title: 'demo trading sandbox for beginners', detail: 'OKX rolled out demo trading accounts for practice' },
+    { year: 2022, title: 'rebrand from OKEx to OKX completed', detail: 'OKEx reintroduced itself as OKX with a new brand' },
+    { year: 2022, title: 'unified account v2 for spot and derivatives', detail: 'OKX expanded unified accounts to cover spot and derivatives' },
+    { year: 2022, title: 'Liquid Marketplace for block trades', detail: 'OKX launched Liquid Marketplace for large over-the-counter flows' },
+    { year: 2022, title: 'first proof-of-reserves attestation published', detail: 'OKX released its initial proof-of-reserves report' },
+    { year: 2022, title: 'auto-invest plan rolled out', detail: 'OKX added recurring auto-invest plans for dollar-cost averaging' },
+    { year: 2022, title: 'OKX Insights research portal expanded', detail: 'OKX expanded Insights with more market research content' },
+    { year: 2022, title: 'built-in cross-chain bridge in wallet', detail: 'OKX Wallet introduced a bridge for moving assets across chains' },
+    { year: 2022, title: 'dual investment structured products added', detail: 'OKX listed dual investment products with fixed returns' },
+    { year: 2023, title: 'OKX Wallet multichain upgrade with 50+ networks', detail: 'OKX Wallet broadened support to dozens of chains' },
+    { year: 2023, title: 'DEX aggregator launched inside wallet', detail: 'OKX aggregated DEX liquidity for better on-chain swaps' },
+    { year: 2023, title: 'NFT marketplace fee holiday for creators', detail: 'OKX ran zero-fee periods for NFT creators and traders' },
+    { year: 2023, title: 'X Layer testnet announced', detail: 'OKX revealed the X Layer testnet as its Layer 2 network' },
+    { year: 2023, title: 'trading bot marketplace opened for signals', detail: 'OKX allowed strategy providers to share bot signals' },
+    { year: 2023, title: 'On-chain Earn aggregator for DeFi yields', detail: 'OKX added an on-chain Earn aggregator for DeFi products' },
+    { year: 2023, title: 'Web3 Earn integrated staking and lending routes', detail: 'OKX Wallet offered Web3 Earn across staking and lending protocols' },
+    { year: 2023, title: 'hardware wallet support via Ledger partnership', detail: 'OKX partnered with Ledger for hardware wallet connectivity' },
+    { year: 2024, title: 'X Layer mainnet went live', detail: 'OKX brought X Layer mainnet to production' },
+    { year: 2024, title: 'X Layer ecosystem fund announced', detail: 'OKX set aside funding to grow the X Layer ecosystem' },
+    { year: 2024, title: 'OKX Wallet added account abstraction smart accounts', detail: 'OKX Wallet enabled smart-account flows via account abstraction' },
+    { year: 2024, title: 'cross-chain swap routing upgraded for X Layer', detail: 'OKX improved bridge and swap routing with X Layer paths' },
+    { year: 2024, title: 'Web3 yield aggregator added more L2 strategies', detail: 'OKX expanded yield options across Layer 2 ecosystems' },
+    { year: 2024, title: 'perpetuals risk controls tightened with tiered haircuts', detail: 'OKX refined risk controls for perpetual swaps with new haircuts' },
+    { year: 2024, title: 'institutional prime upgrade for unified liquidity', detail: 'OKX upgraded prime services to unify spot and derivatives liquidity' },
+    { year: 2024, title: 'OKB Chain support added in wallet routing', detail: 'OKX Wallet routed swaps through OKB Chain where available' },
+    { year: 2024, title: 'on-chain earn campaigns focused on X Layer projects', detail: 'OKX promoted on-chain Earn campaigns for X Layer apps' },
+    { year: 2024, title: 'proof-of-reserves cadence moved to monthly updates', detail: 'OKX committed to monthly proof-of-reserves attestations' }
+];
+
+const cryptoMilestones = [
+    { year: 2008, title: 'Bitcoin whitepaper by Satoshi Nakamoto', detail: 'Satoshi Nakamoto published the Bitcoin whitepaper' },
+    { year: 2009, title: 'Bitcoin genesis block mined', detail: 'The Bitcoin genesis block marked the network launch' },
+    { year: 2010, title: 'first Bitcoin pizza purchase', detail: 'Laszlo Hanyecz bought pizzas with BTC on May 22, 2010' },
+    { year: 2011, title: 'Litecoin launched by Charlie Lee', detail: 'Charlie Lee released Litecoin as a peer-to-peer coin' },
+    { year: 2012, title: 'first Bitcoin halving event', detail: 'Bitcoin block rewards were cut in half for the first time' },
+    { year: 2013, title: 'Ethereum whitepaper released by Vitalik', detail: 'Vitalik Buterin published the Ethereum whitepaper' },
+    { year: 2014, title: 'Mt. Gox collapse highlights custody risk', detail: 'The Mt. Gox failure underscored exchange custody risks' },
+    { year: 2014, title: 'Ethereum crowdsale funded development', detail: 'Ethereum held its crowdsale to fund the Frontier launch' },
+    { year: 2015, title: 'Ethereum Frontier mainnet live', detail: 'Ethereum shipped the Frontier network for developers' },
+    { year: 2015, title: 'MakerDAO concept introduced for DAI', detail: 'MakerDAO outlined DAI as a decentralized stablecoin' },
+    { year: 2016, title: 'The DAO hack drives Ethereum fork', detail: 'The DAO exploit led to an Ethereum hard fork and Ethereum Classic' },
+    { year: 2016, title: 'Zcash launched with zk-SNARK privacy', detail: 'Zcash debuted zk-SNARKs to power private transactions' },
+    { year: 2017, title: 'ICO boom on Ethereum', detail: 'Initial coin offerings surged on Ethereum in 2017' },
+    { year: 2017, title: 'SegWit activated on Bitcoin', detail: 'Segregated Witness activated to expand Bitcoin capacity' },
+    { year: 2017, title: 'CryptoKitties popularizes NFTs', detail: 'CryptoKitties brought NFTs mainstream on Ethereum' },
+    { year: 2018, title: 'crypto bear market after 2017 highs', detail: 'Markets retraced heavily through 2018' },
+    { year: 2018, title: 'USDC stablecoin launched', detail: 'Centre consortium introduced the USDC stablecoin' },
+    { year: 2018, title: 'Lightning Network mainnet growth', detail: 'Bitcoin Lightning Network nodes and channels expanded' },
+    { year: 2019, title: 'Binance Launchpad drives IEO trend', detail: 'Initial exchange offerings gained traction via Launchpad' },
+    { year: 2019, title: 'Ethereum PoS research accelerates', detail: 'Proof-of-Stake research for Ethereum quickened pace' },
+    { year: 2020, title: 'DeFi summer led by Compound and Uniswap', detail: 'Yield farming and AMMs boomed during DeFi summer 2020' },
+    { year: 2020, title: 'Bitcoin third halving', detail: 'Bitcoin block rewards were cut for the third time' },
+    { year: 2020, title: 'Ethereum Beacon Chain genesis', detail: 'Ethereum launched the Beacon Chain for Proof-of-Stake' },
+    { year: 2020, title: 'PayPal adds crypto buying in the US', detail: 'PayPal enabled US users to buy and hold crypto' },
+    { year: 2021, title: 'EIP-1559 fee burn live with London', detail: 'London upgrade introduced fee burn via EIP-1559' },
+    { year: 2021, title: 'El Salvador adopts Bitcoin as legal tender', detail: 'El Salvador made Bitcoin an official currency' },
+    { year: 2021, title: 'NFT bull run with artists and brands', detail: 'NFT markets surged with creators and global brands' },
+    { year: 2021, title: 'Layer-2 rollups gain traction', detail: 'Arbitrum and Optimism led the rollup adoption wave' },
+    { year: 2021, title: 'Avalanche Rush liquidity mining', detail: 'Avalanche Rush incentivized DeFi projects and liquidity' },
+    { year: 2021, title: 'Polygon rises as a scaling option', detail: 'Polygon became a popular scaling layer for Ethereum apps' },
+    { year: 2022, title: 'Terra collapse impacts stablecoins', detail: 'The fall of TerraUSD shook confidence in algorithmic stables' },
+    { year: 2022, title: 'Ethereum Merge to Proof-of-Stake', detail: 'Ethereum transitioned from Proof-of-Work to Proof-of-Stake' },
+    { year: 2022, title: 'FTX collapse sparks counterparty risk review', detail: 'The FTX bankruptcy renewed focus on custody risk' },
+    { year: 2022, title: 'OFAC sanctions Tornado Cash contracts', detail: 'Sanctions on Tornado Cash highlighted compliance debates' },
+    { year: 2022, title: 'MiCA stablecoin rules debated in the EU', detail: 'European regulators advanced MiCA discussions on stablecoins' },
+    { year: 2023, title: 'Shapella upgrade enables ETH withdrawals', detail: 'Shapella allowed validators to withdraw staked ETH' },
+    { year: 2023, title: 'Bitcoin Ordinals bring inscriptions', detail: 'Ordinals enabled NFT-style inscriptions on Bitcoin' },
+    { year: 2023, title: 'Major institutions file for spot Bitcoin ETFs', detail: 'Spot Bitcoin ETF filings accelerated among asset managers' },
+    { year: 2023, title: 'Base mainnet from Coinbase launches', detail: 'Coinbase released the Base Layer 2 mainnet' },
+    { year: 2023, title: 'EigenLayer popularizes restaking', detail: 'EigenLayer made restaking a mainstream conversation' },
+    { year: 2023, title: 'zkSync Era and other zk-rollups expand', detail: 'zk-rollup ecosystems like zkSync Era gained users' },
+    { year: 2023, title: 'Solana client diversity grows with Firedancer', detail: 'Firedancer advanced Solana client diversity efforts' },
+    { year: 2024, title: 'US spot Bitcoin ETFs approved', detail: 'Spot Bitcoin ETFs won approval in early 2024' },
+    { year: 2024, title: 'Bitcoin fourth halving occurs', detail: 'Bitcoin completed its fourth halving cycle' },
+    { year: 2024, title: 'Ethereum Dencun with proto-danksharding', detail: 'Dencun reduced rollup costs with proto-danksharding' },
+    { year: 2024, title: 'restaking projects explore shared security', detail: 'Restaking protocols explored shared security models' },
+    { year: 2024, title: 'stablecoin legislation advances globally', detail: 'Stablecoin rules progressed across multiple regions' },
+    { year: 2024, title: 'modular blockchain designs gain adoption', detail: 'Builders embraced modular blockchain architectures' },
+    { year: 2024, title: 'account abstraction wallets gain users', detail: 'Smart-account wallets using account abstraction gained users' },
+    { year: 2024, title: 'RWA tokenization pilots by institutions', detail: 'Institutions tested real-world asset tokenization pilots' }
+];
+
+const okxEntries = buildYearFactEntries('OKX milestone', okxMilestones);
+const cryptoEntries = buildYearFactEntries('Crypto history', cryptoMilestones);
+
 module.exports = {
     SCIENCE_LANGS: SUPPORTED_LANGS,
     SCIENCE_TEMPLATES,
     SCIENCE_ENTRIES: {
         physics: physicsConcepts,
-        chemistry: chemistryConcepts
+        chemistry: chemistryConcepts,
+        okx: okxEntries,
+        crypto: cryptoEntries
     }
 };

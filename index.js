@@ -364,26 +364,35 @@ const CHECKIN_GOAL_PRESETS = [
     'checkin_goal_preset_help'
 ];
 
-const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry'];
+const SCIENCE_CATEGORY_KEYS = ['physics', 'chemistry', 'okx', 'crypto'];
+const QUESTION_TYPE_KEYS = ['math', ...SCIENCE_CATEGORY_KEYS];
 
 const DEFAULT_QUESTION_WEIGHTS = (() => {
     if (Object.prototype.hasOwnProperty.call(process.env, 'CHECKIN_SCIENCE_PROBABILITY')) {
         const mathShare = Math.max(1 - CHECKIN_SCIENCE_PROBABILITY, 0);
         const scienceShare = Math.max(CHECKIN_SCIENCE_PROBABILITY, 0);
         if (mathShare + scienceShare > 0) {
-            const halfScience = scienceShare / 2;
-            return { math: mathShare, physics: halfScience, chemistry: halfScience };
+            const sharedScience = SCIENCE_CATEGORY_KEYS.length > 0
+                ? scienceShare / SCIENCE_CATEGORY_KEYS.length
+                : scienceShare;
+            return {
+                math: mathShare,
+                physics: sharedScience,
+                chemistry: sharedScience,
+                okx: sharedScience,
+                crypto: sharedScience
+            };
         }
     }
-    return { math: 2, physics: 1, chemistry: 1 };
+    return { math: 2, physics: 1, chemistry: 1, okx: 1, crypto: 1 };
 })();
 
 const QUESTION_WEIGHT_PRESETS = [
-    { math: 40, physics: 30, chemistry: 30 },
-    { math: 34, physics: 33, chemistry: 33 },
-    { math: 25, physics: 50, chemistry: 25 },
-    { math: 25, physics: 25, chemistry: 50 },
-    { math: 50, physics: 25, chemistry: 25 }
+    { math: 40, physics: 15, chemistry: 15, okx: 15, crypto: 15 },
+    { math: 34, physics: 22, chemistry: 22, okx: 11, crypto: 11 },
+    { math: 30, physics: 20, chemistry: 20, okx: 15, crypto: 15 },
+    { math: 25, physics: 25, chemistry: 25, okx: 12.5, crypto: 12.5 },
+    { math: 50, physics: 15, chemistry: 15, okx: 10, crypto: 10 }
 ];
 
 const CHECKIN_SCHEDULE_MAX_SLOTS = 6;
@@ -422,9 +431,12 @@ function getQuestionWeights(settings = null) {
     const weights = {
         math: sanitizeWeightValue(settings?.mathWeight, fallback.math),
         physics: sanitizeWeightValue(settings?.physicsWeight, fallback.physics),
-        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry)
+        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry),
+        okx: sanitizeWeightValue(settings?.okxWeight, fallback.okx),
+        crypto: sanitizeWeightValue(settings?.cryptoWeight, fallback.crypto)
     };
-    if (weights.math + weights.physics + weights.chemistry <= 0) {
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
+    if (total <= 0) {
         return { ...DEFAULT_QUESTION_WEIGHTS };
     }
     return weights;
@@ -432,31 +444,32 @@ function getQuestionWeights(settings = null) {
 
 function pickQuestionType(settings = null) {
     const weights = getQuestionWeights(settings);
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
     if (total <= 0) {
         return 'math';
     }
     const roll = Math.random() * total;
-    if (roll < weights.math) {
-        return 'math';
+    let accumulator = 0;
+    for (const key of QUESTION_TYPE_KEYS) {
+        accumulator += weights[key] || 0;
+        if (roll < accumulator) {
+            return key;
+        }
     }
-    if (roll < weights.math + weights.physics) {
-        return 'physics';
-    }
-    return 'chemistry';
+    return QUESTION_TYPE_KEYS[QUESTION_TYPE_KEYS.length - 1] || 'math';
 }
 
 function formatQuestionWeightPercentages(weights) {
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
     if (total <= 0) {
-        return { math: '0%', physics: '0%', chemistry: '0%' };
+        const zero = {};
+        QUESTION_TYPE_KEYS.forEach((key) => { zero[key] = '0%'; });
+        return zero;
     }
     const toPercent = (value) => `${Math.round((value / total) * 1000) / 10}%`;
-    return {
-        math: toPercent(weights.math),
-        physics: toPercent(weights.physics),
-        chemistry: toPercent(weights.chemistry)
-    };
+    const percents = {};
+    QUESTION_TYPE_KEYS.forEach((key) => { percents[key] = toPercent(weights[key]); });
+    return percents;
 }
 
 function normalizeTimeSlot(value) {
@@ -1611,10 +1624,15 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             || t(lang, 'wallet_balance_contract_unknown');
 
         lines.push('');
+        const tokenChainLabelRaw = formatDexChainLabel(token, lang);
+        const tokenChainLabel = (!tokenChainLabelRaw || tokenChainLabelRaw === t(lang, 'wallet_balance_chain_unknown'))
+            ? (options.chainLabel || tokenChainLabelRaw)
+            : tokenChainLabelRaw;
+
         lines.push(t(lang, 'wallet_dex_token_header', {
             index: (idx + 1).toString(),
             symbol: escapeHtml(String(symbolLabel)),
-            chain: escapeHtml(formatDexChainLabel(token, lang))
+            chain: escapeHtml(tokenChainLabel || '')
         }));
         lines.push(t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }));
         lines.push(t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }));
@@ -4386,19 +4404,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🚀',
         titleKey: 'help_group_onboarding_title',
         descKey: 'help_group_onboarding_desc',
-        commands: ['start', 'help']
+        commands: ['start', 'help', 'language']
     },
     xlayer_check: {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
         commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash']
-    },
-    language: {
-        icon: '🌐',
-        titleKey: 'help_group_language_title',
-        descKey: 'help_group_language_desc',
-        commands: ['language']
     },
     support: {
         icon: '🎁',
@@ -4452,7 +4464,7 @@ const ADMIN_SUBCOMMANDS = [
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        groups: ['onboarding', 'xlayer_check', 'language', 'support']
+        groups: ['onboarding', 'xlayer_check', 'support']
     },
     {
         titleKey: 'help_section_checkin_title',
@@ -4973,10 +4985,7 @@ function getSummaryWindowBounds(settings) {
     };
 }
 
-const SCIENCE_LANGUAGE_SET = new Set([
-    ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
-    ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
-]);
+const SCIENCE_LANGUAGE_SET = new Set(Object.values(SCIENCE_TEMPLATES).flatMap((template) => Object.keys(template || {})));
 
 
 function resolveScienceLang(lang = 'en') {
@@ -5122,7 +5131,7 @@ function generateScienceChallenge(category = 'physics', lang = 'en') {
 
 function generateCheckinChallenge(lang = 'en', questionType = null, settings = null) {
     const resolvedType = questionType || pickQuestionType(settings);
-    if (resolvedType === 'physics' || resolvedType === 'chemistry') {
+    if (resolvedType !== 'math' && SCIENCE_CATEGORY_KEYS.includes(resolvedType)) {
         return generateScienceChallenge(resolvedType, lang);
     }
     return generateMathChallenge(lang);
@@ -7234,9 +7243,12 @@ async function setAdminQuestionWeights(chatId, adminId, weights, { fallbackLang 
     const sanitized = {
         mathWeight: sanitizeWeightValue(weights.math, 0),
         physicsWeight: sanitizeWeightValue(weights.physics, 0),
-        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0)
+        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0),
+        okxWeight: sanitizeWeightValue(weights.okx, 0),
+        cryptoWeight: sanitizeWeightValue(weights.crypto, 0)
     };
-    if (sanitized.mathWeight + sanitized.physicsWeight + sanitized.chemistryWeight <= 0) {
+    const total = Object.values(sanitized).reduce((sum, value) => sum + (Number(value) || 0), 0);
+    if (total <= 0) {
         await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_invalid'));
         return;
     }
@@ -7264,9 +7276,9 @@ function parseQuestionWeightsInput(rawText) {
             .map((part) => Number(part))
             .filter((value) => Number.isFinite(value));
         if (numericParts.length >= QUESTION_TYPE_KEYS.length) {
-            values.math = numericParts[0];
-            values.physics = numericParts[1];
-            values.chemistry = numericParts[2];
+            QUESTION_TYPE_KEYS.forEach((key, index) => {
+                values[key] = numericParts[index];
+            });
         }
     }
     const weights = {};
@@ -7289,9 +7301,11 @@ function buildQuestionWeightKeyboard(chatId, lang) {
         text: t(lang, 'checkin_admin_weights_option', {
             math: `${preset.math}%`,
             physics: `${preset.physics}%`,
-            chemistry: `${preset.chemistry}%`
+            chemistry: `${preset.chemistry}%`,
+            okx: `${preset.okx}%`,
+            crypto: `${preset.crypto}%`
         }),
-        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}`
+        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}|${preset.okx}|${preset.crypto}`
     }]));
     inline_keyboard.push([{ text: t(lang, 'checkin_admin_button_custom'), callback_data: `checkin_admin_weights_custom|${chatKey}` }]);
     inline_keyboard.push([
@@ -13183,7 +13197,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 const presetWeights = {
                     math: Number(parts[2]),
                     physics: Number(parts[3]),
-                    chemistry: Number(parts[4])
+                    chemistry: Number(parts[4]),
+                    okx: Number(parts[5]),
+                    crypto: Number(parts[6])
                 };
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_updated_alert') });
                 await setAdminQuestionWeights(targetChatId, query.from.id, presetWeights, { fallbackLang: callbackLang });
