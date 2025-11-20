@@ -53,6 +53,8 @@
   "help_group_admin_checkin_desc": "Отдельная зона для чек-ина и наград, отдельно от /admin.",
   "help_group_command_hint": "Команды: {commands}",
   "help_child_command_hint": "Команды этого раздела",
+  "help_table_command_header": "Команда",
+  "help_table_description_header": "Описание",
   "help_command_start": "Снова открыть приветственную карточку в DApp и привязать кошелёк.",
   "help_command_register": "Привяжите несколько кошельков Xlayer и автоматически отслеживайте все токены в них в реальном времени.",
   "help_command_mywallet": "Показывает каждый кошелёк с актуальными балансами и конвертацией в USDT и OKB.",

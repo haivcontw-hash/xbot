@@ -54,6 +54,8 @@
   "help_group_admin_checkin_desc": "출석·보상 전용 패널로 /admin 과 분리됩니다.",
   "help_group_command_hint": "명령어: {commands}",
   "help_child_command_hint": "이 섹션의 명령",
+  "help_table_command_header": "명령어",
+  "help_table_description_header": "설명",
   "help_command_start": "DApp 환영 카드를 다시 열고 지갑을 연결합니다.",
   "help_command_register": "여러 Xlayer 지갑을 연결하고 지갑 내 모든 토큰을 실시간으로 추적합니다.",
   "help_command_mywallet": "등록된 각 지갑의 실시간 잔액과 USDT·OKB 환산 값을 확인합니다.",

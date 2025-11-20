@@ -54,6 +54,8 @@
   "help_group_admin_checkin_desc": "Khu vực riêng cho điểm danh và phần thưởng, tách biệt khỏi lệnh /admin.",
   "help_group_command_hint": "Lệnh: {commands}",
   "help_child_command_hint": "Các lệnh trong mục này",
+  "help_table_command_header": "Lệnh",
+  "help_table_description_header": "Mô tả",
   "help_command_start": "Mở lại thẻ chào mừng trong DApp và liên kết ví của bạn.",
   "help_command_register": "Liên kết nhiều ví Xlayer và tự động theo dõi mọi token trong ví theo thời gian thực.",
   "help_command_mywallet": "Hiển thị từng ví kèm số dư token quy đổi sang USDT và OKB.",

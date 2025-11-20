@@ -54,6 +54,8 @@
   "help_group_admin_checkin_desc": "Dedicated check-in controls for rewards without touching other admin tools.",
   "help_group_command_hint": "Commands: {commands}",
   "help_child_command_hint": "Commands in this section",
+  "help_table_command_header": "Command",
+  "help_table_description_header": "Description",
   "help_command_start": "Reopen the welcome card from the DApp and link your wallet.",
   "help_command_register": "Link one or more Xlayer wallets and auto-track every token balance in real time.",
   "help_command_mywallet": "Show each registered wallet with live balances converted to USDT and OKB.",

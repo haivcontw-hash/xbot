@@ -3623,6 +3623,16 @@ function buildHelpGroupCard(lang, groupKey) {
         return '';
     }
 
+    const measureDisplayLength = (text) => Array.from(text || '').length;
+    const padDisplayText = (text, width) => {
+        const raw = text || '';
+        const len = measureDisplayLength(raw);
+        if (len >= width) {
+            return raw;
+        }
+        return raw + ' '.repeat(width - len);
+    };
+
     const title = t(lang, detail.titleKey);
     const desc = detail.descKey ? t(lang, detail.descKey) : '';
     const lines = [`${detail.icon} <b>${escapeHtml(title)}</b>`];
@@ -3632,13 +3642,34 @@ function buildHelpGroupCard(lang, groupKey) {
     }
 
     const commands = (detail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
-    commands.forEach((key) => {
+    const headerCommand = t(lang, 'help_table_command_header');
+    const headerDesc = t(lang, 'help_table_description_header');
+
+    const commandRows = commands.map((key) => {
         const command = HELP_COMMAND_DETAILS[key];
-        const label = command?.command ? `<code>${escapeHtml(command.command)}</code>` : '';
+        const label = command?.command ? `${command.icon ? `${command.icon} ` : ''}${command.command}` : '';
         const description = command?.descKey ? t(lang, command.descKey) : '';
-        const prefix = command?.icon ? `${command.icon} ` : '';
-        lines.push(`${prefix}${label}${description ? ` — ${escapeHtml(description)}` : ''}`);
+        return { label, description };
     });
+
+    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.label)) : [0];
+    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.description)) : [0];
+    const commandWidth = Math.min(Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0), 32);
+    const descWidth = Math.min(Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0), 70);
+
+    const tableLines = [];
+    tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} │ ${padDisplayText(headerDesc, descWidth)}`);
+    tableLines.push(`├ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+    commandRows.forEach((row) => {
+        const safeLabel = escapeHtml(padDisplayText(row.label, commandWidth));
+        const safeDesc = escapeHtml(padDisplayText(row.description || '-', descWidth));
+        tableLines.push(`│ ${safeLabel} │ ${safeDesc}`);
+    });
+    tableLines.push(`└ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+
+    lines.push('<pre>');
+    lines.push(tableLines.join('\n'));
+    lines.push('</pre>');
 
     return lines.filter(Boolean).join('\n');
 }

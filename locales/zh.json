@@ -53,6 +53,8 @@
   "help_group_admin_checkin_desc": "签到与奖励专用面板，与 /admin 分开。",
   "help_group_command_hint": "指令：{commands}",
   "help_child_command_hint": "本分组可用指令",
+  "help_table_command_header": "指令",
+  "help_table_description_header": "说明",
   "help_command_start": "重新打开 DApp 欢迎卡片并绑定你的钱包。",
   "help_command_register": "绑定多个 Xlayer 钱包并实时自动跟踪其中的所有代币。",
   "help_command_mywallet": "查看每个已登记钱包的实时余额及折算成 USDT、OKB 的数值。",
