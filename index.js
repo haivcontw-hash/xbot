@@ -234,7 +234,8 @@ const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
     return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
 })();
 const WALLET_TOKEN_HOLDER_LIMIT = 20;
-const WALLET_TOKEN_TRADE_LIMIT = 100;
+const WALLET_TOKEN_TRADE_LIMIT = 1;
+const WALLET_TOKEN_TX_HISTORY_LIMIT = 20;
 const WALLET_TOKEN_CANDLE_DAY_SPAN = 7;
 const WALLET_TOKEN_CANDLE_RECENT_LIMIT = 24;
 const WALLET_TOKEN_CANDLE_RECENT_BAR = '1H';
@@ -267,6 +268,12 @@ const WALLET_TOKEN_ACTIONS = [
         path: '/api/v6/dex/market/price-info',
         method: 'POST',
         bodyType: 'array'
+    },
+    {
+        key: 'wallet_history',
+        labelKey: 'wallet_token_action_wallet_history',
+        path: '/api/v6/dex/post-transaction/transactions-by-address',
+        method: 'GET'
     },
     { key: 'token_info', labelKey: 'wallet_token_action_token_info', path: '/api/v6/dex/market/token/basic-info', method: 'POST', bodyType: 'array' },
     { key: 'holder', labelKey: 'wallet_token_action_holder', path: '/api/v6/dex/market/token/holder', method: 'GET' }
@@ -1799,7 +1806,7 @@ async function buildWalletTokenActionResult(actionKey, context, lang) {
     }
 
     const payload = await fetchWalletTokenActionPayload(actionKey, context);
-    return normalizeWalletTokenActionResult(actionKey, payload, lang);
+    return normalizeWalletTokenActionResult(actionKey, payload, lang, context);
 }
 
 async function fetchWalletTokenActionPayload(actionKey, context) {
@@ -1855,6 +1862,23 @@ async function fetchWalletTokenActionPayload(actionKey, context) {
         case 'latest_price':
             query.limit = Math.min(WALLET_TOKEN_TRADE_LIMIT, query.limit || WALLET_TOKEN_TRADE_LIMIT);
             break;
+        case 'wallet_history': {
+            const walletAddress = context?.wallet;
+            if (!walletAddress) {
+                throw new Error('wallet_token_missing_wallet');
+            }
+
+            query.address = query.address || walletAddress;
+            query.tokenContractAddress = query.tokenContractAddress || tokenAddress;
+
+            const chainFilter = query.chainIndex ?? query.chainId ?? query.chainShortName;
+            if (chainFilter !== undefined && chainFilter !== null) {
+                query.chains = chainFilter;
+            }
+
+            query.limit = Math.min(WALLET_TOKEN_TX_HISTORY_LIMIT, query.limit || WALLET_TOKEN_TX_HISTORY_LIMIT);
+            break;
+        }
         case 'price_info':
             if (query.limit === undefined || query.limit === null) {
                 delete query.limit;
@@ -2579,7 +2603,7 @@ function extractOkxPayloadCursor(payload) {
     return null;
 }
 
-function normalizeWalletTokenActionResult(actionKey, payload, lang) {
+function normalizeWalletTokenActionResult(actionKey, payload, lang, context = null) {
     const config = WALLET_TOKEN_ACTION_LOOKUP[actionKey];
     const actionLabel = config ? t(lang, config.labelKey) : actionKey;
     const result = {
@@ -2710,6 +2734,46 @@ function normalizeWalletTokenActionResult(actionKey, payload, lang) {
                 if (fallbackEntry) {
                     result.listEntries.push(fallbackEntry);
                 }
+            }
+            break;
+        }
+        case 'wallet_history': {
+            const walletAddress = context?.wallet || null;
+            const tokenAddress = resolveTokenContractAddress(context?.token) || null;
+            const tokenSymbol = describeDexTokenValue(context?.token || {}, lang).symbolLabel || primaryEntry?.symbol;
+
+            const historyEntries = collectWalletHistoryEntries(payload, tokenAddress);
+            const { entries: limitedEntries, buyStats, sellStats } = summarizeWalletHistoryEntries(
+                historyEntries,
+                walletAddress,
+                tokenSymbol
+            );
+
+            result.metrics.push({
+                label: t(lang, 'wallet_token_action_wallet_history_metric_buys'),
+                value: t(lang, 'wallet_token_action_wallet_history_metric_value', {
+                    count: buyStats.count,
+                    total: buyStats.total,
+                    symbol: tokenSymbol || 'TOKEN'
+                })
+            });
+
+            result.metrics.push({
+                label: t(lang, 'wallet_token_action_wallet_history_metric_sells'),
+                value: t(lang, 'wallet_token_action_wallet_history_metric_value', {
+                    count: sellStats.count,
+                    total: sellStats.total,
+                    symbol: tokenSymbol || 'TOKEN'
+                })
+            });
+
+            result.listEntries = limitedEntries.map((entry, index) =>
+                formatWalletHistoryEntry(entry, walletAddress, tokenSymbol, index)
+            );
+            if (result.listEntries.length > 0) {
+                result.listLabel = t(lang, 'wallet_token_action_wallet_history_list_label', {
+                    count: result.listEntries.length
+                }) || actionLabel;
             }
             break;
         }
@@ -3395,6 +3459,340 @@ function formatWalletTokenTradeEntry(row, index = 0) {
     return lines.join('\n');
 }
 
+function collectWalletHistoryEntries(payload, tokenAddress) {
+    const rawEntries = unwrapOkxData(payload) || [];
+    const tokenLower = typeof tokenAddress === 'string' ? tokenAddress.toLowerCase() : null;
+    const result = [];
+
+    for (const group of rawEntries) {
+        if (!group) {
+            continue;
+        }
+
+        const transactions = Array.isArray(group.transactionList)
+            ? group.transactionList
+            : Array.isArray(group.transactions)
+                ? group.transactions
+                : Array.isArray(group.transaction_list)
+                    ? group.transaction_list
+                    : null;
+
+        if (Array.isArray(transactions)) {
+            for (const tx of transactions) {
+                if (!tx) continue;
+                if (tokenLower && tx.tokenContractAddress && tx.tokenContractAddress.toLowerCase() !== tokenLower) {
+                    continue;
+                }
+                result.push(tx);
+            }
+            continue;
+        }
+
+        if (group.txHash) {
+            if (tokenLower && group.tokenContractAddress && group.tokenContractAddress.toLowerCase() !== tokenLower) {
+                continue;
+            }
+            result.push(group);
+        }
+    }
+
+    return result;
+}
+
+function summarizeWalletHistoryEntries(entries, walletAddress, tokenSymbol) {
+    const walletLower = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : null;
+    const sorted = [...entries].sort((a, b) => {
+        const aTime = Number(a?.txTime || a?.timestamp || a?.time || 0);
+        const bTime = Number(b?.txTime || b?.timestamp || b?.time || 0);
+        return Number.isFinite(bTime) && Number.isFinite(aTime) ? bTime - aTime : 0;
+    });
+
+    const limited = sorted.slice(0, WALLET_TOKEN_TX_HISTORY_LIMIT);
+    const buyStats = { count: 0, total: 0 };
+    const sellStats = { count: 0, total: 0 };
+
+    for (const entry of limited) {
+        const direction = classifyWalletHistoryDirection(entry, walletLower);
+        const amount = resolveWalletHistoryAmount(entry, walletLower);
+
+        if (direction === 'buy') {
+            buyStats.count += 1;
+            if (Number.isFinite(amount)) {
+                buyStats.total += amount;
+            }
+        } else if (direction === 'sell') {
+            sellStats.count += 1;
+            if (Number.isFinite(amount)) {
+                sellStats.total += amount;
+            }
+        }
+    }
+
+    return { entries: limited, buyStats, sellStats, tokenSymbol };
+}
+
+function classifyWalletHistoryDirection(entry, walletLower) {
+    if (!entry || !walletLower) {
+        return null;
+    }
+
+    const fromAddrs = Array.isArray(entry.from)
+        ? entry.from.map((item) => item?.address?.toLowerCase()).filter(Boolean)
+        : [];
+    const toAddrs = Array.isArray(entry.to)
+        ? entry.to.map((item) => item?.address?.toLowerCase()).filter(Boolean)
+        : [];
+
+    if (toAddrs.includes(walletLower)) {
+        return 'buy';
+    }
+    if (fromAddrs.includes(walletLower)) {
+        return 'sell';
+    }
+
+    return null;
+}
+
+function resolveWalletHistoryAmount(entry, walletLower) {
+    if (!entry) {
+        return null;
+    }
+
+    const direct = normalizeNumeric(entry.amount);
+    if (Number.isFinite(direct)) {
+        return direct;
+    }
+
+    const findAmount = (rows = []) => {
+        for (const row of rows) {
+            if (!row || !row.address) continue;
+            const isMatch = walletLower ? row.address.toLowerCase() === walletLower : true;
+            if (!isMatch) continue;
+            const numeric = normalizeNumeric(row.amount);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+        return null;
+    };
+
+    const toAmount = findAmount(entry.to);
+    if (Number.isFinite(toAmount)) {
+        return toAmount;
+    }
+
+    const fromAmount = findAmount(entry.from);
+    if (Number.isFinite(fromAmount)) {
+        return fromAmount;
+    }
+
+    return null;
+}
+
+function formatWalletHistoryEntry(entry, walletAddress, tokenSymbol, index = 0) {
+    if (!entry) {
+        return null;
+    }
+
+    const walletLower = typeof walletAddress === 'string' ? walletAddress.toLowerCase() : null;
+    const direction = classifyWalletHistoryDirection(entry, walletLower);
+    const amount = resolveWalletHistoryAmount(entry, walletLower);
+    const amountLabel = amount !== null && amount !== undefined
+        ? `${amount} ${tokenSymbol || entry.symbol || ''}`.trim()
+        : '—';
+
+    const fromAddrs = Array.isArray(entry.from) ? entry.from.map((item) => item?.address).filter(Boolean) : [];
+    const toAddrs = Array.isArray(entry.to) ? entry.to.map((item) => item?.address).filter(Boolean) : [];
+    const txHash = entry.txHash || entry.txhash || entry.hash;
+    const txFee = entry.txFee || entry.fee;
+    const status = entry.txStatus || entry.status || '—';
+    const timestampLabel = formatWalletTokenTimestamp(entry.txTime || entry.timestamp || entry.time) || 'Tx';
+
+    const lines = [];
+    lines.push('—'.repeat(28));
+    const prefix = direction === 'buy' ? '🟢 Buy' : direction === 'sell' ? '🔴 Sell' : '⚪️ Tx';
+    lines.push(`${prefix} #${index + 1} — ${timestampLabel}`);
+    lines.push(`💰 ${escapeHtml(amountLabel)}`);
+    lines.push(`📡 Status: ${escapeHtml(String(status))}`);
+    if (txFee !== undefined && txFee !== null && txFee !== '') {
+        lines.push(`⛽ Fee: ${escapeHtml(String(txFee))}`);
+    }
+
+    if (fromAddrs.length > 0) {
+        const formatted = fromAddrs.map((addr) => formatCopyableValueHtml(addr) || escapeHtml(addr));
+        lines.push(`👤 From: ${formatted.join(', ')}`);
+    }
+
+    if (toAddrs.length > 0) {
+        const formatted = toAddrs.map((addr) => formatCopyableValueHtml(addr) || escapeHtml(addr));
+        lines.push(`🎯 To: ${formatted.join(', ')}`);
+    }
+
+    if (txHash) {
+        lines.push(`🔗 Tx: ${formatCopyableValueHtml(txHash) || escapeHtml(txHash)}`);
+    }
+
+    return lines.join('\n');
+}
+
+function formatTxhashDetail(detail, lang) {
+    const lines = [];
+    const txHash = detail.txhash || detail.txHash || detail.hash || '—';
+    const chain = detail.chainIndex ?? detail.chainId ?? '—';
+    const status = normalizeTxStatusText(detail.txStatus);
+    const amount = detail.amount !== undefined && detail.amount !== null ? detail.amount : '0';
+    const symbol = detail.symbol || 'TOKEN';
+    const amountLabel = `${amount} ${symbol}`.trim();
+    const gasLimit = detail.gasLimit || detail.gas || null;
+    const gasUsed = detail.gasUsed || null;
+    const gasPrice = detail.gasPrice || null;
+    const fee = detail.txFee || detail.fee || null;
+    const methodId = detail.methodId || null;
+
+    lines.push(t(lang, 'txhash_title'));
+    lines.push(t(lang, 'txhash_hash_line', { hash: formatCopyableValueHtml(txHash) || escapeHtml(txHash) }));
+    lines.push(t(lang, 'txhash_summary_line', {
+        chain: escapeHtml(String(chain)),
+        status: escapeHtml(status),
+        amount: escapeHtml(amountLabel)
+    }));
+
+    if (gasLimit || gasUsed || gasPrice) {
+        lines.push(t(lang, 'txhash_gas_line', {
+            limit: gasLimit ? escapeHtml(String(gasLimit)) : '—',
+            used: gasUsed ? escapeHtml(String(gasUsed)) : '—',
+            price: gasPrice ? escapeHtml(String(gasPrice)) : '—'
+        }));
+    }
+
+    if (fee) {
+        lines.push(t(lang, 'txhash_fee_line', { fee: escapeHtml(String(fee)) }));
+    }
+    if (methodId) {
+        lines.push(t(lang, 'txhash_method_line', { method: escapeHtml(String(methodId)) }));
+    }
+    if (detail.l1OriginHash) {
+        lines.push(t(lang, 'txhash_l1_hash', {
+            hash: formatCopyableValueHtml(detail.l1OriginHash) || escapeHtml(String(detail.l1OriginHash))
+        }));
+    }
+
+    const fromDetails = formatTxAddressDetails(detail.fromDetails, '👤', lang);
+    const toDetails = formatTxAddressDetails(detail.toDetails, '🎯', lang);
+    const internalDetails = formatInternalTxDetails(detail.internalTransactionDetails, lang);
+    const tokenDetails = formatTokenTransferDetails(detail.tokenTransferDetails, lang);
+
+    if (fromDetails.length > 0) {
+        lines.push('', t(lang, 'txhash_from_header'));
+        lines.push(...fromDetails);
+    }
+
+    if (toDetails.length > 0) {
+        lines.push('', t(lang, 'txhash_to_header'));
+        lines.push(...toDetails);
+    }
+
+    if (internalDetails.length > 0) {
+        lines.push('', t(lang, 'txhash_internal_header'));
+        lines.push(...internalDetails);
+    }
+
+    if (tokenDetails.length > 0) {
+        lines.push('', t(lang, 'txhash_token_header'));
+        lines.push(...tokenDetails);
+    }
+
+    return lines.join('\n');
+}
+
+function normalizeTxStatusText(status) {
+    if (status === 1 || status === '1' || status === 'pending') {
+        return 'pending';
+    }
+    if (status === 2 || status === '2' || status === 'success') {
+        return 'success';
+    }
+    if (status === 3 || status === '3' || status === 'fail' || status === 'failed') {
+        return 'fail';
+    }
+    return status ? String(status) : '—';
+}
+
+function formatTxAddressDetails(entries, icon, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const parts = [];
+        const address = row.address ? formatCopyableValueHtml(row.address) || escapeHtml(row.address) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : null;
+        const contractFlag = row.isContract ? t(lang, 'txhash_contract_flag') : '';
+        parts.push(`${icon} #${index + 1} — ${address} ${contractFlag}`.trim());
+        if (amount) {
+            parts.push(t(lang, 'txhash_amount_line', { amount }));
+        }
+        if (row.vinIndex || row.preVoutIndex || row.voutIndex) {
+            const vin = row.vinIndex ? `vin ${escapeHtml(String(row.vinIndex))}` : null;
+            const pre = row.preVoutIndex ? `pre ${escapeHtml(String(row.preVoutIndex))}` : null;
+            const vout = row.voutIndex ? `vout ${escapeHtml(String(row.voutIndex))}` : null;
+            const meta = [vin, pre, vout].filter(Boolean).join(' | ');
+            if (meta) {
+                parts.push(meta);
+            }
+        }
+        if (row.txhash) {
+            parts.push(`↩️ ${formatCopyableValueHtml(row.txhash) || escapeHtml(String(row.txhash))}`);
+        }
+        return parts.join('\n');
+    }).filter(Boolean);
+}
+
+function formatInternalTxDetails(entries, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const from = row.from ? formatCopyableValueHtml(row.from) || escapeHtml(row.from) : '—';
+        const to = row.to ? formatCopyableValueHtml(row.to) || escapeHtml(row.to) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : '—';
+        const status = normalizeTxStatusText(row.txStatus);
+        const fromFlag = row.isFromContract ? t(lang, 'txhash_contract_flag') : '';
+        const toFlag = row.isToContract ? t(lang, 'txhash_contract_flag') : '';
+        return `🔁 #${index + 1} — ${from}${fromFlag} → ${to}${toFlag} | ${amount} | ${status}`;
+    }).filter(Boolean);
+}
+
+function formatTokenTransferDetails(entries, lang) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    return entries.map((row, index) => {
+        if (!row) return null;
+        const from = row.from ? formatCopyableValueHtml(row.from) || escapeHtml(row.from) : '—';
+        const to = row.to ? formatCopyableValueHtml(row.to) || escapeHtml(row.to) : '—';
+        const amount = row.amount !== undefined && row.amount !== null ? escapeHtml(String(row.amount)) : '—';
+        const symbol = row.symbol || row.tokenSymbol || 'TOKEN';
+        const fromFlag = row.isFromContract ? t(lang, 'txhash_contract_flag') : '';
+        const toFlag = row.isToContract ? t(lang, 'txhash_contract_flag') : '';
+        const tokenContract = row.tokenContractAddress
+            ? formatCopyableValueHtml(row.tokenContractAddress) || escapeHtml(String(row.tokenContractAddress))
+            : null;
+
+        const lines = [];
+        lines.push(`💱 #${index + 1} — ${amount} ${escapeHtml(symbol)}`.trim());
+        lines.push(`${from}${fromFlag} → ${to}${toFlag}`);
+        if (tokenContract) {
+            lines.push(`📄 ${tokenContract}`);
+        }
+        return lines.join('\n');
+    }).filter(Boolean);
+}
+
 function resolveKnownTokenAddress(tokenKey) {
     if (!tokenKey) {
         return null;
@@ -3522,6 +3920,7 @@ const HELP_COMMAND_DETAILS = {
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
+    txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
     help: { command: '/help', icon: '❓', descKey: 'help_command_help' },
@@ -3542,7 +3941,7 @@ const HELP_GROUP_DETAILS = {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rules', 'okxchains', 'okx402status']
+        commands: ['register', 'mywallet', 'unregister', 'rules', 'okxchains', 'okx402status', 'txhash']
     },
     language: {
         icon: '🌐',
@@ -9386,6 +9785,54 @@ function startTelegramBot() {
         }
     }
 
+    async function handleTxhashCommand(msg, explicitHash = null) {
+        const lang = await getLang(msg);
+        const text = msg.text || '';
+        const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))(?:\s+([^\s]+))?/i);
+
+        const txHash = explicitHash || (match ? match[1] : null);
+        const chainArg = match ? match[2] : null;
+
+        if (!txHash) {
+            await sendReply(msg, t(lang, 'txhash_usage'), { reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
+        const chainIndexCandidate = Number(chainArg);
+        const chainIndex = Number.isFinite(chainIndexCandidate)
+            ? chainIndexCandidate
+            : Number.isFinite(OKX_CHAIN_INDEX)
+                ? OKX_CHAIN_INDEX
+                : OKX_CHAIN_INDEX_FALLBACK;
+
+        const query = { txHash, chainIndex };
+
+        try {
+            const payload = await callOkxDexEndpoint(
+                '/api/v6/dex/post-transaction/transaction-detail-by-txhash',
+                query,
+                { method: 'GET', allowFallback: false }
+            );
+
+            const detail = unwrapOkxFirst(payload);
+            if (!detail) {
+                throw new Error('Empty transaction detail');
+            }
+
+            const textBody = formatTxhashDetail(detail, lang);
+            const chunks = splitTelegramMessageText(textBody);
+            const primary = chunks.shift() || '';
+            await sendReply(msg, primary, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+
+            for (const chunk of chunks) {
+                await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+            }
+        } catch (error) {
+            console.error(`[TxHash] Failed to fetch tx ${txHash}: ${error.message}`);
+            await sendReply(msg, t(lang, 'txhash_error'), { reply_markup: buildCloseKeyboard(lang) });
+        }
+    }
+
     async function handleRulesCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
@@ -9662,6 +10109,10 @@ function startTelegramBot() {
 
     bot.onText(/\/okxchains/, async (msg) => {
         await handleOkxChainsCommand(msg);
+    });
+
+    bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        await handleTxhashCommand(msg, null);
     });
 
     function parseDurationText(value) {
@@ -10192,6 +10643,11 @@ function startTelegramBot() {
         okx402status: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleOkx402StatusCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
+        txhash: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            await handleTxhashCommand(synthetic, null);
             return { message: t(lang, 'help_action_executed') };
         },
         unregister: async (query, lang) => {
