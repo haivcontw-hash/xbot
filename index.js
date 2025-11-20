@@ -364,26 +364,35 @@ const CHECKIN_GOAL_PRESETS = [
     'checkin_goal_preset_help'
 ];
 
-const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry'];
+const SCIENCE_CATEGORY_KEYS = ['physics', 'chemistry', 'okx', 'crypto'];
+const QUESTION_TYPE_KEYS = ['math', ...SCIENCE_CATEGORY_KEYS];
 
 const DEFAULT_QUESTION_WEIGHTS = (() => {
     if (Object.prototype.hasOwnProperty.call(process.env, 'CHECKIN_SCIENCE_PROBABILITY')) {
         const mathShare = Math.max(1 - CHECKIN_SCIENCE_PROBABILITY, 0);
         const scienceShare = Math.max(CHECKIN_SCIENCE_PROBABILITY, 0);
         if (mathShare + scienceShare > 0) {
-            const halfScience = scienceShare / 2;
-            return { math: mathShare, physics: halfScience, chemistry: halfScience };
+            const sharedScience = SCIENCE_CATEGORY_KEYS.length > 0
+                ? scienceShare / SCIENCE_CATEGORY_KEYS.length
+                : scienceShare;
+            return {
+                math: mathShare,
+                physics: sharedScience,
+                chemistry: sharedScience,
+                okx: sharedScience,
+                crypto: sharedScience
+            };
         }
     }
-    return { math: 2, physics: 1, chemistry: 1 };
+    return { math: 2, physics: 1, chemistry: 1, okx: 1, crypto: 1 };
 })();
 
 const QUESTION_WEIGHT_PRESETS = [
-    { math: 40, physics: 30, chemistry: 30 },
-    { math: 34, physics: 33, chemistry: 33 },
-    { math: 25, physics: 50, chemistry: 25 },
-    { math: 25, physics: 25, chemistry: 50 },
-    { math: 50, physics: 25, chemistry: 25 }
+    { math: 40, physics: 15, chemistry: 15, okx: 15, crypto: 15 },
+    { math: 34, physics: 22, chemistry: 22, okx: 11, crypto: 11 },
+    { math: 30, physics: 20, chemistry: 20, okx: 15, crypto: 15 },
+    { math: 25, physics: 25, chemistry: 25, okx: 12.5, crypto: 12.5 },
+    { math: 50, physics: 15, chemistry: 15, okx: 10, crypto: 10 }
 ];
 
 const CHECKIN_SCHEDULE_MAX_SLOTS = 6;
@@ -422,9 +431,12 @@ function getQuestionWeights(settings = null) {
     const weights = {
         math: sanitizeWeightValue(settings?.mathWeight, fallback.math),
         physics: sanitizeWeightValue(settings?.physicsWeight, fallback.physics),
-        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry)
+        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry),
+        okx: sanitizeWeightValue(settings?.okxWeight, fallback.okx),
+        crypto: sanitizeWeightValue(settings?.cryptoWeight, fallback.crypto)
     };
-    if (weights.math + weights.physics + weights.chemistry <= 0) {
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
+    if (total <= 0) {
         return { ...DEFAULT_QUESTION_WEIGHTS };
     }
     return weights;
@@ -432,31 +444,32 @@ function getQuestionWeights(settings = null) {
 
 function pickQuestionType(settings = null) {
     const weights = getQuestionWeights(settings);
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
     if (total <= 0) {
         return 'math';
     }
     const roll = Math.random() * total;
-    if (roll < weights.math) {
-        return 'math';
+    let accumulator = 0;
+    for (const key of QUESTION_TYPE_KEYS) {
+        accumulator += weights[key] || 0;
+        if (roll < accumulator) {
+            return key;
+        }
     }
-    if (roll < weights.math + weights.physics) {
-        return 'physics';
-    }
-    return 'chemistry';
+    return QUESTION_TYPE_KEYS[QUESTION_TYPE_KEYS.length - 1] || 'math';
 }
 
 function formatQuestionWeightPercentages(weights) {
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = QUESTION_TYPE_KEYS.reduce((sum, key) => sum + (Number(weights[key]) || 0), 0);
     if (total <= 0) {
-        return { math: '0%', physics: '0%', chemistry: '0%' };
+        const zero = {};
+        QUESTION_TYPE_KEYS.forEach((key) => { zero[key] = '0%'; });
+        return zero;
     }
     const toPercent = (value) => `${Math.round((value / total) * 1000) / 10}%`;
-    return {
-        math: toPercent(weights.math),
-        physics: toPercent(weights.physics),
-        chemistry: toPercent(weights.chemistry)
-    };
+    const percents = {};
+    QUESTION_TYPE_KEYS.forEach((key) => { percents[key] = toPercent(weights[key]); });
+    return percents;
 }
 
 function normalizeTimeSlot(value) {
@@ -548,6 +561,7 @@ const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
+const tokenWizardStates = new Map();
 const rmchatBotMessages = new Map();
 const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
@@ -1611,10 +1625,15 @@ function buildWalletDexOverviewText(lang, walletAddress, overview, options = {})
             || t(lang, 'wallet_balance_contract_unknown');
 
         lines.push('');
+        const tokenChainLabelRaw = formatDexChainLabel(token, lang);
+        const tokenChainLabel = (!tokenChainLabelRaw || tokenChainLabelRaw === t(lang, 'wallet_balance_chain_unknown'))
+            ? (options.chainLabel || tokenChainLabelRaw)
+            : tokenChainLabelRaw;
+
         lines.push(t(lang, 'wallet_dex_token_header', {
             index: (idx + 1).toString(),
             symbol: escapeHtml(String(symbolLabel)),
-            chain: escapeHtml(formatDexChainLabel(token, lang))
+            chain: escapeHtml(tokenChainLabel || '')
         }));
         lines.push(t(lang, 'wallet_dex_token_balance', { balance: meta.balanceHtml }));
         lines.push(t(lang, 'wallet_dex_token_value', { value: meta.priceLabel }));
@@ -4372,6 +4391,7 @@ const HELP_COMMAND_DETAILS = {
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
+    token: { command: '/token', icon: '🧬', descKey: 'help_command_token' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
     help: { command: '/help', icon: '❓', descKey: 'help_command_help' },
@@ -4386,19 +4406,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🚀',
         titleKey: 'help_group_onboarding_title',
         descKey: 'help_group_onboarding_desc',
-        commands: ['start', 'help']
+        commands: ['start', 'help', 'language']
     },
     xlayer_check: {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash']
-    },
-    language: {
-        icon: '🌐',
-        titleKey: 'help_group_language_title',
-        descKey: 'help_group_language_desc',
-        commands: ['language']
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token']
     },
     support: {
         icon: '🎁',
@@ -4452,7 +4466,7 @@ const ADMIN_SUBCOMMANDS = [
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        groups: ['onboarding', 'xlayer_check', 'language', 'support']
+        groups: ['onboarding', 'xlayer_check', 'support']
     },
     {
         titleKey: 'help_section_checkin_title',
@@ -4973,10 +4987,7 @@ function getSummaryWindowBounds(settings) {
     };
 }
 
-const SCIENCE_LANGUAGE_SET = new Set([
-    ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
-    ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
-]);
+const SCIENCE_LANGUAGE_SET = new Set(Object.values(SCIENCE_TEMPLATES).flatMap((template) => Object.keys(template || {})));
 
 
 function resolveScienceLang(lang = 'en') {
@@ -5122,7 +5133,7 @@ function generateScienceChallenge(category = 'physics', lang = 'en') {
 
 function generateCheckinChallenge(lang = 'en', questionType = null, settings = null) {
     const resolvedType = questionType || pickQuestionType(settings);
-    if (resolvedType === 'physics' || resolvedType === 'chemistry') {
+    if (resolvedType !== 'math' && SCIENCE_CATEGORY_KEYS.includes(resolvedType)) {
         return generateScienceChallenge(resolvedType, lang);
     }
     return generateMathChallenge(lang);
@@ -7234,9 +7245,12 @@ async function setAdminQuestionWeights(chatId, adminId, weights, { fallbackLang 
     const sanitized = {
         mathWeight: sanitizeWeightValue(weights.math, 0),
         physicsWeight: sanitizeWeightValue(weights.physics, 0),
-        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0)
+        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0),
+        okxWeight: sanitizeWeightValue(weights.okx, 0),
+        cryptoWeight: sanitizeWeightValue(weights.crypto, 0)
     };
-    if (sanitized.mathWeight + sanitized.physicsWeight + sanitized.chemistryWeight <= 0) {
+    const total = Object.values(sanitized).reduce((sum, value) => sum + (Number(value) || 0), 0);
+    if (total <= 0) {
         await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_invalid'));
         return;
     }
@@ -7264,9 +7278,9 @@ function parseQuestionWeightsInput(rawText) {
             .map((part) => Number(part))
             .filter((value) => Number.isFinite(value));
         if (numericParts.length >= QUESTION_TYPE_KEYS.length) {
-            values.math = numericParts[0];
-            values.physics = numericParts[1];
-            values.chemistry = numericParts[2];
+            QUESTION_TYPE_KEYS.forEach((key, index) => {
+                values[key] = numericParts[index];
+            });
         }
     }
     const weights = {};
@@ -7289,9 +7303,11 @@ function buildQuestionWeightKeyboard(chatId, lang) {
         text: t(lang, 'checkin_admin_weights_option', {
             math: `${preset.math}%`,
             physics: `${preset.physics}%`,
-            chemistry: `${preset.chemistry}%`
+            chemistry: `${preset.chemistry}%`,
+            okx: `${preset.okx}%`,
+            crypto: `${preset.crypto}%`
         }),
-        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}`
+        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}|${preset.okx}|${preset.crypto}`
     }]));
     inline_keyboard.push([{ text: t(lang, 'checkin_admin_button_custom'), callback_data: `checkin_admin_weights_custom|${chatKey}` }]);
     inline_keyboard.push([
@@ -9216,6 +9232,36 @@ function buildTxhashHashPromptText(lang, chainLabel, pendingHash = null) {
     return parts.join('\n');
 }
 
+function buildTokenChainKeyboard(lang, entries = []) {
+    const sorted = sortTxhashChainEntries(entries);
+    const buttons = sorted.map((entry) => {
+        const label = entry.chainShortName || entry.chainName || `#${entry.chainIndex}`;
+        return {
+            text: t(lang, 'token_chain_option', { chain: label, index: entry.chainIndex }),
+            callback_data: `token_chain:${entry.chainIndex}`
+        };
+    });
+
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    if (rows.length === 0) {
+        return buildCloseKeyboard(lang, { backCallbackData: 'token_back' });
+    }
+
+    return appendCloseButton({ inline_keyboard: rows }, lang, { backCallbackData: 'token_back' });
+}
+
+function buildTokenAddressPromptText(lang, chainLabel, pendingAddress = null) {
+    const parts = [t(lang, 'token_address_prompt', { chain: chainLabel })];
+    if (pendingAddress) {
+        parts.push(t(lang, 'token_address_prefill', { address: pendingAddress }));
+    }
+    return parts.join('\n');
+}
+
 function buildRmchatKeyboard(lang) {
     const inline_keyboard = [
         [{ text: t(lang, 'rmchat_option_bot'), callback_data: 'rmchat:bot' }],
@@ -9328,6 +9374,120 @@ async function startTxhashFlow({ chatId, userId, lang, sourceMessage = null, pen
         chatId: targetChatId.toString(),
         lang,
         pendingHash: pendingHash || null,
+        replyContextMessage: sourceMessage,
+        promptMessageId: message?.message_id || null,
+        chainOptions: chainEntries
+    });
+}
+
+async function deliverTokenDetail({ chatId, lang, chainEntry = null, chainIndex = null, contractAddress, replyContextMessage = null }) {
+    const normalizedAddress = normalizeAddressSafe(contractAddress) || contractAddress;
+    if (!normalizedAddress) {
+        await sendMessageRespectingThread(chatId, replyContextMessage || null, t(lang, 'token_help_invalid'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' })
+        });
+        return;
+    }
+
+    const resolvedChainIndex = Number.isFinite(chainEntry?.chainIndex)
+        ? Number(chainEntry.chainIndex)
+        : Number.isFinite(chainIndex)
+            ? Number(chainIndex)
+            : null;
+
+    const chainContext = chainEntry
+        ? {
+            chainIndex: resolvedChainIndex,
+            chainId: Number.isFinite(chainEntry.chainId) ? Number(chainEntry.chainId) : resolvedChainIndex,
+            chainShortName: chainEntry.chainShortName || null,
+            chainName: chainEntry.chainName || null,
+            aliases: Array.isArray(chainEntry.aliases) ? chainEntry.aliases : null
+        }
+        : {
+            chainIndex: resolvedChainIndex,
+            chainId: resolvedChainIndex,
+            chainShortName: null,
+            chainName: null
+        };
+
+    const baseContext = {
+        chainContext,
+        chainLabel: formatDexChainLabel(chainContext, lang),
+        token: {
+            tokenAddress: normalizedAddress,
+            tokenContractAddress: normalizedAddress,
+            contractAddress: normalizedAddress,
+            chainIndex: resolvedChainIndex,
+            chainId: chainContext.chainId
+        }
+    };
+
+    let tokenMeta = {};
+    let actionResult = null;
+
+    try {
+        const payload = await fetchWalletTokenActionPayload('token_info', baseContext);
+        const primaryEntry = unwrapOkxFirst(payload);
+        if (primaryEntry) {
+            tokenMeta = {
+                name: primaryEntry.name || primaryEntry.tokenName || null,
+                symbol: primaryEntry.symbol || primaryEntry.tokenSymbol || null,
+                decimals: pickOkxNumeric(primaryEntry, ['decimals', 'decimal', 'tokenDecimal']) || null
+            };
+        }
+        const enhancedContext = { ...baseContext, token: { ...baseContext.token, ...tokenMeta } };
+        actionResult = normalizeWalletTokenActionResult('token_info', payload, lang, enhancedContext);
+        Object.assign(baseContext.token, tokenMeta);
+    } catch (error) {
+        console.error(`[Token] Failed to fetch token info for ${normalizedAddress}: ${error.message}`);
+    }
+
+    const tokenCallbackId = registerWalletTokenContext(baseContext);
+    const contextWithCallback = { ...baseContext, tokenCallbackId };
+    const menu = buildWalletTokenMenu(contextWithCallback, lang, { actionResult });
+
+    const message = await sendMessageRespectingThread(chatId, replyContextMessage || null, menu.text, {
+        parse_mode: 'HTML',
+        reply_markup: menu.replyMarkup
+    });
+
+    if (menu.extraTexts && menu.extraTexts.length > 0) {
+        await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, { source: replyContextMessage || message });
+    }
+}
+
+async function startTokenFlow({ chatId, userId, lang, sourceMessage = null, pendingAddress = null } = {}) {
+    const targetChatId = sourceMessage?.chat?.id ?? chatId;
+    const userKey = userId ? userId.toString() : targetChatId?.toString();
+    if (!targetChatId || !userKey) {
+        return;
+    }
+
+    let chainEntries;
+    try {
+        chainEntries = await collectTxhashChainEntries();
+    } catch (error) {
+        console.error(`[Token] Failed to load chain directory: ${error.message}`);
+    }
+
+    if (!Array.isArray(chainEntries) || chainEntries.length === 0) {
+        await sendMessageRespectingThread(targetChatId, sourceMessage, t(lang, 'token_chain_missing'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' })
+        });
+        return;
+    }
+
+    const keyboard = buildTokenChainKeyboard(lang, chainEntries);
+    const promptText = t(lang, 'token_chain_prompt');
+    const message = sourceMessage
+        ? await sendReply(sourceMessage, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard })
+        : await bot.sendMessage(targetChatId, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
+
+    tokenWizardStates.set(userKey, {
+        stage: 'chain',
+        chatId: targetChatId.toString(),
+        lang,
+        pendingAddress: pendingAddress || null,
         replyContextMessage: sourceMessage,
         promptMessageId: message?.message_id || null,
         chainOptions: chainEntries
@@ -10484,6 +10644,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 }
 
+async function handleTokenCommand(msg, explicitAddress = null) {
+    const lang = await getLang(msg);
+    const text = msg.text || '';
+    const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+
+    const contractAddress = explicitAddress || (match ? match[1] : null);
+
+    await startTokenFlow({
+        chatId: msg.chat.id,
+        userId: msg.from?.id,
+        lang,
+        sourceMessage: msg,
+        pendingAddress: contractAddress || null
+    });
+}
+
     async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
@@ -10634,7 +10810,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 ]
             }
         };
-        sendReply(msg, text, options);
+        const sent = await sendReply(msg, text, options);
+        if (sent?.chat?.id && sent?.message_id) {
+            scheduleMessageDeletion(sent.chat.id, sent.message_id, 3000);
+        }
     }
 
 
@@ -10677,6 +10856,23 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         }
 
         await startTxhashFlow({ chatId: userId, userId, lang: dmLang });
+        return null;
+    }
+
+    async function startTokenWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = tokenWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        await startTokenFlow({ chatId: userId, userId, lang: dmLang });
         return null;
     }
     
@@ -10773,6 +10969,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
         await handleTxhashCommand(msg, null);
+    });
+
+    bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        await handleTokenCommand(msg, null);
     });
 
     function parseDurationText(value) {
@@ -11318,6 +11518,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 return { message: t(lang, 'help_action_failed'), showAlert: true };
             }
         },
+        token: async (query, lang) => {
+            try {
+                await startTokenWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start token wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
+        },
         unregister: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleUnregisterCommand(synthetic);
@@ -11399,6 +11612,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 return;
             }
 
+            if (query.data === 'token_back') {
+                await bot.answerCallbackQuery(queryId);
+                if (chatId) {
+                    const helpText = buildHelpText(callbackLang);
+                    await bot.sendMessage(chatId, helpText, {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: true,
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                }
+                return;
+            }
+
             if (query.data && query.data.startsWith('txhash_chain:')) {
                 const userKey = query.from.id.toString();
                 const rawIndex = query.data.split(':')[1];
@@ -11439,6 +11665,50 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 });
 
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_selected', { chain: chainLabel }) });
+                return;
+            }
+
+            if (query.data && query.data.startsWith('token_chain:')) {
+                const userKey = query.from.id.toString();
+                const rawIndex = query.data.split(':')[1];
+                const selectedIndex = Number(rawIndex);
+
+                const currentState = tokenWizardStates.get(userKey) || {};
+                const chainEntries = currentState.chainOptions || await collectTxhashChainEntries();
+                const chainEntry = chainEntries.find((entry) => Number(entry?.chainIndex) === Number(selectedIndex));
+
+                if (!chainEntry) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_chain_missing'), show_alert: true });
+                    return;
+                }
+
+                const chainLabel = chainEntry.chainShortName || chainEntry.chainName || `#${chainEntry.chainIndex}`;
+                const promptText = buildTokenAddressPromptText(callbackLang, chainLabel, currentState.pendingAddress);
+                const placeholder = t(callbackLang, 'token_help_placeholder');
+
+                const targetChatId = currentState.chatId || chatId || query.from.id.toString();
+                const prompt = await sendMessageRespectingThread(targetChatId, currentState.replyContextMessage || query.message, promptText, {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: placeholder
+                    },
+                    allow_sending_without_reply: true
+                });
+
+                tokenWizardStates.set(userKey, {
+                    stage: 'address',
+                    chatId: targetChatId.toString(),
+                    lang: callbackLang,
+                    pendingAddress: currentState.pendingAddress || null,
+                    replyContextMessage: currentState.replyContextMessage || query.message,
+                    promptMessageId: prompt?.message_id || null,
+                    chainIndex: chainEntry.chainIndex,
+                    chainLabel,
+                    chainOptions: chainEntries,
+                    chainEntry
+                });
+
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_chain_selected', { chain: chainLabel }) });
                 return;
             }
 
@@ -13183,7 +13453,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 const presetWeights = {
                     math: Number(parts[2]),
                     physics: Number(parts[3]),
-                    chemistry: Number(parts[4])
+                    chemistry: Number(parts[4]),
+                    okx: Number(parts[5]),
+                    crypto: Number(parts[6])
                 };
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_updated_alert') });
                 await setAdminQuestionWeights(targetChatId, query.from.id, presetWeights, { fallbackLang: callbackLang });
@@ -13307,7 +13579,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
                 const messageKey = isGroupChat ? 'group_language_changed_success' : 'language_changed_success';
                 const message = t(newLang, messageKey); // Dùng newLang
-                sendReply(query.message, message);
+                const feedback = await sendReply(query.message, message);
+                if (feedback?.chat?.id && feedback?.message_id) {
+                    scheduleMessageDeletion(feedback.chat.id, feedback.message_id, 3000);
+                }
                 console.log(`[BOT] ChatID ${chatId} đã đổi ngôn ngữ sang: ${newLang}`);
                 bot.answerCallbackQuery(queryId, { text: message });
             }
@@ -13411,6 +13686,52 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
                     await sendReply(msg, t(effectiveLang, 'txhash_error'), {
                         reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                    });
+                }
+                return;
+            }
+
+            const tokenState = tokenWizardStates.get(userId);
+            if (
+                tokenState &&
+                tokenState.stage === 'address' &&
+                msg.chat?.id?.toString() === tokenState.chatId &&
+                msg.reply_to_message?.message_id === tokenState.promptMessageId
+            ) {
+                const rawAddress = (msg.text || '').trim();
+                const effectiveLang = tokenState.lang || lang;
+
+                if (!rawAddress) {
+                    const keyboard = buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' });
+                    if (msg.chat.type === 'private') {
+                        await sendEphemeralMessage(userId, t(effectiveLang, 'token_help_invalid'));
+                    } else {
+                        await sendMessageRespectingThread(tokenState.chatId, msg, t(effectiveLang, 'token_help_invalid'), { reply_markup: keyboard });
+                    }
+                    return;
+                }
+
+                if (!tokenState.chainIndex) {
+                    await sendMessageRespectingThread(tokenState.chatId, msg, t(effectiveLang, 'token_chain_missing'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                    return;
+                }
+
+                try {
+                    await deliverTokenDetail({
+                        chatId: tokenState.chatId,
+                        lang: effectiveLang,
+                        chainEntry: tokenState.chainEntry,
+                        chainIndex: tokenState.chainIndex,
+                        contractAddress: rawAddress,
+                        replyContextMessage: tokenState.replyContextMessage || msg
+                    });
+                    tokenWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[TokenWizard] Failed to handle token for ${userId}: ${error.message}`);
+                    await sendReply(msg, t(effectiveLang, 'token_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
                     });
                 }
                 return;
