@@ -4391,6 +4391,8 @@ const HELP_COMMAND_DETAILS = {
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
     rmchat: { command: '/rmchat', icon: '🧹', descKey: 'help_command_rmchat' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
+    donatedev: { command: '/donatedev', icon: '💻', descKey: 'help_command_donatedev' },
+    donatecm: { command: '/donatecm', icon: '🌐', descKey: 'help_command_donatecm' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
@@ -4426,7 +4428,7 @@ const HELP_GROUP_DETAILS = {
         icon: '✅',
         titleKey: 'help_group_checkin_title',
         descKey: 'help_group_checkin_desc',
-        commands: ['checkin', 'topcheckin', 'checkinadmin']
+        commands: ['checkin', 'topcheckin', 'checkinadmin', 'donatedev', 'donatecm']
     }
 };
 
@@ -13853,8 +13855,54 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         }
     });
 
+    const formatPollingError = (error) => {
+        if (!error) {
+            return 'Unknown polling error';
+        }
+
+        const parts = [];
+
+        if (error.message) {
+            parts.push(error.message);
+        }
+
+        if (error.code) {
+            parts.push(`code=${error.code}`);
+        }
+
+        if (error.response?.statusCode) {
+            parts.push(`status=${error.response.statusCode}`);
+        }
+
+        if (error.response?.body) {
+            try {
+                const bodyText = typeof error.response.body === 'string'
+                    ? error.response.body
+                    : JSON.stringify(error.response.body);
+                parts.push(`body=${bodyText}`);
+            } catch (_) {
+                parts.push('body=[unreadable]');
+            }
+        }
+
+        if (error instanceof AggregateError && Array.isArray(error.errors)) {
+            const childErrors = error.errors
+                .map((child) => (child?.message ? child.message : String(child)))
+                .filter(Boolean);
+            if (childErrors.length) {
+                parts.push(`causes=${childErrors.join('; ')}`);
+            }
+        }
+
+        if (error.stack) {
+            parts.push(`stack=${error.stack}`);
+        }
+
+        return parts.join(' | ') || String(error);
+    };
+
     bot.on('polling_error', (error) => {
-        console.error(`[LỖI BOT POLLING]: ${error.message}`);
+        console.error(`[LỖI BOT POLLING]: ${formatPollingError(error)}`);
     });
 
     console.log('✅ [Telegram Bot] Đang chạy...');
