@@ -1296,20 +1296,43 @@ async function init() {
 
 // --- Hàm xử lý User & Wallet ---
 
-async function addWalletToUser(chatId, lang, walletAddress) {
-    const normalizedLangInput = normalizeLanguageCode(lang);
-    const normalizedAddr = ethers.getAddress(walletAddress);
-    let user = await dbGet('SELECT lang, lang_source, wallets FROM users WHERE chatId = ?', [chatId]);
-    const walletsRaw = user ? safeJsonParse(user.wallets, []) : [];
+function normalizeWalletEntry(input) {
+    if (!input) {
+        return null;
+    }
 
+    if (typeof input === 'string') {
+        const normalized = normalizeWalletAddressSafe(input);
+        if (!normalized) {
+            return null;
+        }
+        return { address: normalized, name: null };
+    }
+
+    if (typeof input === 'object') {
+        const normalized = normalizeWalletAddressSafe(input.address || input.wallet || input.addr);
+        if (!normalized) {
+            return null;
+        }
+        const rawName = typeof input.name === 'string' ? input.name.trim() : '';
+        const safeName = rawName ? rawName.slice(0, 64) : null;
+        return { address: normalized, name: safeName };
+    }
+
+    return null;
+}
+
+function normalizeWalletEntries(walletsRaw) {
     const seen = new Set();
     const wallets = [];
+
     for (const entry of Array.isArray(walletsRaw) ? walletsRaw : []) {
-        const normalized = normalizeWalletAddressSafe(entry);
+        const normalized = normalizeWalletEntry(entry);
         if (!normalized) {
             continue;
         }
-        const lower = normalized.toLowerCase();
+
+        const lower = normalized.address.toLowerCase();
         if (seen.has(lower)) {
             continue;
         }
@@ -1317,9 +1340,38 @@ async function addWalletToUser(chatId, lang, walletAddress) {
         wallets.push(normalized);
     }
 
-    const alreadyExists = seen.has(normalizedAddr.toLowerCase());
-    if (!alreadyExists) {
-        wallets.push(normalizedAddr);
+    return wallets;
+}
+
+async function addWalletToUser(chatId, lang, walletAddress, options = {}) {
+    const normalizedLangInput = normalizeLanguageCode(lang);
+    const normalizedAddr = ethers.getAddress(walletAddress);
+    const requestedName = typeof options.name === 'string' && options.name.trim().length > 0
+        ? options.name.trim().slice(0, 64)
+        : null;
+
+    let user = await dbGet('SELECT lang, lang_source, wallets FROM users WHERE chatId = ?', [chatId]);
+    const walletsRaw = user ? safeJsonParse(user.wallets, []) : [];
+    const wallets = normalizeWalletEntries(walletsRaw);
+
+    const seen = new Set(wallets.map((entry) => entry.address.toLowerCase()));
+    const existingIndex = wallets.findIndex((entry) => entry.address.toLowerCase() === normalizedAddr.toLowerCase());
+
+    let added = false;
+    let nameChanged = false;
+    let finalName = existingIndex >= 0 ? wallets[existingIndex].name || null : null;
+
+    if (existingIndex >= 0) {
+        if (requestedName && requestedName !== finalName) {
+            wallets[existingIndex] = { address: normalizedAddr, name: requestedName };
+            finalName = requestedName;
+            nameChanged = true;
+        }
+    } else {
+        wallets.push({ address: normalizedAddr, name: requestedName });
+        seen.add(normalizedAddr.toLowerCase());
+        added = true;
+        finalName = requestedName;
     }
 
     const hasStoredLang = typeof user?.lang === 'string' && user.lang.trim().length > 0;
@@ -1342,25 +1394,32 @@ async function addWalletToUser(chatId, lang, walletAddress) {
         await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify(wallets), 'auto']);
     }
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
-    return { added: !alreadyExists, wallet: normalizedAddr };
+    return { added, wallet: normalizedAddr, name: finalName, nameChanged };
 }
 
 async function removeWalletFromUser(chatId, walletAddress) {
     let user = await dbGet('SELECT * FROM users WHERE chatId = ?', [chatId]);
     if (!user) return false;
     const normalizedTarget = normalizeWalletAddressSafe(walletAddress);
-    const wallets = safeJsonParse(user.wallets, []);
+    const walletsRaw = safeJsonParse(user.wallets, []);
+    const normalizedWallets = normalizeWalletEntries(walletsRaw);
     const nextWallets = [];
-    for (const entry of Array.isArray(wallets) ? wallets : []) {
-        const normalized = normalizeWalletAddressSafe(entry);
-        if (!normalized || (normalizedTarget && normalized.toLowerCase() === normalizedTarget.toLowerCase())) {
+
+    for (const entry of normalizedWallets) {
+        if (!normalizedTarget) {
             continue;
         }
-        if (nextWallets.find((w) => w.toLowerCase() === normalized.toLowerCase())) {
+
+        if (entry.address.toLowerCase() === normalizedTarget.toLowerCase()) {
             continue;
         }
-        nextWallets.push(normalized);
+
+        if (nextWallets.find((w) => w.address.toLowerCase() === entry.address.toLowerCase())) {
+            continue;
+        }
+        nextWallets.push(entry);
     }
+
     await dbRun('UPDATE users SET wallets = ? WHERE chatId = ?', [JSON.stringify(nextWallets), chatId]);
     await removeWalletTokensForWallet(chatId, walletAddress);
     await removeWalletHoldingsCache(chatId, walletAddress);
@@ -1379,23 +1438,7 @@ async function removeAllWalletsFromUser(chatId) {
 async function getWalletsForUser(chatId) {
     const user = await dbGet('SELECT wallets FROM users WHERE chatId = ?', [chatId]);
     const walletsRaw = user ? safeJsonParse(user.wallets, []) : [];
-    const seen = new Set();
-    const wallets = [];
-
-    for (const entry of Array.isArray(walletsRaw) ? walletsRaw : []) {
-        const normalized = normalizeWalletAddressSafe(entry);
-        if (!normalized) {
-            continue;
-        }
-        const lower = normalized.toLowerCase();
-        if (seen.has(lower)) {
-            continue;
-        }
-        seen.add(lower);
-        wallets.push(normalized);
-    }
-
-    return wallets;
+    return normalizeWalletEntries(walletsRaw);
 }
 
 async function upsertWalletTokenRecord({ chatId, walletAddress, tokenKey, tokenLabel, tokenAddress = null, quoteTargets = DEFAULT_QUOTE_TARGETS }) {
@@ -1568,11 +1611,16 @@ async function getUsersForWallet(walletAddress) {
             console.error(`Lỗi JSON parse wallets cho user ${user.chatId}:`, user.wallets);
         }
         
-        if (Array.isArray(wallets) && wallets.includes(normalizedAddr)) {
-            const info = await getUserLanguageInfo(user.chatId);
-            const normalizedLang = info ? info.lang : normalizeLanguageCode(user.lang);
-            users.push({ chatId: user.chatId, lang: normalizedLang });
+        const normalizedWallets = normalizeWalletEntries(wallets);
+        const hasWallet = normalizedWallets.some((entry) => entry.address.toLowerCase() === normalizedAddr.toLowerCase());
+
+        if (!hasWallet) {
+            continue;
         }
+
+        const info = await getUserLanguageInfo(user.chatId);
+        const normalizedLang = info ? info.lang : normalizeLanguageCode(user.lang);
+        users.push({ chatId: user.chatId, lang: normalizedLang });
     }
     return users;
 }
