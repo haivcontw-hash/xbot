@@ -1138,9 +1138,10 @@ async function buildWalletSelectMenu(lang, chatId, walletsOverride = null) {
 
     const inline_keyboard = [];
     for (const wallet of wallets) {
-        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const normalized = normalizeAddressSafe(wallet?.address || wallet) || wallet?.address || wallet;
         const shortAddr = shortenAddress(normalized);
-        inline_keyboard.push([{ text: `💼 ${shortAddr}`, callback_data: `wallet_pick|${normalized}` }]);
+        const nameLabel = typeof wallet?.name === 'string' && wallet.name.trim() ? `${wallet.name.trim()} • ` : '';
+        inline_keyboard.push([{ text: `💼 ${nameLabel}${shortAddr}`, callback_data: `wallet_pick|${normalized}` }]);
     }
     inline_keyboard.push([{ text: t(lang, 'action_close'), callback_data: 'ui_close' }]);
 
@@ -1193,15 +1194,19 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
     let wallets = await db.getWalletsForUser(chatId);
     if (options.targetWallet) {
         const target = normalizeAddressSafe(options.targetWallet) || options.targetWallet;
-        wallets = wallets.filter((wallet) => (normalizeAddressSafe(wallet) || wallet).toLowerCase() === (target || '').toLowerCase());
+        wallets = wallets.filter((wallet) => {
+            const address = normalizeAddressSafe(wallet?.address || wallet) || wallet?.address || wallet;
+            return address && address.toLowerCase() === (target || '').toLowerCase();
+        });
         if (wallets.length === 0 && target) {
-            wallets = [target];
+            wallets = [{ address: target, name: null }];
         }
     }
 
     const results = [];
     for (const wallet of wallets) {
-        const normalized = normalizeAddressSafe(wallet) || wallet;
+        const normalized = normalizeAddressSafe(wallet?.address || wallet) || wallet?.address || wallet;
+        const displayName = typeof wallet?.name === 'string' && wallet.name.trim() ? wallet.name.trim() : null;
         let tokens = [];
         let warning = null;
         let cached = false;
@@ -1234,7 +1239,7 @@ async function loadWalletOverviewEntries(chatId, options = {}) {
             console.warn(`[WalletOverview] Failed to load ${normalized}: ${error.message}`);
         }
 
-        results.push({ address: normalized, tokens, warning, cached, totalUsd });
+        results.push({ address: normalized, name: displayName, tokens, warning, cached, totalUsd });
     }
 
     return results;
@@ -4350,7 +4355,8 @@ async function buildUnregisterMenu(lang, chatId) {
     for (const entry of entries) {
         const walletAddr = entry.address;
         const shortAddr = shortenAddress(walletAddr);
-        inline_keyboard.push([{ text: `🧹 ${shortAddr}`, callback_data: `wallet_remove|wallet|${walletAddr}` }]);
+        const label = entry.name ? `${entry.name} • ${shortAddr}` : shortAddr;
+        inline_keyboard.push([{ text: `🧹 ${label}`, callback_data: `wallet_remove|wallet|${walletAddr}` }]);
     }
     inline_keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'wallet_remove|all' }]);
 
@@ -4377,12 +4383,14 @@ function parseRegisterPayload(rawText) {
         return null;
     }
 
-    const wallet = normalizeAddressSafe(parts[0]);
+    const wallet = normalizeAddressSafe(parts.shift());
     if (!wallet) {
         return null;
     }
 
-    return { wallet, tokens: [] };
+    const name = parts.join(' ').trim();
+
+    return { wallet, name: name || null, tokens: [] };
 }
 
 const HELP_COMMAND_DETAILS = {
@@ -5402,7 +5410,8 @@ async function concludeCheckinSuccess(token, challenge) {
     try {
         const wallets = await db.getWalletsForUser(userId);
         if (Array.isArray(wallets) && wallets.length > 0) {
-            walletAddress = wallets[0];
+            const topWallet = wallets[0];
+            walletAddress = normalizeAddressSafe(topWallet?.address || topWallet) || topWallet?.address || topWallet;
         }
     } catch (error) {
         console.warn(`[Checkin] Không thể lấy ví cho ${userId}: ${error.message}`);
@@ -10461,10 +10470,14 @@ function startTelegramBot() {
         }
 
         try {
-            const result = await db.addWalletToUser(chatId, lang, parsed.wallet);
+            const result = await db.addWalletToUser(chatId, lang, parsed.wallet, { name: parsed.name });
 
-            const messageKey = result?.added ? 'register_wallet_saved' : 'register_wallet_exists';
-            const message = t(lang, messageKey, { wallet: shortenAddress(parsed.wallet) });
+            const walletLabel = shortenAddress(parsed.wallet);
+            const effectiveName = parsed.name || result?.name;
+            const messageKey = result?.added
+                ? (effectiveName ? 'register_wallet_saved_named' : 'register_wallet_saved')
+                : (result?.nameChanged ? 'register_wallet_renamed' : 'register_wallet_exists');
+            const message = t(lang, messageKey, { wallet: walletLabel, name: effectiveName });
             const portfolioLinks = [{ address: parsed.wallet, url: buildPortfolioEmbedUrl(parsed.wallet) }];
             await sendReply(msg, message, { parse_mode: 'Markdown', reply_markup: buildWalletActionKeyboard(lang, portfolioLinks) });
             console.log(`[BOT] Đăng ký ${shortenAddress(parsed.wallet)} -> ${chatId} (tokens: auto-detect)`);
@@ -11349,8 +11362,13 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         const fallbackLang = msg.from?.language_code;
 
         if (chatType === 'private') {
-            const lang = await getLang(msg);
-            await sendReply(msg, t(lang, 'checkin_admin_command_group_only'));
+            const lang = await resolveNotificationLanguage(userId, msg.from?.language_code);
+            try {
+                await openAdminHub(userId, { fallbackLang: lang });
+            } catch (error) {
+                console.error(`[AdminHub] Failed to open hub in DM for ${userId}: ${error.message}`);
+                await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+            }
             return;
         }
 
@@ -12047,7 +12065,10 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     const existingWallets = await db.getWalletsForUser(chatId);
                     await db.removeAllWalletsFromUser(chatId);
                     for (const w of existingWallets) {
-                        teardownWalletWatcher(w);
+                        const addr = normalizeAddressSafe(w?.address || w) || w?.address || w;
+                        if (addr) {
+                            teardownWalletWatcher(addr);
+                        }
                     }
                     feedback = t(callbackLang, 'unregister_all_success');
                 } else if (scope === 'wallet' && wallet) {
@@ -13582,7 +13603,7 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                         return;
                     }
 
-                    const result = await db.addWalletToUser(userId, lang, parsed.wallet);
+                    const result = await db.addWalletToUser(userId, lang, parsed.wallet, { name: parsed.name });
 
                     if (registerState.promptMessageId) {
                         try {
@@ -13593,9 +13614,13 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     }
 
                     scheduleMessageDeletion(msg.chat.id, msg.message_id, 15000);
-                    const successKey = result?.added ? 'register_help_success_wallet' : 'register_wallet_exists';
+                    const effectiveName = parsed.name || result?.name;
+                    const successKey = result?.added
+                        ? (effectiveName ? 'register_help_success_wallet_named' : 'register_help_success_wallet')
+                        : (result?.nameChanged ? 'register_wallet_renamed' : 'register_wallet_exists');
                     await sendEphemeralMessage(userId, t(lang, successKey, {
-                        wallet: shortenAddress(parsed.wallet)
+                        wallet: shortenAddress(parsed.wallet),
+                        name: effectiveName
                     }), {}, 20000);
                     registerWizardStates.delete(userId);
                 } catch (error) {
