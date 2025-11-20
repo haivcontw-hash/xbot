@@ -561,6 +561,7 @@ const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
+const tokenWizardStates = new Map();
 const rmchatBotMessages = new Map();
 const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
@@ -4390,6 +4391,7 @@ const HELP_COMMAND_DETAILS = {
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
+    token: { command: '/token', icon: '🧬', descKey: 'help_command_token' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
     help: { command: '/help', icon: '❓', descKey: 'help_command_help' },
@@ -4410,7 +4412,7 @@ const HELP_GROUP_DETAILS = {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash']
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token']
     },
     support: {
         icon: '🎁',
@@ -9230,6 +9232,36 @@ function buildTxhashHashPromptText(lang, chainLabel, pendingHash = null) {
     return parts.join('\n');
 }
 
+function buildTokenChainKeyboard(lang, entries = []) {
+    const sorted = sortTxhashChainEntries(entries);
+    const buttons = sorted.map((entry) => {
+        const label = entry.chainShortName || entry.chainName || `#${entry.chainIndex}`;
+        return {
+            text: t(lang, 'token_chain_option', { chain: label, index: entry.chainIndex }),
+            callback_data: `token_chain:${entry.chainIndex}`
+        };
+    });
+
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    if (rows.length === 0) {
+        return buildCloseKeyboard(lang, { backCallbackData: 'token_back' });
+    }
+
+    return appendCloseButton({ inline_keyboard: rows }, lang, { backCallbackData: 'token_back' });
+}
+
+function buildTokenAddressPromptText(lang, chainLabel, pendingAddress = null) {
+    const parts = [t(lang, 'token_address_prompt', { chain: chainLabel })];
+    if (pendingAddress) {
+        parts.push(t(lang, 'token_address_prefill', { address: pendingAddress }));
+    }
+    return parts.join('\n');
+}
+
 function buildRmchatKeyboard(lang) {
     const inline_keyboard = [
         [{ text: t(lang, 'rmchat_option_bot'), callback_data: 'rmchat:bot' }],
@@ -9342,6 +9374,120 @@ async function startTxhashFlow({ chatId, userId, lang, sourceMessage = null, pen
         chatId: targetChatId.toString(),
         lang,
         pendingHash: pendingHash || null,
+        replyContextMessage: sourceMessage,
+        promptMessageId: message?.message_id || null,
+        chainOptions: chainEntries
+    });
+}
+
+async function deliverTokenDetail({ chatId, lang, chainEntry = null, chainIndex = null, contractAddress, replyContextMessage = null }) {
+    const normalizedAddress = normalizeAddressSafe(contractAddress) || contractAddress;
+    if (!normalizedAddress) {
+        await sendMessageRespectingThread(chatId, replyContextMessage || null, t(lang, 'token_help_invalid'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' })
+        });
+        return;
+    }
+
+    const resolvedChainIndex = Number.isFinite(chainEntry?.chainIndex)
+        ? Number(chainEntry.chainIndex)
+        : Number.isFinite(chainIndex)
+            ? Number(chainIndex)
+            : null;
+
+    const chainContext = chainEntry
+        ? {
+            chainIndex: resolvedChainIndex,
+            chainId: Number.isFinite(chainEntry.chainId) ? Number(chainEntry.chainId) : resolvedChainIndex,
+            chainShortName: chainEntry.chainShortName || null,
+            chainName: chainEntry.chainName || null,
+            aliases: Array.isArray(chainEntry.aliases) ? chainEntry.aliases : null
+        }
+        : {
+            chainIndex: resolvedChainIndex,
+            chainId: resolvedChainIndex,
+            chainShortName: null,
+            chainName: null
+        };
+
+    const baseContext = {
+        chainContext,
+        chainLabel: formatDexChainLabel(chainContext, lang),
+        token: {
+            tokenAddress: normalizedAddress,
+            tokenContractAddress: normalizedAddress,
+            contractAddress: normalizedAddress,
+            chainIndex: resolvedChainIndex,
+            chainId: chainContext.chainId
+        }
+    };
+
+    let tokenMeta = {};
+    let actionResult = null;
+
+    try {
+        const payload = await fetchWalletTokenActionPayload('token_info', baseContext);
+        const primaryEntry = unwrapOkxFirst(payload);
+        if (primaryEntry) {
+            tokenMeta = {
+                name: primaryEntry.name || primaryEntry.tokenName || null,
+                symbol: primaryEntry.symbol || primaryEntry.tokenSymbol || null,
+                decimals: pickOkxNumeric(primaryEntry, ['decimals', 'decimal', 'tokenDecimal']) || null
+            };
+        }
+        const enhancedContext = { ...baseContext, token: { ...baseContext.token, ...tokenMeta } };
+        actionResult = normalizeWalletTokenActionResult('token_info', payload, lang, enhancedContext);
+        Object.assign(baseContext.token, tokenMeta);
+    } catch (error) {
+        console.error(`[Token] Failed to fetch token info for ${normalizedAddress}: ${error.message}`);
+    }
+
+    const tokenCallbackId = registerWalletTokenContext(baseContext);
+    const contextWithCallback = { ...baseContext, tokenCallbackId };
+    const menu = buildWalletTokenMenu(contextWithCallback, lang, { actionResult });
+
+    const message = await sendMessageRespectingThread(chatId, replyContextMessage || null, menu.text, {
+        parse_mode: 'HTML',
+        reply_markup: menu.replyMarkup
+    });
+
+    if (menu.extraTexts && menu.extraTexts.length > 0) {
+        await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, { source: replyContextMessage || message });
+    }
+}
+
+async function startTokenFlow({ chatId, userId, lang, sourceMessage = null, pendingAddress = null } = {}) {
+    const targetChatId = sourceMessage?.chat?.id ?? chatId;
+    const userKey = userId ? userId.toString() : targetChatId?.toString();
+    if (!targetChatId || !userKey) {
+        return;
+    }
+
+    let chainEntries;
+    try {
+        chainEntries = await collectTxhashChainEntries();
+    } catch (error) {
+        console.error(`[Token] Failed to load chain directory: ${error.message}`);
+    }
+
+    if (!Array.isArray(chainEntries) || chainEntries.length === 0) {
+        await sendMessageRespectingThread(targetChatId, sourceMessage, t(lang, 'token_chain_missing'), {
+            reply_markup: buildCloseKeyboard(lang, { backCallbackData: 'token_back' })
+        });
+        return;
+    }
+
+    const keyboard = buildTokenChainKeyboard(lang, chainEntries);
+    const promptText = t(lang, 'token_chain_prompt');
+    const message = sourceMessage
+        ? await sendReply(sourceMessage, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard })
+        : await bot.sendMessage(targetChatId, promptText, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
+
+    tokenWizardStates.set(userKey, {
+        stage: 'chain',
+        chatId: targetChatId.toString(),
+        lang,
+        pendingAddress: pendingAddress || null,
         replyContextMessage: sourceMessage,
         promptMessageId: message?.message_id || null,
         chainOptions: chainEntries
@@ -10498,6 +10644,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 }
 
+async function handleTokenCommand(msg, explicitAddress = null) {
+    const lang = await getLang(msg);
+    const text = msg.text || '';
+    const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+
+    const contractAddress = explicitAddress || (match ? match[1] : null);
+
+    await startTokenFlow({
+        chatId: msg.chat.id,
+        userId: msg.from?.id,
+        lang,
+        sourceMessage: msg,
+        pendingAddress: contractAddress || null
+    });
+}
+
     async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
@@ -10648,7 +10810,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 ]
             }
         };
-        sendReply(msg, text, options);
+        const sent = await sendReply(msg, text, options);
+        if (sent?.chat?.id && sent?.message_id) {
+            scheduleMessageDeletion(sent.chat.id, sent.message_id, 3000);
+        }
     }
 
 
@@ -10691,6 +10856,23 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         }
 
         await startTxhashFlow({ chatId: userId, userId, lang: dmLang });
+        return null;
+    }
+
+    async function startTokenWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = tokenWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        await startTokenFlow({ chatId: userId, userId, lang: dmLang });
         return null;
     }
     
@@ -10787,6 +10969,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
         await handleTxhashCommand(msg, null);
+    });
+
+    bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        await handleTokenCommand(msg, null);
     });
 
     function parseDurationText(value) {
@@ -11332,6 +11518,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 return { message: t(lang, 'help_action_failed'), showAlert: true };
             }
         },
+        token: async (query, lang) => {
+            try {
+                await startTokenWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start token wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
+        },
         unregister: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleUnregisterCommand(synthetic);
@@ -11413,6 +11612,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 return;
             }
 
+            if (query.data === 'token_back') {
+                await bot.answerCallbackQuery(queryId);
+                if (chatId) {
+                    const helpText = buildHelpText(callbackLang);
+                    await bot.sendMessage(chatId, helpText, {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: true,
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                }
+                return;
+            }
+
             if (query.data && query.data.startsWith('txhash_chain:')) {
                 const userKey = query.from.id.toString();
                 const rawIndex = query.data.split(':')[1];
@@ -11453,6 +11665,50 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 });
 
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'txhash_chain_selected', { chain: chainLabel }) });
+                return;
+            }
+
+            if (query.data && query.data.startsWith('token_chain:')) {
+                const userKey = query.from.id.toString();
+                const rawIndex = query.data.split(':')[1];
+                const selectedIndex = Number(rawIndex);
+
+                const currentState = tokenWizardStates.get(userKey) || {};
+                const chainEntries = currentState.chainOptions || await collectTxhashChainEntries();
+                const chainEntry = chainEntries.find((entry) => Number(entry?.chainIndex) === Number(selectedIndex));
+
+                if (!chainEntry) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_chain_missing'), show_alert: true });
+                    return;
+                }
+
+                const chainLabel = chainEntry.chainShortName || chainEntry.chainName || `#${chainEntry.chainIndex}`;
+                const promptText = buildTokenAddressPromptText(callbackLang, chainLabel, currentState.pendingAddress);
+                const placeholder = t(callbackLang, 'token_help_placeholder');
+
+                const targetChatId = currentState.chatId || chatId || query.from.id.toString();
+                const prompt = await sendMessageRespectingThread(targetChatId, currentState.replyContextMessage || query.message, promptText, {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: placeholder
+                    },
+                    allow_sending_without_reply: true
+                });
+
+                tokenWizardStates.set(userKey, {
+                    stage: 'address',
+                    chatId: targetChatId.toString(),
+                    lang: callbackLang,
+                    pendingAddress: currentState.pendingAddress || null,
+                    replyContextMessage: currentState.replyContextMessage || query.message,
+                    promptMessageId: prompt?.message_id || null,
+                    chainIndex: chainEntry.chainIndex,
+                    chainLabel,
+                    chainOptions: chainEntries,
+                    chainEntry
+                });
+
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'token_chain_selected', { chain: chainLabel }) });
                 return;
             }
 
@@ -13323,7 +13579,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
                 const messageKey = isGroupChat ? 'group_language_changed_success' : 'language_changed_success';
                 const message = t(newLang, messageKey); // Dùng newLang
-                sendReply(query.message, message);
+                const feedback = await sendReply(query.message, message);
+                if (feedback?.chat?.id && feedback?.message_id) {
+                    scheduleMessageDeletion(feedback.chat.id, feedback.message_id, 3000);
+                }
                 console.log(`[BOT] ChatID ${chatId} đã đổi ngôn ngữ sang: ${newLang}`);
                 bot.answerCallbackQuery(queryId, { text: message });
             }
@@ -13427,6 +13686,52 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     console.error(`[TxhashWizard] Failed to handle txhash for ${userId}: ${error.message}`);
                     await sendReply(msg, t(effectiveLang, 'txhash_error'), {
                         reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'txhash_back' })
+                    });
+                }
+                return;
+            }
+
+            const tokenState = tokenWizardStates.get(userId);
+            if (
+                tokenState &&
+                tokenState.stage === 'address' &&
+                msg.chat?.id?.toString() === tokenState.chatId &&
+                msg.reply_to_message?.message_id === tokenState.promptMessageId
+            ) {
+                const rawAddress = (msg.text || '').trim();
+                const effectiveLang = tokenState.lang || lang;
+
+                if (!rawAddress) {
+                    const keyboard = buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' });
+                    if (msg.chat.type === 'private') {
+                        await sendEphemeralMessage(userId, t(effectiveLang, 'token_help_invalid'));
+                    } else {
+                        await sendMessageRespectingThread(tokenState.chatId, msg, t(effectiveLang, 'token_help_invalid'), { reply_markup: keyboard });
+                    }
+                    return;
+                }
+
+                if (!tokenState.chainIndex) {
+                    await sendMessageRespectingThread(tokenState.chatId, msg, t(effectiveLang, 'token_chain_missing'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                    return;
+                }
+
+                try {
+                    await deliverTokenDetail({
+                        chatId: tokenState.chatId,
+                        lang: effectiveLang,
+                        chainEntry: tokenState.chainEntry,
+                        chainIndex: tokenState.chainIndex,
+                        contractAddress: rawAddress,
+                        replyContextMessage: tokenState.replyContextMessage || msg
+                    });
+                    tokenWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[TokenWizard] Failed to handle token for ${userId}: ${error.message}`);
+                    await sendReply(msg, t(effectiveLang, 'token_error'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
                     });
                 }
                 return;
