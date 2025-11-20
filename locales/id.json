@@ -69,7 +69,7 @@
   "help_command_unregister": "Hapus dompet",
   "help_command_language": "Bahasa",
   "help_command_help": "Bantuan",
-  "help_section_checkin_title": "✅ Absen harian",
+  "help_section_checkin_title": "Absen harian",
   "help_command_checkin": "Check-in harian",
   "help_command_topcheckin": "Peringkat check-in",
   "help_command_checkin_admin": "• Pusat admin — Gunakan perintah `/admin` di grup atau buka hub admin di chat pribadi untuk mengirim pengingat, melihat daftar hadir, membuka blokir anggota, mengatur poin, menentukan periode rekap, rasio soal, jadwal pengingat, dan mengirim pesan rahasia.",
@@ -394,6 +394,7 @@
   "help_command_admin": "Buka pusat admin untuk mengatur pengingat, poin, pesan rahasia, ringkasan, dan soal untuk semua grup yang kamu kelola.",
   "donate_title": "Dukung Banmao dengan token BANMAO",
   "donate_description": "Pilih tujuan kontribusimu.",
+  "donate_simple_message": "Gunakan /donatecm jika kamu admin grup / Gunakan /donatedev jika ingin mendukung pengembang bot Xlayer.",
   "donate_community_wallet_label": "Dompet komunitas",
   "donate_community_wallet_desc": "Dipakai untuk hadiah, likuiditas, pemasaran, dan fitur baru.",
   "donate_community_wallet_warning": "Kirim BANMAO atau BANMAO LP di X Layer dengan gas yang cukup — setiap kontribusi tercatat on-chain.",
@@ -658,5 +659,8 @@
   "donatecm_default_note": "Dukung dompet komunitas.",
   "donatecm_overview": "Info donasi komunitas saat ini:\n<b>{address}</b>\n<i>{note}</i>\n\nKirim /donatecm <alamat_dompet> <catatan> untuk memperbarui.",
   "donatecm_invalid_wallet": "Harap berikan alamat dompet yang valid.",
-  "donatecm_updated": "Donasi komunitas diperbarui ke {address}. Catatan: {note}"
+  "donatecm_updated": "Donasi komunitas diperbarui ke {address}. Catatan: {note}",
+  "donatecm_broadcast_button": "Kirim pengumuman donasi",
+  "donatecm_broadcast_message": "📢 Ajakan donasi komunitas:\n<b>{address}</b>\n<i>{note}</i>\nYuk ikut berdonasi untuk mendukung komunitas!",
+  "donatecm_broadcast_sent": "Pengumuman donasi telah dikirim."
 }

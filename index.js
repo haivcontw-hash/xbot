@@ -1122,8 +1122,8 @@ async function buildWalletChainMenu(lang, walletAddress) {
     };
 }
 
-async function buildWalletSelectMenu(lang, chatId) {
-    const wallets = await db.getWalletsForUser(chatId);
+async function buildWalletSelectMenu(lang, chatId, walletsOverride = null) {
+    const wallets = Array.isArray(walletsOverride) ? walletsOverride : await db.getWalletsForUser(chatId);
     if (!Array.isArray(wallets) || wallets.length === 0) {
         return {
             text: t(lang, 'mywallet_not_linked'),
@@ -4524,8 +4524,8 @@ function buildHelpGroupCard(lang, groupKey) {
 
     const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.label)) : [0];
     const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.description)) : [0];
-    const commandWidth = Math.min(Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0), 32);
-    const descWidth = Math.min(Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0), 70);
+    const commandWidth = Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0);
+    const descWidth = Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0);
 
     const tableLines = [];
     tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} │ ${padDisplayText(headerDesc, descWidth)}`);
@@ -4587,49 +4587,8 @@ function buildDonateMessage(lang, { variant = 'community', groupSettings = null 
         return lines.filter(Boolean).join('\n');
     }
 
-    const donationSettings = groupSettings?.donation || {};
-    const communityAddress = donationSettings.address || COMMUNITY_WALLET_ADDRESS;
-    const communityNote = donationSettings.note || null;
-
-    const sections = [
-        {
-            labelKey: 'donate_community_wallet_label',
-            descKey: communityNote ? null : 'donate_community_wallet_desc',
-            desc: communityNote ? communityNote : null,
-            warningKey: 'donate_community_wallet_warning',
-            address: communityAddress
-        },
-        {
-            labelKey: 'donate_dead_wallet_label',
-            descKey: 'donate_dead_wallet_desc',
-            warningKey: 'donate_dead_wallet_warning',
-            address: DEAD_WALLET_ADDRESS
-        }
-    ];
-
-    for (const section of sections) {
-        lines.push('');
-        const label = t(lang, section.labelKey);
-        lines.push(`<b>${escapeHtml(label)}</b>`);
-
-        if (section.address) {
-            lines.push(`<code>${escapeHtml(section.address)}</code>`);
-        } else {
-            lines.push(`<i>${escapeHtml(t(lang, 'donate_wallet_missing', { label }))}</i>`);
-        }
-
-        if (section.descKey) {
-            lines.push(`<i>${escapeHtml(t(lang, section.descKey))}</i>`);
-        }
-        if (section.desc) {
-            lines.push(`<i>${escapeHtml(section.desc)}</i>`);
-        }
-        if (section.warningKey) {
-            lines.push(`<i>${escapeHtml(t(lang, section.warningKey))}</i>`);
-        }
-    }
-
-    lines.push('', `<i>${escapeHtml(t(lang, 'donate_footer'))}</i>`);
+    lines.push('');
+    lines.push(`<i>${escapeHtml(t(lang, 'donate_simple_message'))}</i>`);
     return lines.filter(Boolean).join('\n');
 }
 
@@ -4637,10 +4596,22 @@ function buildDonateKeyboard(lang) {
     const inline_keyboard = [
         [{ text: `/donatecm`, callback_data: 'donate_cmd|donatecm' }],
         [{ text: `/donatedev`, callback_data: 'donate_cmd|donatedev' }],
-        [{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'donate_cmd|close' }]
+        [{ text: t(lang, 'help_button_close'), callback_data: 'donate_cmd|close' }]
     ];
 
     return { inline_keyboard };
+}
+
+async function buildCommunityDonationBroadcastText(lang, chatId) {
+    const settings = chatId ? await db.getGroupBotSettings(chatId) : null;
+    const donation = settings?.donation || {};
+    const address = donation.address || COMMUNITY_WALLET_ADDRESS;
+    const note = donation.note || t(lang, 'donatecm_default_note');
+
+    return t(lang, 'donatecm_broadcast_message', {
+        address: escapeHtml(address),
+        note: escapeHtml(note)
+    });
 }
 
 function resolveHelpGroups(view = 'user') {
@@ -4668,7 +4639,7 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
             }
             const title = t(lang, detail.titleKey);
             const isActive = groupKey === activeGroup;
-            const prefix = isActive ? '✅' : '•';
+            const prefix = isActive ? '👇️' : '•';
             groupButtons.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
         }
     }
@@ -4683,7 +4654,7 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
         commands = [...commands, 'txhash'];
     }
     if (commands.length > 0) {
-        inline_keyboard.push([{ text: `📌 ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
+        inline_keyboard.push([{ text: `${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
         for (let i = 0; i < commands.length; i += 2) {
             const row = [];
             for (let j = i; j < Math.min(i + 2, commands.length); j += 1) {
@@ -4701,12 +4672,12 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     }
 
     if (view === 'admin') {
-        inline_keyboard.push([{ text: `🙋‍♂️ ${t(lang, 'help_button_user')}`, callback_data: 'help_view|user' }]);
+        inline_keyboard.push([{ text: t(lang, 'help_button_user'), callback_data: 'help_view|user' }]);
     } else {
-        inline_keyboard.push([{ text: `🛠️ ${t(lang, 'help_button_admin')}`, callback_data: 'help_view|admin' }]);
+        inline_keyboard.push([{ text: t(lang, 'help_button_admin'), callback_data: 'help_view|admin' }]);
     }
 
-    inline_keyboard.push([{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'help_close' }]);
+    inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
     return { inline_keyboard };
 }
 
@@ -10596,7 +10567,13 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         try {
-            const menu = await buildWalletSelectMenu(lang, chatId);
+            const wallets = await db.getWalletsForUser(chatId);
+            if (!Array.isArray(wallets) || wallets.length === 0) {
+                await handleRegisterCommand(msg, null);
+                return;
+            }
+
+            const menu = await buildWalletSelectMenu(lang, chatId, wallets);
             await sendReply(msg, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
         } catch (error) {
             console.error(`[MyWallet] Failed to render wallet for ${chatId}: ${error.message}`);
@@ -10661,7 +10638,11 @@ function startTelegramBot() {
                 address: escapeHtml(address),
                 note: escapeHtml(note)
             });
-            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+            const inline_keyboard = [
+                [{ text: t(lang, 'donatecm_broadcast_button'), callback_data: 'donatecm_broadcast' }],
+                [{ text: t(lang, 'help_button_close'), callback_data: 'donate_cmd|close' }]
+            ];
+            await sendReply(msg, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard } });
             return;
         }
 
@@ -12303,6 +12284,28 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                 }
 
                 await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data === 'donatecm_broadcast') {
+                const chatId = query.message?.chat?.id?.toString();
+                const userId = query.from?.id;
+                const chatType = query.message?.chat?.type;
+
+                if (!chatId || !userId || !['group', 'supergroup'].includes(chatType)) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
+                const isAdmin = await isGroupAdmin(chatId, userId);
+                if (!isAdmin) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'donatecm_no_permission'), show_alert: true });
+                    return;
+                }
+
+                const broadcastText = await buildCommunityDonationBroadcastText(callbackLang, chatId);
+                await bot.sendMessage(chatId, broadcastText, { parse_mode: 'HTML', disable_web_page_preview: true });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'donatecm_broadcast_sent') });
                 return;
             }
 

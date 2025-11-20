@@ -69,7 +69,7 @@
   "help_command_unregister": "Xóa bỏ ví",
   "help_command_language": "Ngôn ngữ",
   "help_command_help": "Trợ giúp",
-  "help_section_checkin_title": "✅ Điểm danh hằng ngày",
+  "help_section_checkin_title": "Điểm danh hằng ngày",
   "help_command_checkin": "Điểm danh",
   "help_command_topcheckin": "Xếp hạng điểm danh",
   "help_command_checkin_admin": "• Quản lý điểm danh — Dùng `/admin` ngay trong nhóm hoặc mở trung tâm quản trị ở chat riêng để gửi nhắc nhở, xem danh sách, mở khóa thành viên, chỉnh điểm, tinh chỉnh tỉ lệ câu hỏi, cài lịch nhắc và gửi tin bí mật.",
@@ -438,6 +438,7 @@
   "help_command_admin": "Mở trung tâm quản trị để đặt nhắc nhở, điểm, tin nhắn bí mật và nhiều tuỳ chọn khác cho mọi nhóm bạn quản lý.",
   "donate_title": "Ủng hộ Banmao bằng token BANMAO",
   "donate_description": "Chọn nơi bạn muốn đóng góp.",
+  "donate_simple_message": "Sử dụng lệnh /donatecm nếu bạn là admin group / Sử dụng lệnh /donatedev nếu bạn muốn ủng hộ nhà phát triển Xlayer - BOT.",
   "donate_community_wallet_label": "Ví cộng đồng",
   "donate_community_wallet_desc": "Dùng để thưởng, tạo thanh khoản, marketing và phát triển tính năng mới.",
   "donate_community_wallet_warning": "Gửi BANMAO hoặc BANMAO LP trên X Layer và nhớ chuẩn bị phí gas — mọi giao dịch đều được ghi lại on-chain.",
@@ -658,5 +659,8 @@
   "donatecm_default_note": "Ủng hộ quỹ cộng đồng.",
   "donatecm_overview": "Thông tin quyên góp cộng đồng hiện tại:\n<b>{address}</b>\n<i>{note}</i>\n\nGửi /donatecm <địa_chỉ_ví> <ghi_chú> để cập nhật.",
   "donatecm_invalid_wallet": "Vui lòng cung cấp địa chỉ ví hợp lệ.",
-  "donatecm_updated": "Đã cập nhật ví quyên góp cộng đồng thành {address}. Ghi chú: {note}"
+  "donatecm_updated": "Đã cập nhật ví quyên góp cộng đồng thành {address}. Ghi chú: {note}",
+  "donatecm_broadcast_button": "Gửi thông báo ủng hộ",
+  "donatecm_broadcast_message": "📢 Lời kêu gọi ủng hộ cộng đồng:\n<b>{address}</b>\n<i>{note}</i>\nHãy góp một ít token để phát triển cộng đồng!",
+  "donatecm_broadcast_sent": "Đã gửi thông báo ủng hộ."
 }

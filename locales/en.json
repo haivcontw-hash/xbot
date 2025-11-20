@@ -69,7 +69,7 @@
   "help_command_unregister": "Remove wallet",
   "help_command_language": "Language",
   "help_command_help": "Help",
-  "help_section_checkin_title": "✅ Daily check-in",
+  "help_section_checkin_title": "Daily check-in",
   "help_command_checkin": "Daily check-in",
   "help_command_topcheckin": "Check-in leaderboard",
   "help_command_checkin_admin": "• Admin hub — Run `/admin` in your group or open it in private chat to broadcast reminders, review attendance, unlock members, adjust points, tune the question mix, configure schedules, or send secret notes.",
@@ -438,6 +438,7 @@
   "help_command_admin": "Open the admin hub to configure reminders, points, messages, and more for every group you manage.",
   "donate_title": "Support Banmao with BANMAO tokens",
   "donate_description": "Pick where your contribution should go.",
+  "donate_simple_message": "Use /donatecm if you're a group admin / Use /donatedev if you want to support the Xlayer bot developer.",
   "donate_community_wallet_label": "Community wallet",
   "donate_community_wallet_desc": "Funds rewards, liquidity, marketing, and new features.",
   "donate_community_wallet_warning": "Send BANMAO or BANMAO LP on X Layer with enough gas — every contribution is tracked on-chain.",
@@ -658,5 +659,8 @@
   "donatecm_default_note": "Support the community wallet.",
   "donatecm_overview": "Current community donation info:\n<b>{address}</b>\n<i>{note}</i>\n\nSend /donatecm <wallet_address> <note> to update.",
   "donatecm_invalid_wallet": "Please provide a valid wallet address.",
-  "donatecm_updated": "Updated community donation to {address}. Note: {note}"
+  "donatecm_updated": "Updated community donation to {address}. Note: {note}",
+  "donatecm_broadcast_button": "Post a donation call",
+  "donatecm_broadcast_message": "📢 Community donation call:\n<b>{address}</b>\n<i>{note}</i>\nPlease chip in to grow the community!",
+  "donatecm_broadcast_sent": "Donation notice posted."
 }

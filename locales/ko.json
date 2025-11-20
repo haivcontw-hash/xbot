@@ -69,7 +69,7 @@
   "help_command_unregister": "지갑 삭제",
   "help_command_language": "언어",
   "help_command_help": "도움말",
-  "help_section_checkin_title": "✅ 데일리 출석",
+  "help_section_checkin_title": "데일리 출석",
   "help_command_checkin": "출석 체크",
   "help_command_topcheckin": "출석 순위",
   "help_command_checkin_admin": "• 체크인 관리 — 그룹에서 `/admin` 명령을 실행하거나 개인 채팅에서 관리 허브를 열어 공지 발송, 출석 확인, 사용자 잠금 해제, 포인트 조정, 집계 기간·문항 비중·알림 일정을 설정하고 비밀 메시지를 보낼 수 있습니다.",
@@ -394,6 +394,7 @@
   "help_command_admin": "/admin 허브에서 모든 그룹의 알림, 포인트, 비밀 메시지, 문제 재설정 등을 한 번에 관리합니다.",
   "donate_title": "BANMAO 토큰으로 Banmao를 후원하세요",
   "donate_description": "기부가 사용될 위치를 선택하세요.",
+  "donate_simple_message": "그룹 관리자라면 /donatecm 을 사용하세요 / 봇 개발자를 후원하려면 /donatedev 를 사용하세요.",
   "donate_community_wallet_label": "커뮤니티 지갑",
   "donate_community_wallet_desc": "보상, 유동성, 마케팅, 신규 기능 개발에 사용됩니다.",
   "donate_community_wallet_warning": "X Layer에서 BANMAO 또는 BANMAO LP를 충분한 가스와 함께 전송하세요. 모든 기부는 온체인에 기록됩니다.",
@@ -658,5 +659,8 @@
   "donatecm_default_note": "커뮤니티 지갑을 후원하세요.",
   "donatecm_overview": "현재 커뮤니티 후원 정보:\n<b>{address}</b>\n<i>{note}</i>\n\n업데이트하려면 /donatecm <지갑주소> <메모> 를 보내세요.",
   "donatecm_invalid_wallet": "올바른 지갑 주소를 입력하세요.",
-  "donatecm_updated": "커뮤니티 후원 정보가 {address}로 업데이트되었습니다. 메모: {note}"
+  "donatecm_updated": "커뮤니티 후원 정보가 {address}로 업데이트되었습니다. 메모: {note}",
+  "donatecm_broadcast_button": "후원 안내 보내기",
+  "donatecm_broadcast_message": "📢 커뮤니티 후원 안내:\n<b>{address}</b>\n<i>{note}</i>\n커뮤니티 성장을 위해 함께 후원해 주세요!",
+  "donatecm_broadcast_sent": "후원 안내를 전송했습니다."
 }

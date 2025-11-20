@@ -68,7 +68,7 @@
   "help_command_unregister": "删除钱包",
   "help_command_language": "语言",
   "help_command_help": "帮助",
-  "help_section_checkin_title": "✅ 每日签到",
+  "help_section_checkin_title": "每日签到",
   "help_command_checkin": "每日签到",
   "help_command_topcheckin": "签到排行",
   "help_command_checkin_admin": "• 签到管理 — 在群组里使用 `/admin` 或在私聊打开管理中心，可群发提醒、查看名单、解除封禁、调整积分、设置统计天数、题型权重与提醒计划，并发送密语。",
@@ -437,6 +437,7 @@
   "help_command_admin": "打开管理员中心，集中设置提醒、积分、私信、题目等每个群组的配置。",
   "donate_title": "用 BANMAO 支持 Banmao 社区",
   "donate_description": "选择你的捐赠要流向哪里。",
+  "donate_simple_message": "如果你是群管理员请使用 /donatecm / 想要支持 Xlayer 机器人的开发者请使用 /donatedev。",
   "donate_community_wallet_label": "社区钱包",
   "donate_community_wallet_desc": "用于奖励、流动性、市场推广以及新功能开发。",
   "donate_community_wallet_warning": "请在 X Layer 上发送 BANMAO 或 BANMAO LP，并预留足够 gas，所有贡献都会记录在链上。",
@@ -658,5 +659,8 @@
   "donatecm_default_note": "支持社区钱包。",
   "donatecm_overview": "当前社区捐赠信息:\n<b>{address}</b>\n<i>{note}</i>\n\n发送 /donatecm <钱包地址> <备注> 进行更新。",
   "donatecm_invalid_wallet": "请提供有效的钱包地址。",
-  "donatecm_updated": "社区捐赠已更新为 {address}。备注：{note}"
+  "donatecm_updated": "社区捐赠已更新为 {address}。备注：{note}",
+  "donatecm_broadcast_button": "发布捐赠公告",
+  "donatecm_broadcast_message": "📢 社区捐赠呼吁：\n<b>{address}</b>\n<i>{note}</i>\n欢迎为社区发展贡献一份力量！",
+  "donatecm_broadcast_sent": "捐赠公告已发送。"
 }
