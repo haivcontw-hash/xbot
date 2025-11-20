@@ -238,7 +238,7 @@ const WALLET_TOKEN_TRADE_LIMIT = 100;
 const WALLET_TOKEN_CANDLE_DAY_SPAN = 7;
 const WALLET_TOKEN_CANDLE_RECENT_LIMIT = 24;
 const WALLET_TOKEN_CANDLE_RECENT_BAR = '1H';
-const WALLET_TOKEN_PRICE_INFO_HISTORY_DAYS = 7;
+const WALLET_TOKEN_PRICE_INFO_HISTORY_DAYS = 1;
 const WALLET_TOKEN_ACTIONS = [
     {
         key: 'current_price',
@@ -1737,10 +1737,12 @@ function splitTelegramMessageText(text, limit = TELEGRAM_MESSAGE_SAFE_LENGTH) {
     return chunks.length > 0 ? chunks : [''];
 }
 
-async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
+async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts, options = {}) {
     if (!botInstance || !chatId || !Array.isArray(extraTexts) || extraTexts.length === 0) {
         return;
     }
+
+    const { source = null, replyMarkup = null } = options;
 
     for (const chunk of extraTexts) {
         const text = typeof chunk === 'string' ? chunk : '';
@@ -1748,7 +1750,11 @@ async function sendWalletTokenExtraTexts(botInstance, chatId, extraTexts) {
             continue;
         }
         try {
-            await botInstance.sendMessage(chatId, text, { parse_mode: 'HTML' });
+            const messageOptions = buildThreadedOptions(source, { parse_mode: 'HTML' });
+            if (replyMarkup) {
+                messageOptions.reply_markup = replyMarkup;
+            }
+            await botInstance.sendMessage(chatId, text, messageOptions);
         } catch (error) {
             console.warn(`[WalletToken] Failed to send extra chunk: ${error.message}`);
             break;
@@ -3532,23 +3538,17 @@ const HELP_GROUP_DETAILS = {
         descKey: 'help_group_onboarding_desc',
         commands: ['start', 'help']
     },
-    account: {
-        icon: '🆔',
-        titleKey: 'help_group_account_title',
-        descKey: 'help_group_account_desc',
-        commands: ['register', 'mywallet', 'unregister']
+    xlayer_check: {
+        icon: '🛰️',
+        titleKey: 'help_group_xlayer_check_title',
+        descKey: 'help_group_xlayer_check_desc',
+        commands: ['register', 'mywallet', 'unregister', 'rules', 'okxchains', 'okx402status']
     },
     language: {
         icon: '🌐',
         titleKey: 'help_group_language_title',
         descKey: 'help_group_language_desc',
         commands: ['language']
-    },
-    insights: {
-        icon: '📈',
-        titleKey: 'help_group_insights_title',
-        descKey: 'help_group_insights_desc',
-        commands: ['rules', 'okxchains', 'okx402status']
     },
     support: {
         icon: '🎁',
@@ -3602,7 +3602,7 @@ const ADMIN_SUBCOMMANDS = [
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        groups: ['onboarding', 'account', 'language', 'insights', 'support']
+        groups: ['onboarding', 'xlayer_check', 'language', 'support']
     },
     {
         titleKey: 'help_section_checkin_title',
@@ -3617,97 +3617,30 @@ const HELP_ADMIN_SECTIONS = [
     }
 ];
 
-function wrapText(input, width) {
-    const raw = typeof input === 'string' ? input.trim() : '';
-    if (!raw) {
-        return [''];
-    }
-
-    if (raw.length <= width) {
-        return [raw];
-    }
-
-    const words = raw.split(/\s+/);
-    const lines = [];
-    let current = '';
-
-    for (const word of words) {
-        const proposed = current ? `${current} ${word}` : word;
-        if (proposed.length <= width) {
-            current = proposed;
-        } else {
-            if (current) {
-                lines.push(current);
-            }
-            if (word.length > width) {
-                lines.push(word);
-                current = '';
-            } else {
-                current = word;
-            }
-        }
-    }
-
-    if (current) {
-        lines.push(current);
-    }
-
-    return lines;
-}
-
-function buildHelpRows(lang, groupKeys) {
-    const entries = [];
-    let commandWidth = 0;
-    const maxDescWidth = 54;
-
-    for (const key of groupKeys) {
-        const detail = HELP_GROUP_DETAILS[key];
-        if (!detail) {
-            continue;
-        }
-        const title = t(lang, detail.titleKey);
-        const commandLabel = `${detail.icon} ${title}`;
-        commandWidth = Math.max(commandWidth, commandLabel.length);
-        const descriptionParts = [t(lang, detail.descKey)];
-        const commandList = (detail.commands || [])
-            .map((cmdKey) => HELP_COMMAND_DETAILS[cmdKey]?.command)
-            .filter(Boolean)
-            .join(', ');
-        if (commandList) {
-            descriptionParts.push(t(lang, 'help_group_command_hint', { commands: commandList }));
-        }
-        const description = descriptionParts.filter(Boolean).join(' ');
-        const wrappedDescription = wrapText(description, maxDescWidth);
-        entries.push({ commandLabel, descriptionLines: wrappedDescription });
-    }
-
-    if (entries.length === 0) {
+function buildHelpGroupCard(lang, groupKey) {
+    const detail = HELP_GROUP_DETAILS[groupKey];
+    if (!detail) {
         return '';
     }
 
-    const descWidth = Math.min(maxDescWidth, Math.max(...entries.map((entry) => entry.descriptionLines.reduce((max, line) => Math.max(max, line.length), 0)), 10));
-    const commandColWidth = Math.min(28, Math.max(commandWidth, 12));
-    const top = `┌─${'─'.repeat(commandColWidth)}┬─${'─'.repeat(descWidth)}┐`;
-    const bottom = `└─${'─'.repeat(commandColWidth)}┴─${'─'.repeat(descWidth)}┘`;
-    const separator = `├─${'─'.repeat(commandColWidth)}┼─${'─'.repeat(descWidth)}┤`;
+    const title = t(lang, detail.titleKey);
+    const desc = detail.descKey ? t(lang, detail.descKey) : '';
+    const lines = [`${detail.icon} <b>${escapeHtml(title)}</b>`];
 
-    const lines = [top];
+    if (desc) {
+        lines.push(`<i>${escapeHtml(desc)}</i>`);
+    }
 
-    entries.forEach((entry, index) => {
-        entry.descriptionLines.forEach((line, lineIndex) => {
-            const commandCell = lineIndex === 0 ? entry.commandLabel : '';
-            const paddedCommand = commandCell.padEnd(commandColWidth, ' ');
-            const paddedDesc = line.padEnd(descWidth, ' ');
-            lines.push(`│ ${paddedCommand} │ ${paddedDesc} │`);
-        });
-
-        if (index < entries.length - 1) {
-            lines.push(separator);
-        }
+    const commands = (detail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+    commands.forEach((key) => {
+        const command = HELP_COMMAND_DETAILS[key];
+        const label = command?.command ? `<code>${escapeHtml(command.command)}</code>` : '';
+        const description = command?.descKey ? t(lang, command.descKey) : '';
+        const prefix = command?.icon ? `${command.icon} ` : '';
+        lines.push(`${prefix}${label}${description ? ` — ${escapeHtml(description)}` : ''}`);
     });
 
-    lines.push(bottom);
-    return `<pre>${escapeHtml(lines.join('\n'))}</pre>`;
+    return lines.filter(Boolean).join('\n');
 }
 
 function buildHelpText(lang, view = 'user') {
@@ -3719,12 +3652,15 @@ function buildHelpText(lang, view = 'user') {
     lines.push(`<i>${escapeHtml(t(lang, hintKey))}</i>`);
 
     for (const section of sections) {
-        const table = buildHelpRows(lang, section.groups || []);
-        if (!table) {
+        const groupCards = (section.groups || [])
+            .map((groupKey) => buildHelpGroupCard(lang, groupKey))
+            .filter(Boolean);
+        if (groupCards.length === 0) {
             continue;
         }
 
-        lines.push('', `<b>${escapeHtml(t(lang, section.titleKey))}</b>`, table);
+        lines.push('', `<b>${escapeHtml(t(lang, section.titleKey))}</b>`);
+        lines.push(groupCards.join('\n\n'));
     }
 
     if (view === 'admin') {
@@ -3793,8 +3729,8 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     const activeGroup = validGroups.includes(selectedGroup) ? selectedGroup : (validGroups[0] || null);
     const inline_keyboard = [];
 
+    const groupButtons = [];
     for (const section of sections) {
-        const row = [];
         for (const groupKey of section.groups || []) {
             const detail = HELP_GROUP_DETAILS[groupKey];
             if (!detail) {
@@ -3802,18 +3738,19 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
             }
             const title = t(lang, detail.titleKey);
             const isActive = groupKey === activeGroup;
-            const prefix = isActive ? '🔽' : '•';
-            row.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
+            const prefix = isActive ? '✅' : '•';
+            groupButtons.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
         }
-        if (row.length > 0) {
-            inline_keyboard.push(row);
-        }
+    }
+
+    for (let i = 0; i < groupButtons.length; i += 2) {
+        inline_keyboard.push(groupButtons.slice(i, i + 2));
     }
 
     const activeDetail = activeGroup ? HELP_GROUP_DETAILS[activeGroup] : null;
     const commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
     if (commands.length > 0) {
-        inline_keyboard.push([{ text: `⬇️ ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
+        inline_keyboard.push([{ text: `📌 ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
         for (let i = 0; i < commands.length; i += 2) {
             const row = [];
             for (let j = i; j < Math.min(i + 2, commands.length); j += 1) {
@@ -3831,12 +3768,12 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     }
 
     if (view === 'admin') {
-        inline_keyboard.push([{ text: t(lang, 'help_button_user'), callback_data: 'help_view|user' }]);
+        inline_keyboard.push([{ text: `🙋‍♂️ ${t(lang, 'help_button_user')}`, callback_data: 'help_view|user' }]);
     } else {
-        inline_keyboard.push([{ text: t(lang, 'help_button_admin'), callback_data: 'help_view|admin' }]);
+        inline_keyboard.push([{ text: `🛠️ ${t(lang, 'help_button_admin')}`, callback_data: 'help_view|admin' }]);
     }
 
-    inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
+    inline_keyboard.push([{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'help_close' }]);
     return { inline_keyboard };
 }
 
@@ -10556,8 +10493,11 @@ function startTelegramBot() {
                 try {
                     const actionResult = await buildWalletTokenActionResult(actionKey, context, callbackLang);
                     const menu = buildWalletTokenMenu(context, callbackLang, { actionResult });
+                    const shouldSendNew = (menu.extraTexts && menu.extraTexts.length > 0) || (menu.text && menu.text.length > 1200);
+                    const sendOptions = buildThreadedOptions(query.message, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
                     let rendered = false;
-                    if (query.message?.message_id) {
+
+                    if (!shouldSendNew && query.message?.message_id) {
                         try {
                             await bot.editMessageText(menu.text, {
                                 chat_id: chatId,
@@ -10575,11 +10515,14 @@ function startTelegramBot() {
                     }
 
                     if (!rendered) {
-                        await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                        await bot.sendMessage(chatId, menu.text, sendOptions);
                         rendered = true;
                     }
 
-                    await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
+                    await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, {
+                        source: query.message,
+                        replyMarkup: menu.replyMarkup
+                    });
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 } catch (error) {
                     console.error(`[WalletToken] Failed to run ${actionKey}: ${error.message}`);
@@ -10605,8 +10548,12 @@ function startTelegramBot() {
                 }
 
                 const menu = buildWalletTokenMenu(context, callbackLang);
-                await bot.sendMessage(chatId, menu.text, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
-                await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts);
+                const sendOptions = buildThreadedOptions(query.message, { parse_mode: 'HTML', reply_markup: menu.replyMarkup });
+                await bot.sendMessage(chatId, menu.text, sendOptions);
+                await sendWalletTokenExtraTexts(bot, chatId, menu.extraTexts, {
+                    source: query.message,
+                    replyMarkup: menu.replyMarkup
+                });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'wallet_action_done') });
                 return;
             }
