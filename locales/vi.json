@@ -11,7 +11,7 @@
   "language_changed_fail": "Lỗi: Không tìm thấy ví nào được liên kết với chat này. Vui lòng /register một ví trước.",
   "register_success": "✅ **Đã thêm ví!**\n\nBạn sẽ nhận được thông báo cho ví:\n`{walletAddress}`",
   "register_invalid_address": "❌ Địa chỉ ví không hợp lệ. Vui lòng kiểm tra lại.",
-  "register_help_prompt": "Dán địa chỉ ví Xlayer của bạn (ví dụ: `0xabc...`). Bot sẽ tự quét tất cả token trong ví.",
+  "register_help_prompt": "Dùng /register <địa_chỉ_ví> [tên_ví] để liên kết ví Xlayer, đặt tên và xem số dư thời gian thực của mọi token trong ví.",
   "register_help_placeholder": "0x000...",
   "register_help_success": "✅ Đã liên kết ví {wallet} với tài khoản của bạn!",
   "register_help_invalid": "⚠️ Có vẻ không phải địa chỉ ví hợp lệ. Vui lòng thử lại.",

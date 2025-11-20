@@ -11,7 +11,7 @@
   "language_changed_fail": "Error: No wallet found linked to this chat. Please /register a wallet first.",
   "register_success": "✅ **Wallet Added!**\n\nYou will now receive notifications for:\n`{walletAddress}`",
   "register_invalid_address": "❌ Invalid wallet address. Please check and try again.",
-  "register_help_prompt": "Paste your Xlayer wallet address (example: `0xabc...`). The bot will scan all tokens in that wallet automatically.",
+  "register_help_prompt": "Use /register <wallet_address> [wallet_name] to link your Xlayer wallet, optionally name it, and view real-time balances for all tokens in the wallet.",
   "register_help_placeholder": "0x000...",
   "register_help_success": "✅ Linked wallet {wallet} to your account!",
   "register_help_invalid": "⚠️ That doesn't look like a valid wallet address. Please try again.",

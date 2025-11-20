@@ -11,7 +11,7 @@
   "language_changed_fail": "错误：未找到与此聊天关联的钱包。请先 /register 钱包。",
   "register_success": "✅ **钱包已添加！**\n\n您现在将收到以下钱包的通知：\n`{walletAddress}`",
   "register_invalid_address": "❌ 钱包地址无效。请检查后重试。",
-  "register_help_prompt": "粘贴你的 Xlayer 钱包地址（如：`0xabc...`），机器人会自动扫描该地址下的所有代币。",
+  "register_help_prompt": "使用 /register <钱包地址> [钱包名称] 绑定你的 Xlayer 钱包，可设置名称并实时查看钱包中所有代币的余额。",
   "register_help_placeholder": "0x000...",
   "register_help_success": "✅ 已将钱包 {wallet} 绑定到你的帐号！",
   "register_help_invalid": "⚠️ 看起来不是有效的钱包地址，请再试一次。",

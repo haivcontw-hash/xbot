@@ -11,7 +11,7 @@
   "language_changed_fail": "Error: Tidak ada dompet yang terhubung ke obrolan ini. Silakan /register dompet terlebih dahulu.",
   "register_success": "✅ **Dompet Ditambahkan!**\n\nAnda sekarang akan menerima notifikasi untuk:\n`{walletAddress}`",
   "register_invalid_address": "❌ Alamat dompet tidak valid. Silakan periksa dan coba lagi.",
-  "register_help_prompt": "Tempel alamat dompet Xlayer kamu (contoh: `0xabc...`). Bot akan memindai semua token di dompet tersebut secara otomatis.",
+  "register_help_prompt": "Gunakan /register <alamat_dompet> [nama_dompet] untuk menautkan dompet Xlayer, menamainya, dan melihat saldo waktu nyata semua token di dompet.",
   "register_help_placeholder": "0x000...",
   "register_help_success": "✅ Dompet {wallet} berhasil ditautkan ke akun Anda!",
   "register_help_invalid": "⚠️ Alamat dompet tampaknya tidak valid. Coba lagi.",
