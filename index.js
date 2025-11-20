@@ -4430,13 +4430,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🎁',
         titleKey: 'help_group_support_title',
         descKey: 'help_group_support_desc',
-        commands: ['donate']
+        commands: ['donate', 'donatedev', 'donatecm']
     },
     checkin: {
         icon: '✅',
         titleKey: 'help_group_checkin_title',
         descKey: 'help_group_checkin_desc',
-        commands: ['checkin', 'topcheckin', 'checkinadmin', 'donatedev', 'donatecm']
+        commands: ['checkin', 'topcheckin', 'checkinadmin']
     }
 };
 
@@ -4446,7 +4446,7 @@ const HELP_USER_SECTIONS = [
         groups: ['onboarding', 'xlayer_check', 'support']
     },
     {
-        titleKey: 'help_section_checkin_title',
+        titleKey: null,
         groups: ['checkin']
     }
 ];
@@ -4495,14 +4495,14 @@ function buildHelpGroupCard(lang, groupKey) {
     const descWidth = Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0);
 
     const tableLines = [];
-    tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} │ ${padDisplayText(headerDesc, descWidth)}`);
-    tableLines.push(`├ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+    tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} ┬ ${padDisplayText(headerDesc, descWidth)} ┐`);
+    tableLines.push(`├ ${'─'.repeat(commandWidth)} ┼ ${'─'.repeat(descWidth)} ┤`);
     commandRows.forEach((row) => {
         const safeLabel = escapeHtml(padDisplayText(row.label, commandWidth));
         const safeDesc = escapeHtml(padDisplayText(row.description || '-', descWidth));
-        tableLines.push(`│ ${safeLabel} │ ${safeDesc}`);
+        tableLines.push(`│ ${safeLabel} │ ${safeDesc} │`);
     });
-    tableLines.push(`└ ${'─'.repeat(commandWidth)} │ ${'─'.repeat(descWidth)}`);
+    tableLines.push(`└ ${'─'.repeat(commandWidth)} ┴ ${'─'.repeat(descWidth)} ┘`);
 
     lines.push('<pre>');
     lines.push(tableLines.join('\n'));
@@ -4526,7 +4526,10 @@ function buildHelpText(lang) {
             continue;
         }
 
-        lines.push('', `<b>${escapeHtml(t(lang, section.titleKey))}</b>`);
+        lines.push('');
+        if (section.titleKey) {
+            lines.push(`<b>${escapeHtml(t(lang, section.titleKey))}</b>`);
+        }
         lines.push(groupCards.join('\n\n'));
     }
 
