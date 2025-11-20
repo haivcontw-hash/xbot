@@ -1710,6 +1710,45 @@ async function clearWarnings(chatId, targetUserId) {
     return true;
 }
 
+async function wipeChatFootprint(chatId) {
+    if (!chatId) {
+        return 0;
+    }
+
+    const normalized = chatId.toString();
+    const tables = [
+        { table: 'users', column: 'chatId' },
+        { table: 'group_subscriptions', column: 'chatId' },
+        { table: 'group_member_languages', column: 'groupChatId' },
+        { table: 'group_member_languages', column: 'userId' },
+        { table: 'group_bot_settings', column: 'chatId' },
+        { table: 'user_wallet_tokens', column: 'chatId' },
+        { table: 'wallet_holdings_cache', column: 'chatId' },
+        { table: 'user_warnings', column: 'chatId' },
+        { table: 'pending_memes', column: 'chatId' },
+        { table: 'checkin_groups', column: 'chatId' },
+        { table: 'checkin_members', column: 'chatId' },
+        { table: 'checkin_members', column: 'userId' },
+        { table: 'checkin_records', column: 'chatId' },
+        { table: 'checkin_records', column: 'userId' },
+        { table: 'checkin_attempts', column: 'chatId' },
+        { table: 'checkin_attempts', column: 'userId' },
+        { table: 'checkin_auto_logs', column: 'chatId' },
+        { table: 'checkin_summary_logs', column: 'chatId' }
+    ];
+
+    let totalChanges = 0;
+    for (const entry of tables) {
+        const result = await dbRun(`DELETE FROM ${entry.table} WHERE ${entry.column} = ?`, [normalized]);
+        totalChanges += result?.changes || 0;
+    }
+
+    await removeAllWalletTokens(normalized);
+    await removeAllWalletHoldingsCache(normalized);
+
+    return totalChanges;
+}
+
 async function setMemberXp(chatId, userId, amount) {
     if (!chatId || !userId) {
         throw new Error('INVALID_XP_INPUT');
@@ -1942,6 +1981,7 @@ module.exports = {
     addWarning,
     getWarnings,
     clearWarnings,
+    wipeChatFootprint,
     setMemberXp,
     getPendingMemes,
     updateMemeStatus,

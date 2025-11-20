@@ -548,6 +548,8 @@ const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
+const rmchatBotMessages = new Map();
+const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
 
 function delay(ms) {
@@ -582,6 +584,42 @@ async function sendEphemeralMessage(chatId, text, options = {}, delayMs = 15000)
     const message = await bot.sendMessage(chatId, text, options);
     scheduleMessageDeletion(chatId, message.message_id, delayMs);
     return message;
+}
+
+function rememberRmchatMessage(collection, chatId, messageId, limit = 300) {
+    if (!chatId || !messageId) {
+        return;
+    }
+
+    const key = chatId.toString();
+    const existing = collection.get(key) || [];
+    if (!existing.includes(messageId)) {
+        const next = [...existing, messageId];
+        while (next.length > limit) {
+            next.shift();
+        }
+        collection.set(key, next);
+    }
+}
+
+async function purgeRmchatMessages(collection, chatId) {
+    if (!chatId) {
+        return 0;
+    }
+
+    const key = chatId.toString();
+    const ids = collection.get(key) || [];
+    let deleted = 0;
+    for (const id of ids) {
+        try {
+            await bot.deleteMessage(chatId, id);
+            deleted += 1;
+        } catch (error) {
+            // ignore missing permissions or missing messages
+        }
+    }
+    collection.delete(key);
+    return deleted;
 }
 
 function normalizeAddress(value) {
@@ -638,6 +676,13 @@ if (!TELEGRAM_TOKEN) {
 // db.init() sẽ được gọi trong hàm main()
 const app = express();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+const originalSendMessage = bot.sendMessage.bind(bot);
+bot.sendMessage = async (chatId, text, options = {}) => {
+    const message = await originalSendMessage(chatId, text, options);
+    rememberRmchatMessage(rmchatBotMessages, chatId, message?.message_id);
+    return message;
+};
 
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
@@ -4160,7 +4205,7 @@ const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
-    rules: { command: '/rules', icon: '📜', descKey: 'help_command_rules' },
+    rmchat: { command: '/rmchat', icon: '🧹', descKey: 'help_command_rmchat' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
@@ -4185,7 +4230,7 @@ const HELP_GROUP_DETAILS = {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rules', 'okxchains', 'okx402status', 'txhash']
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash']
     },
     language: {
         icon: '🌐',
@@ -4620,6 +4665,17 @@ function buildUserMention(user) {
         parseMode: 'HTML'
     };
 }
+
+bot.on('message', (msg) => {
+    const chatId = msg?.chat?.id;
+    if (!chatId || !msg?.message_id) {
+        return;
+    }
+
+    if (!msg.from?.is_bot) {
+        rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
+    }
+});
 
 function buildAdminProfileLink(userId, displayName) {
     const safeName = escapeHtml(displayName || userId?.toString() || 'user');
@@ -8871,7 +8927,8 @@ async function fetchOkxSupportedChains() {
 
     return {
         aggregator: formatList(directory?.aggregator || []),
-        market: formatList(directory?.market || [])
+        market: formatList(directory?.market || []),
+        balance: formatList(directory?.balance || [])
     };
 }
 
@@ -8936,7 +8993,8 @@ async function collectTxhashChainEntries() {
     const directory = await ensureOkxChainDirectory();
     const combined = dedupeOkxChainEntries([
         ...(directory?.aggregator || []),
-        ...(directory?.market || [])
+        ...(directory?.market || []),
+        ...(directory?.balance || [])
     ]);
 
     return combined.filter((entry) => Number.isFinite(entry.chainIndex));
@@ -8967,7 +9025,7 @@ function sortTxhashChainEntries(entries = []) {
 }
 
 function buildTxhashChainKeyboard(lang, entries = []) {
-    const sorted = sortTxhashChainEntries(entries).slice(0, 12);
+    const sorted = sortTxhashChainEntries(entries);
     const buttons = sorted.map((entry) => {
         const label = entry.chainShortName || entry.chainName || `#${entry.chainIndex}`;
         return {
@@ -8994,6 +9052,53 @@ function buildTxhashHashPromptText(lang, chainLabel, pendingHash = null) {
         parts.push(t(lang, 'txhash_hash_prefill', { hash: pendingHash }));
     }
     return parts.join('\n');
+}
+
+function buildRmchatKeyboard(lang) {
+    const inline_keyboard = [
+        [{ text: t(lang, 'rmchat_option_bot'), callback_data: 'rmchat:bot' }],
+        [{ text: t(lang, 'rmchat_option_user'), callback_data: 'rmchat:user' }],
+        [{ text: t(lang, 'rmchat_option_all'), callback_data: 'rmchat:all' }]
+    ];
+
+    return appendCloseButton({ inline_keyboard }, lang, { backCallbackData: 'help_back' });
+}
+
+async function executeRmchatAction({ chatId, lang, scope }) {
+    if (!chatId) {
+        return t(lang, 'rmchat_error');
+    }
+
+    let botRemoved = 0;
+    let userRemoved = 0;
+    let dataWiped = false;
+
+    if (scope === 'bot' || scope === 'all') {
+        botRemoved = await purgeRmchatMessages(rmchatBotMessages, chatId);
+    }
+
+    if (scope === 'user' || scope === 'all') {
+        userRemoved = await purgeRmchatMessages(rmchatUserMessages, chatId);
+    }
+
+    if (scope === 'all') {
+        try {
+            await db.wipeChatFootprint(chatId.toString());
+            dataWiped = true;
+        } catch (error) {
+            console.error(`[Rmchat] Failed to wipe data for ${chatId}: ${error.message}`);
+        }
+    }
+
+    if (botRemoved === 0 && userRemoved === 0 && !dataWiped) {
+        return t(lang, 'rmchat_no_messages');
+    }
+
+    return t(lang, 'rmchat_result', {
+        botCount: botRemoved,
+        userCount: userRemoved,
+        dataWiped: dataWiped ? t(lang, 'rmchat_data_yes') : t(lang, 'rmchat_data_no')
+    });
 }
 
 async function deliverTxhashDetail({ chatId, lang, txHash, chainIndex, replyContextMessage = null }) {
@@ -9299,9 +9404,10 @@ async function ensureOkxChainDirectory() {
 }
 
 async function loadOkxChainDirectory() {
-    const [aggregator, market] = await Promise.allSettled([
+    const [aggregator, market, balance] = await Promise.allSettled([
         okxJsonRequest('GET', '/api/v6/dex/aggregator/supported/chain', { query: {}, expectOkCode: false }),
-        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false })
+        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false }),
+        okxJsonRequest('GET', '/api/v6/dex/balance/supported/chain', { query: {}, expectOkCode: false })
     ]);
 
     const normalizeList = (payload) => {
@@ -9318,7 +9424,8 @@ async function loadOkxChainDirectory() {
 
     return {
         aggregator: normalizeList(aggregator),
-        market: normalizeList(market)
+        market: normalizeList(market),
+        balance: normalizeList(balance)
     };
 }
 
@@ -10161,6 +10268,7 @@ function startTelegramBot() {
 
             const aggregatorLines = (directory.aggregator || []).slice(0, 20);
             const marketLines = (directory.market || []).slice(0, 20);
+            const balanceLines = (directory.balance || []).slice(0, 20);
 
             const lines = [
                 t(lang, 'okxchains_title'),
@@ -10168,7 +10276,10 @@ function startTelegramBot() {
                 aggregatorLines.length > 0 ? aggregatorLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
                 '',
                 t(lang, 'okxchains_market_heading'),
-                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
+                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
+                '',
+                t(lang, 'okxchains_balance_heading'),
+                balanceLines.length > 0 ? balanceLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
             ];
 
             sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
@@ -10211,25 +10322,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 }
 
-    async function handleRulesCommand(msg) {
+    async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
-        if (!isGroupChat) {
-            await sendReply(msg, t(lang, 'rules_private_hint'));
-            return;
-        }
+        const text = [
+            t(lang, 'rmchat_title'),
+            t(lang, 'rmchat_intro')
+        ].join('\n\n');
 
-        const rules = await db.getGroupRules(chatId);
-        if (!rules) {
-            await sendReply(msg, t(lang, 'rules_not_configured'));
-            return;
-        }
-
-        const text = [t(lang, 'rules_title'), '', rules].join('\n');
         await sendReply(msg, text, {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: t(lang, 'rules_button_close'), callback_data: 'rules_close' }]] }
+            parse_mode: 'HTML',
+            reply_markup: buildRmchatKeyboard(lang)
         });
     }
 
@@ -10970,8 +11073,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         await handleOkx402StatusCommand(msg);
     });
 
-    bot.onText(/\/rules/, async (msg) => {
-        await handleRulesCommand(msg);
+    bot.onText(/\/rmchat/, async (msg) => {
+        await handleRmchatCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
@@ -11020,9 +11123,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             await handleMyWalletCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
-        rules: async (query, lang) => {
+        rmchat: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
-            await handleRulesCommand(synthetic);
+            await handleRmchatCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         donate: async (query, lang) => {
@@ -11189,15 +11292,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 return;
             }
 
-            if (query.data === 'rules_close') {
-                if (query.message?.chat?.id && query.message?.message_id) {
-                    try {
-                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
-                    } catch (error) {
-                        // ignore cleanup errors
-                    }
+            if (query.data && query.data.startsWith('rmchat:')) {
+                const scope = query.data.split(':')[1];
+                const chatKey = query.message?.chat?.id;
+                const resultText = await executeRmchatAction({ chatId: chatKey, lang: callbackLang, scope });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'rmchat_action_done'), show_alert: false });
+                if (chatKey) {
+                    await sendMessageRespectingThread(chatKey, query.message, resultText, {
+                        parse_mode: 'HTML',
+                        reply_markup: buildRmchatKeyboard(callbackLang)
+                    });
                 }
-                await bot.answerCallbackQuery(queryId);
                 return;
             }
 
