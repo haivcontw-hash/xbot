@@ -568,6 +568,7 @@ const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
 const tokenWizardStates = new Map();
+const contractWizardStates = new Map();
 const rmchatBotMessages = new Map();
 const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
@@ -10698,14 +10699,46 @@ async function handleTxhashCommand(msg, explicitHash = null) {
   async function handleContractCommand(msg, payload) {
       const lang = await getLang(msg);
       const rawPayload = (payload || '').trim();
+      const chatId = msg.chat?.id?.toString();
+      const userId = msg.from?.id?.toString();
+      const userKey = userId || chatId;
 
       if (!rawPayload) {
+          if (userKey) {
+              const existing = contractWizardStates.get(userKey);
+              if (existing?.promptMessageId && existing.chatId === chatId) {
+                  try {
+                      await bot.deleteMessage(chatId, existing.promptMessageId);
+                  } catch (error) {
+                      // ignore cleanup errors
+                  }
+              }
+
+              const promptText = t(lang, 'contract_help_prompt');
+              const placeholder = t(lang, 'contract_help_placeholder');
+              const sent = await sendReply(msg, promptText, {
+                  reply_markup: {
+                      force_reply: true,
+                      input_field_placeholder: placeholder
+                  }
+              });
+
+              if (sent?.message_id) {
+                  contractWizardStates.set(userKey, { promptMessageId: sent.message_id, chatId, lang });
+              }
+              return;
+          }
+
           await sendReply(msg, t(lang, 'contract_usage'), { reply_markup: buildCloseKeyboard(lang) });
           return;
       }
 
       const parts = rawPayload.split(/\s+/);
       const contractAddress = normalizeAddress(parts[0]);
+
+      if (userKey) {
+          contractWizardStates.delete(userKey);
+      }
 
       if (!contractAddress) {
           await sendReply(msg, t(lang, 'contract_invalid'), { reply_markup: buildCloseKeyboard(lang) });
@@ -11010,6 +11043,32 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
         await startTokenFlow({ chatId: userId, userId, lang: dmLang });
         return null;
+    }
+
+    async function startContractWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = contractWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        const promptText = t(dmLang, 'contract_help_prompt');
+        const placeholder = t(dmLang, 'contract_help_placeholder');
+        const message = await bot.sendMessage(userId, promptText, {
+            reply_markup: {
+                force_reply: true,
+                input_field_placeholder: placeholder
+            }
+        });
+
+        contractWizardStates.set(userKey, { promptMessageId: message.message_id, chatId: userKey, lang: dmLang });
+        return message;
     }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
@@ -11648,10 +11707,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             }
         },
         contract: async (query, lang) => {
-            const synthetic = buildSyntheticCommandMessage(query);
-            synthetic.text = '/contract';
-            await handleContractCommand(synthetic);
-            return { message: t(lang, 'help_action_executed') };
+            try {
+                await startContractWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start contract wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
         },
         token: async (query, lang) => {
             try {
@@ -13876,6 +13942,64 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     console.error(`[TokenWizard] Failed to handle token for ${userId}: ${error.message}`);
                     await sendReply(msg, t(effectiveLang, 'token_error'), {
                         reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                }
+                return;
+            }
+
+            const contractState = contractWizardStates.get(userId);
+            if (
+                contractState &&
+                msg.chat?.id?.toString() === contractState.chatId &&
+                msg.reply_to_message?.message_id === contractState.promptMessageId
+            ) {
+                const rawAddress = (msg.text || '').trim();
+                const effectiveLang = contractState.lang || lang;
+
+                if (!rawAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                const contractAddress = normalizeAddress(rawAddress);
+                if (!contractAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                try {
+                    if (contractState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, contractState.promptMessageId);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
+
+                    const oklinkUrl = buildContractLookupUrl(contractAddress);
+                    const addressLabel = formatCopyableValueHtml(contractAddress) || escapeHtml(contractAddress);
+                    const linkLabel = `<a href="${oklinkUrl}">${escapeHtml(oklinkUrl)}</a>`;
+                    const responseLines = [
+                        t(effectiveLang, 'contract_result'),
+                        t(effectiveLang, 'contract_result_address', { address: addressLabel }),
+                        t(effectiveLang, 'contract_result_link', { link: linkLabel })
+                    ];
+
+                    await sendMessageRespectingThread(contractState.chatId, msg, responseLines.join('\n'), {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: false,
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+
+                    contractWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[ContractWizard] Failed to respond for ${userId}: ${error.message}`);
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
                     });
                 }
                 return;
