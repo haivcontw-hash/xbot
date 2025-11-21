@@ -2150,17 +2150,39 @@ async function upsertUserProfile(chatId, profile = {}) {
     const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
     const username = profile.username ? profile.username.toLowerCase() : null;
 
+    const existing = await dbGet(
+        'SELECT lang, wallets, lang_source AS langSource, firstSeen, fullName AS storedFullName, username AS storedUsername FROM users WHERE chatId = ?',
+        [chatId]
+    );
+
+    if (existing) {
+        await dbRun(
+            `UPDATE users
+             SET fullName = COALESCE(?, fullName),
+                 username = COALESCE(?, username),
+                 lastSeen = ?,
+                 firstSeen = COALESCE(firstSeen, ?),
+                 lang = COALESCE(lang, ?),
+                 wallets = COALESCE(wallets, ?),
+                 lang_source = COALESCE(lang_source, ?)
+             WHERE chatId = ?`,
+            [
+                fullName || existing.storedFullName || null,
+                username || existing.storedUsername || null,
+                now,
+                existing.firstSeen || now,
+                existing.lang || null,
+                existing.wallets || '[]',
+                existing.langSource || 'auto',
+                chatId
+            ]
+        );
+        return;
+    }
+
     await dbRun(
         `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chatId) DO UPDATE SET
-             fullName = excluded.fullName,
-             username = excluded.username,
-             lastSeen = excluded.lastSeen,
-             firstSeen = COALESCE(users.firstSeen, excluded.firstSeen),
-             lang = COALESCE(users.lang, excluded.lang),
-             wallets = COALESCE(users.wallets, excluded.wallets),
-             lang_source = COALESCE(users.lang_source, excluded.lang_source)`,
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
         [chatId, '[]', 'auto', fullName || null, username, now, now]
     );
 }
