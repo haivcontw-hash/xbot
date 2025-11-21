@@ -690,6 +690,7 @@
   "owner_prompt_target": "Ketik 'all' untuk semua pengguna atau masukkan ID pengguna tertentu.",
   "owner_invalid_target": "Harap masukkan 'all' atau ID pengguna yang valid.",
   "owner_prompt_message": "Kirimkan pesan yang ingin dibagikan.",
+  "owner_broadcast_empty": "Pesan siaran tidak boleh kosong.",
   "owner_broadcast_result": "Selesai. Berhasil: {success}. Gagal: {failed}.",
   "owner_no_recipients": "Tidak ada penerima yang valid untuk permintaan ini.",
   "owner_prompt_limit": "Masukkan batas penggunaan /ai per hari (0 untuk menghapus batas).",

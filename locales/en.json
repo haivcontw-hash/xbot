@@ -696,6 +696,7 @@
   "owner_prompt_unban_target": "Enter the user ID or @username to unban.",
   "owner_invalid_target": "Please enter 'all' or a valid user ID.",
   "owner_prompt_message": "Send the content you want to deliver.",
+  "owner_broadcast_empty": "Broadcast message cannot be empty.",
   "owner_broadcast_result": "Broadcast finished. Success: {success}. Failed: {failed}.",
   "owner_no_recipients": "No valid recipients for this request.",
   "owner_prompt_limit": "Enter the maximum /ai uses per day (0 to remove the limit).",

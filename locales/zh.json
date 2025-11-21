@@ -690,6 +690,7 @@
   "owner_prompt_target": "输入 'all' 作用于所有人，或输入指定的用户 ID。",
   "owner_invalid_target": "请输入 'all' 或有效的用户 ID。",
   "owner_prompt_message": "发送你想推送的内容。",
+  "owner_broadcast_empty": "群发内容不能为空。",
   "owner_broadcast_result": "发送完成。成功：{success}。失败：{failed}。",
   "owner_no_recipients": "没有可用的接收者。",
   "owner_prompt_limit": "输入每日 /ai 上限（填 0 移除限制）。",

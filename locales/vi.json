@@ -696,6 +696,7 @@
   "owner_prompt_unban_target": "Nhập ID hoặc @username người cần UNBAN.",
   "owner_invalid_target": "Vui lòng nhập 'all' hoặc một ID người dùng hợp lệ.",
   "owner_prompt_message": "Nhập nội dung muốn gửi.",
+  "owner_broadcast_empty": "Nội dung tin nhắn không được để trống.",
   "owner_broadcast_result": "Đã gửi xong. Thành công: {success}. Lỗi: {failed}.",
   "owner_no_recipients": "Không có người nhận hợp lệ cho yêu cầu này.",
   "owner_prompt_limit": "Nhập số lần tối đa mỗi ngày cho /ai (0 để bỏ giới hạn).",

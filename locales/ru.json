@@ -690,6 +690,7 @@
   "owner_prompt_target": "Введите 'all' для всех или ID конкретного пользователя.",
   "owner_invalid_target": "Введите 'all' либо корректный ID пользователя.",
   "owner_prompt_message": "Напишите текст рассылки.",
+  "owner_broadcast_empty": "Текст рассылки не может быть пустым.",
   "owner_broadcast_result": "Рассылка завершена. Успешно: {success}. Ошибок: {failed}.",
   "owner_no_recipients": "Нет подходящих получателей.",
   "owner_prompt_limit": "Укажите дневной лимит /ai (0 — убрать ограничение).",

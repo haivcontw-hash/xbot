@@ -168,6 +168,52 @@ const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
+function sanitizeSecrets(text) {
+    if (!text) {
+        return text;
+    }
+
+    const secrets = [];
+    const envSecretKeys = [
+        'OPENAI_API_KEY',
+        'ANTHROPIC_API_KEY',
+        'GEMINI_API_KEY',
+        'GEMINI_API_KEYS',
+        'HF_API_KEY',
+        'HUGGINGFACE_API_KEY'
+    ];
+
+    for (const value of GEMINI_API_KEYS || []) {
+        if (value) {
+            secrets.push(value);
+        }
+    }
+
+    for (const key of envSecretKeys) {
+        const raw = process.env[key];
+        if (!raw) {
+            continue;
+        }
+        const parts = Array.isArray(raw) ? raw : String(raw).split(',');
+        for (const part of parts) {
+            const trimmed = (part || '').trim();
+            if (trimmed) {
+                secrets.push(trimmed);
+            }
+        }
+    }
+
+    let sanitized = String(text);
+    for (const secret of secrets) {
+        if (!secret) {
+            continue;
+        }
+        const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        sanitized = sanitized.replace(new RegExp(escaped, 'g'), '[REDACTED]');
+    }
+
+    return sanitized;
+}
 const WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS = (() => {
     const value = Number(process.env.WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS || 15000);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15000;
@@ -1040,7 +1086,7 @@ function disableGeminiKey(index, reason = 'disabled') {
     }
 
     disabledGeminiKeyIndices.add(safeIndex);
-    console.warn(`[AI] Disabled Gemini key index ${safeIndex}: ${reason}`);
+    console.warn(`[AI] Disabled Gemini key index ${safeIndex}: ${sanitizeSecrets(reason)}`);
 
     if (disabledGeminiKeyIndices.size >= GEMINI_API_KEYS.length) {
         console.error('[AI] All Gemini API keys are disabled');
@@ -5121,6 +5167,11 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
                 ? await db.listUserChatIds()
                 : [target.targetId].filter(Boolean);
             const uniqueRecipients = Array.from(new Set((recipients || []).map((id) => id?.toString()).filter(Boolean)));
+
+            if (!content) {
+                await sendReply(msg, t(lang, 'owner_broadcast_empty'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
 
             if (!uniqueRecipients.length) {
                 await sendReply(msg, t(lang, 'owner_no_recipients'));
@@ -11494,7 +11545,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                       disableGeminiKey(keyIndex, error.message || 'Forbidden');
                   }
                   advanceGeminiKeyIndex();
-                  console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${error.message}`);
+                  console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${sanitizeSecrets(error.message)}`);
               }
           }
 
