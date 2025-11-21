@@ -10763,7 +10763,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           return;
       }
 
-      const contents = [];
+      const parts = [];
       const promptText = userPrompt || t(lang, 'ai_default_prompt');
 
       if (hasPhoto) {
@@ -10772,10 +10772,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
           const mimeType = largestPhoto.mime_type || 'image/jpeg';
           const imagePart = await urlToGenerativePart(fileUrl, mimeType);
-          contents.push(imagePart);
+          parts.push(imagePart);
       }
 
-      contents.push(promptText);
+      parts.push({ text: promptText });
 
       try {
           try {
@@ -10786,10 +10786,20 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
           const response = await client.models.generateContent({
               model: GEMINI_MODEL,
-              contents
+              contents: [
+                  {
+                      role: 'user',
+                      parts
+                  }
+              ]
           });
 
-          const aiResponse = typeof response?.text === 'function' ? response.text() : response?.text;
+          const candidate = response?.candidates?.[0]?.content?.parts || [];
+          const aiResponse = candidate
+              .map((part) => part?.text || '')
+              .join('')
+              .trim()
+              || (typeof response?.text === 'function' ? response.text() : response?.text);
           const body = aiResponse || t(lang, 'ai_error');
           const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
 
