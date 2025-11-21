@@ -10,6 +10,8 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const https = require('https');
 const crypto = require('crypto');
+const axios = require('axios');
+const { GoogleGenAI } = require('@google/genai');
 const { t_, normalizeLanguageCode } = require('./i18n.js');
 const db = require('./database.js');
 const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
@@ -103,11 +105,14 @@ const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSP
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
 let okxChainDirectoryPromise = null;
 const okxResolvedChainCache = new Map();
+let geminiClient = null;
 const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
@@ -563,6 +568,7 @@ const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
 const tokenWizardStates = new Map();
+const contractWizardStates = new Map();
 const rmchatBotMessages = new Map();
 const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
@@ -750,6 +756,33 @@ function formatCopyableValueHtml(value) {
     const encoded = encodeURIComponent(text);
     const code = `<code>${escapeHtml(text)}</code>`;
     return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
+}
+
+function buildContractLookupUrl(contractAddress) {
+    return `https://www.oklink.com/x-layer/${contractAddress}/contract`;
+}
+
+async function urlToGenerativePart(url, mimeType) {
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const base64Data = Buffer.from(response.data).toString('base64');
+    return {
+        inlineData: {
+            data: base64Data,
+            mimeType
+        }
+    };
+}
+
+function getGeminiClient() {
+    if (!GEMINI_API_KEY) {
+        return null;
+    }
+
+    if (!geminiClient) {
+        geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    }
+
+    return geminiClient;
 }
 
 function getXlayerProvider() {
@@ -4395,6 +4428,7 @@ function parseRegisterPayload(rawText) {
 
 const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
+    ai: { command: '/ai', icon: '🤖', descKey: 'help_command_ai' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
     rmchat: { command: '/rmchat', icon: '🧹', descKey: 'help_command_rmchat' },
@@ -4404,6 +4438,7 @@ const HELP_COMMAND_DETAILS = {
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
+    contract: { command: '/contract', icon: '📜', descKey: 'help_command_contract' },
     token: { command: '/token', icon: '🧬', descKey: 'help_command_token' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
@@ -4418,13 +4453,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🚀',
         titleKey: 'help_group_onboarding_title',
         descKey: 'help_group_onboarding_desc',
-        commands: ['start', 'help', 'language']
+        commands: ['start', 'help', 'language', 'ai']
     },
     xlayer_check: {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token']
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token', 'contract']
     },
     support: {
         icon: '🎁',
@@ -4766,17 +4801,6 @@ function buildUserMention(user) {
         parseMode: 'HTML'
     };
 }
-
-bot.on('message', (msg) => {
-    const chatId = msg?.chat?.id;
-    if (!chatId || !msg?.message_id) {
-        return;
-    }
-
-    if (!msg.from?.is_bot) {
-        rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
-    }
-});
 
 function buildAdminProfileLink(userId, displayName) {
     const safeName = escapeHtml(displayName || userId?.toString() || 'user');
@@ -10656,21 +10680,163 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 }
 
-async function handleTokenCommand(msg, explicitAddress = null) {
-    const lang = await getLang(msg);
-    const text = msg.text || '';
-    const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+  async function handleTokenCommand(msg, explicitAddress = null) {
+      const lang = await getLang(msg);
+      const text = msg.text || '';
+      const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
 
-    const contractAddress = explicitAddress || (match ? match[1] : null);
+      const contractAddress = explicitAddress || (match ? match[1] : null);
 
-    await startTokenFlow({
-        chatId: msg.chat.id,
-        userId: msg.from?.id,
-        lang,
-        sourceMessage: msg,
-        pendingAddress: contractAddress || null
-    });
-}
+      await startTokenFlow({
+          chatId: msg.chat.id,
+          userId: msg.from?.id,
+          lang,
+          sourceMessage: msg,
+          pendingAddress: contractAddress || null
+      });
+  }
+
+  async function handleContractCommand(msg, payload) {
+      const lang = await getLang(msg);
+      const rawPayload = (payload || '').trim();
+      const chatId = msg.chat?.id?.toString();
+      const userId = msg.from?.id?.toString();
+      const userKey = userId || chatId;
+
+      if (!rawPayload) {
+          if (userKey) {
+              const existing = contractWizardStates.get(userKey);
+              if (existing?.promptMessageId && existing.chatId === chatId) {
+                  try {
+                      await bot.deleteMessage(chatId, existing.promptMessageId);
+                  } catch (error) {
+                      // ignore cleanup errors
+                  }
+              }
+
+              const promptText = t(lang, 'contract_help_prompt');
+              const placeholder = t(lang, 'contract_help_placeholder');
+              const sent = await sendReply(msg, promptText, {
+                  reply_markup: {
+                      force_reply: true,
+                      input_field_placeholder: placeholder
+                  }
+              });
+
+              if (sent?.message_id) {
+                  contractWizardStates.set(userKey, { promptMessageId: sent.message_id, chatId, lang });
+              }
+              return;
+          }
+
+          await sendReply(msg, t(lang, 'contract_usage'), { reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const parts = rawPayload.split(/\s+/);
+      const contractAddress = normalizeAddress(parts[0]);
+
+      if (userKey) {
+          contractWizardStates.delete(userKey);
+      }
+
+      if (!contractAddress) {
+          await sendReply(msg, t(lang, 'contract_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const oklinkUrl = buildContractLookupUrl(contractAddress);
+      const addressLabel = formatCopyableValueHtml(contractAddress) || escapeHtml(contractAddress);
+      const linkLabel = `<a href="${oklinkUrl}">${escapeHtml(oklinkUrl)}</a>`;
+      const responseLines = [
+          t(lang, 'contract_result'),
+          t(lang, 'contract_result_address', { address: addressLabel }),
+          t(lang, 'contract_result_link', { link: linkLabel })
+      ];
+
+      await sendReply(msg, responseLines.join('\n'), {
+          parse_mode: 'HTML',
+          disable_web_page_preview: false,
+          reply_markup: buildCloseKeyboard(lang)
+      });
+  }
+
+  async function handleAiCommand(msg) {
+      const lang = await getLang(msg);
+      const textOrCaption = (msg.text || msg.caption || '').trim();
+      const promptMatch = textOrCaption.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
+      const userPrompt = promptMatch && promptMatch[1] ? promptMatch[1].trim() : '';
+      const photos = Array.isArray(msg.photo) ? msg.photo : [];
+      const hasPhoto = photos.length > 0;
+
+      if (!userPrompt && !hasPhoto) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const client = getGeminiClient();
+      if (!client) {
+          await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const parts = [];
+      const promptText = userPrompt || t(lang, 'ai_default_prompt');
+
+      if (hasPhoto) {
+          const largestPhoto = photos[photos.length - 1];
+          const fileInfo = await bot.getFile(largestPhoto.file_id);
+          const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+          const mimeType = largestPhoto.mime_type || 'image/jpeg';
+          const imagePart = await urlToGenerativePart(fileUrl, mimeType);
+          parts.push(imagePart);
+      }
+
+      parts.push({ text: promptText });
+
+      try {
+          try {
+              await bot.sendChatAction(msg.chat.id, hasPhoto ? 'upload_photo' : 'typing');
+          } catch (error) {
+              // ignore chat action errors
+          }
+
+          const response = await client.models.generateContent({
+              model: GEMINI_MODEL,
+              contents: [
+                  {
+                      role: 'user',
+                      parts
+                  }
+              ]
+          });
+
+          const candidate = response?.candidates?.[0]?.content?.parts || [];
+          const aiResponse = candidate
+              .map((part) => part?.text || '')
+              .join('')
+              .trim()
+              || (typeof response?.text === 'function' ? response.text() : response?.text);
+          const body = aiResponse || t(lang, 'ai_error');
+          const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
+
+          const replyMarkup = buildCloseKeyboard(lang);
+          const chunks = splitTelegramMessageText(replyText);
+
+          for (let i = 0; i < chunks.length; i += 1) {
+              const chunk = chunks[i];
+              if (!chunk || !chunk.trim()) {
+                  continue;
+              }
+
+              const options = i === 0 ? { reply_markup: replyMarkup } : {};
+              await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
+          }
+      } catch (error) {
+          console.error(`[AI] Failed to generate content: ${error.message}`);
+          await sendReply(msg, t(lang, 'ai_error'), { reply_markup: buildCloseKeyboard(lang) });
+      }
+  }
 
     async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
@@ -10887,6 +11053,32 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         await startTokenFlow({ chatId: userId, userId, lang: dmLang });
         return null;
     }
+
+    async function startContractWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = contractWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        const promptText = t(dmLang, 'contract_help_prompt');
+        const placeholder = t(dmLang, 'contract_help_placeholder');
+        const message = await bot.sendMessage(userId, promptText, {
+            reply_markup: {
+                force_reply: true,
+                input_field_placeholder: placeholder
+            }
+        });
+
+        contractWizardStates.set(userKey, { promptMessageId: message.message_id, chatId: userKey, lang: dmLang });
+        return message;
+    }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
@@ -10996,6 +11188,11 @@ async function handleTokenCommand(msg, explicitAddress = null) {
 
     bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
         await handleTokenCommand(msg, null);
+    });
+
+    bot.onText(/^\/contract(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        const payload = match[1];
+        await handleContractCommand(msg, payload);
     });
 
     function parseDurationText(value) {
@@ -11461,6 +11658,12 @@ async function handleTokenCommand(msg, explicitAddress = null) {
             await handleStartNoToken(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
+        ai: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            synthetic.text = '/ai';
+            await handleAiCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
         register: async (query, lang) => {
             try {
                 await startRegisterWizard(query.from.id, lang);
@@ -11509,6 +11712,19 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
                 }
                 console.error(`[Help] Failed to start txhash wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
+        },
+        contract: async (query, lang) => {
+            try {
+                await startContractWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start contract wizard for ${query.from.id}: ${error.message}`);
                 return { message: t(lang, 'help_action_failed'), showAlert: true };
             }
         },
@@ -13578,7 +13794,22 @@ async function handleTokenCommand(msg, explicitAddress = null) {
     });
 
     bot.on('message', async (msg) => {
+        const chatId = msg?.chat?.id;
+        if (!chatId || !msg?.message_id) {
+            return;
+        }
+
+        if (!msg.from?.is_bot) {
+            rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
+        }
+
         if (await handleGoalTextInput(msg)) {
+            return;
+        }
+
+        const textOrCaption = (msg.text || msg.caption || '').trim();
+        if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
+            await handleAiCommand(msg);
             return;
         }
 
@@ -13720,6 +13951,64 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     console.error(`[TokenWizard] Failed to handle token for ${userId}: ${error.message}`);
                     await sendReply(msg, t(effectiveLang, 'token_error'), {
                         reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                }
+                return;
+            }
+
+            const contractState = contractWizardStates.get(userId);
+            if (
+                contractState &&
+                msg.chat?.id?.toString() === contractState.chatId &&
+                msg.reply_to_message?.message_id === contractState.promptMessageId
+            ) {
+                const rawAddress = (msg.text || '').trim();
+                const effectiveLang = contractState.lang || lang;
+
+                if (!rawAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                const contractAddress = normalizeAddress(rawAddress);
+                if (!contractAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                try {
+                    if (contractState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, contractState.promptMessageId);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
+
+                    const oklinkUrl = buildContractLookupUrl(contractAddress);
+                    const addressLabel = formatCopyableValueHtml(contractAddress) || escapeHtml(contractAddress);
+                    const linkLabel = `<a href="${oklinkUrl}">${escapeHtml(oklinkUrl)}</a>`;
+                    const responseLines = [
+                        t(effectiveLang, 'contract_result'),
+                        t(effectiveLang, 'contract_result_address', { address: addressLabel }),
+                        t(effectiveLang, 'contract_result_link', { link: linkLabel })
+                    ];
+
+                    await sendMessageRespectingThread(contractState.chatId, msg, responseLines.join('\n'), {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: false,
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+
+                    contractWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[ContractWizard] Failed to respond for ${userId}: ${error.message}`);
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
                     });
                 }
                 return;

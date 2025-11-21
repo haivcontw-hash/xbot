@@ -26,6 +26,10 @@ mkdir xbot
 
 npm install ethers node-telegram-bot-api dotenv
 npm install pm2 -g
+npm install @google/genai
+npm install axios
+
+pm2 logs xbot --lines 100
 
 # Lệnh này di chuyển tất cả file và thư mục dự án vào thư mục mới
 mv banmao.db BanmaoRPS_ABI.json database.js db.json exec_recipe.log i18n.js index.js locales/ node_modules/ package.json package-lock.json recipe_*.log xbot/
