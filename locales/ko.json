@@ -733,7 +733,7 @@
   "owner_ban_forbidden": "소유자나 공동 소유자는 차단할 수 없습니다.",
   "owner_ban_success": "{target} 사용자를 모든 명령에서 차단했습니다.",
   "owner_unban_success": "{target} 사용자의 차단을 해제했습니다.",
-  "owner_banned_notice": "이 봇 사용이 차단되었습니다.",
+  "owner_banned_notice": "이용이 차단되었습니다. 해제하려면 개발자(x.com/haivcon)에게 문의하세요.",
   "owner_reset_prompt": "'all'을 입력하면 전체 사용자 데이터를 삭제하거나 ID/@username을 입력해 초기화하세요.",
   "owner_reset_confirm": "{target}의 모든 저장 데이터를 삭제하려면 CONFIRM을 입력하세요.",
   "owner_reset_done": "{target} 데이터 초기화 완료. {count}개의 기록을 삭제하고 {chats}개의 채팅을 정리했습니다(메시지 {messages}개 삭제).",

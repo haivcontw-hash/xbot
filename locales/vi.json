@@ -732,7 +732,7 @@
   "owner_ban_forbidden": "Không thể BAN chủ sở hữu hoặc đồng sở hữu.",
   "owner_ban_success": "Đã BAN người dùng {target} khỏi toàn bộ lệnh.",
   "owner_unban_success": "Đã UNBAN người dùng {target}.",
-  "owner_banned_notice": "Bạn đang bị BAN khỏi bot này.",
+  "owner_banned_notice": "Bạn đã bị ban, liên hệ dev ( x.com/haivcon ) để mở.",
   "owner_reset_prompt": "Nhập 'all' để xoá toàn bộ dữ liệu người dùng hoặc nhập ID/@username để khôi phục.",
   "owner_reset_confirm": "Nhập CONFIRM để xoá sạch dữ liệu đã lưu của {target}.",
   "owner_reset_done": "Đã khôi phục dữ liệu cho {target}. Đã xoá {count} bản ghi và dọn {chats} đoạn chat (xoá {messages} tin nhắn).",

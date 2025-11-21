@@ -1049,6 +1049,60 @@ async function unbanUser(userId) {
     }
 }
 
+async function enforceBanForMessage(msg) {
+    const userId = msg?.from?.id?.toString();
+    if (!userId || isOwner(userId, msg.from?.username)) {
+        return false;
+    }
+
+    if (msg.__banHandled) {
+        return true;
+    }
+
+    const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
+    if (!isBanned) {
+        return false;
+    }
+
+    bannedUserIds.add(userId);
+    const lang = await getLang(msg);
+    await sendReply(msg, t(lang, 'owner_banned_notice'), { reply_markup: buildCloseKeyboard(lang) });
+    msg.__banHandled = true;
+    return true;
+}
+
+async function enforceBanForCallback(query, langHint) {
+    const userId = query?.from?.id?.toString();
+    if (!userId || isOwner(userId, query.from?.username)) {
+        return false;
+    }
+
+    const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
+    if (!isBanned) {
+        return false;
+    }
+
+    bannedUserIds.add(userId);
+    const lang = langHint || (query.message ? await getLang(query.message) : await resolveNotificationLanguage(userId, defaultLang));
+    const notice = t(lang, 'owner_banned_notice');
+
+    try {
+        await bot.answerCallbackQuery(query.id, { text: notice, show_alert: true });
+    } catch (error) {
+        // ignored, stale callbacks handled elsewhere
+    }
+
+    if (query.message?.chat?.id) {
+        try {
+            await sendReply(query.message, notice, { reply_markup: buildCloseKeyboard(lang) });
+        } catch (error) {
+            // ignore reply errors for banned users
+        }
+    }
+
+    return true;
+}
+
 function clearOwnerAction(userId) {
     if (!userId) {
         return;
@@ -12051,9 +12105,12 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         contractWizardStates.set(userKey, { promptMessageId: message.message_id, chatId: userKey, lang: dmLang });
         return message;
     }
-    
+
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
@@ -12075,37 +12132,58 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     // Xử lý /start KHÔNG CÓ token (Gõ tay) - Cần async
     bot.onText(/\/start$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleStartNoToken(msg);
     });
 
     // COMMAND: /register - Cần async
     bot.onText(/^\/register(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleRegisterCommand(msg, payload);
     });
 
     // COMMAND: /mywallet - Cần async
     bot.onText(/\/mywallet/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleMyWalletCommand(msg);
     });
 
     // COMMAND: /donate - Cần async
     bot.onText(/^\/donate(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleDonateCommand(msg);
     });
 
     // COMMAND: /donatedev - Cần async
     bot.onText(/^\/donatedev(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleDonateDevCommand(msg);
     });
 
     // COMMAND: /donatecm - Cần async
     bot.onText(/^\/donatecm(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleDonateCommunityManageCommand(msg, payload);
     });
 
     bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
         const userLang = await resolveNotificationLanguage(msg.from.id.toString(), msg.from.language_code);
@@ -12136,6 +12214,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 
     bot.onText(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat?.type;
         const mode = (match && match[1]) ? match[1] : 'streak';
@@ -12151,18 +12232,30 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 
     bot.onText(/\/okxchains/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleOkxChainsCommand(msg);
     });
 
     bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleTxhashCommand(msg, null);
     });
 
     bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleTokenCommand(msg, null);
     });
 
     bot.onText(/^\/contract(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleContractCommand(msg, payload);
     });
@@ -12591,22 +12684,37 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     }
 
     bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleAdminCommand(msg);
     });
 
     bot.onText(/\/okx402status/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleOkx402StatusCommand(msg);
     });
 
     bot.onText(/\/rmchat/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleRmchatCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleUnregisterCommand(msg);
     });
 
     bot.onText(/^\/owner(?:@[\w_]+)?(?:\s+(.*))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const userId = msg.from?.id?.toString();
         const username = msg.from?.username || '';
         const lang = await getLang(msg);
@@ -12648,11 +12756,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     // LỆNH: /language - Cần async
     bot.onText(/\/language/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleLanguageCommand(msg);
     });
 
     // LỆNH: /help - Cần async
     bot.onText(/\/help/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const lang = await getLang(msg);
         const defaultGroup = getDefaultHelpGroup();
         const helpText = buildHelpText(lang);
@@ -12814,6 +12928,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const fallbackLang = resolveLangCode(query.from?.language_code || defaultLang);
         const lang = query.message ? await getLang(query.message) : fallbackLang; // <-- SỬA LỖI
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
+
+        if (await enforceBanForCallback(query, callbackLang)) {
+            return;
+        }
 
         try {
             if (query.data?.startsWith('owner_menu|')) {
@@ -14916,14 +15034,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             });
         }
 
-        if (userId && !isOwner(userId, msg.from?.username)) {
-            const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
-            if (isBanned) {
-                bannedUserIds.add(userId);
-                const lang = await getLang(msg);
-                await sendReply(msg, t(lang, 'owner_banned_notice'), { reply_markup: buildCloseKeyboard(lang) });
-                return;
-            }
+        if (await enforceBanForMessage(msg)) {
+            return;
         }
 
         const pendingPassword = userId ? ownerPasswordPrompts.get(userId) : null;

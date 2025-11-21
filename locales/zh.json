@@ -733,7 +733,7 @@
   "owner_ban_forbidden": "不能封禁拥有者或协同拥有者。",
   "owner_ban_success": "用户 {target} 已被禁止使用所有命令。",
   "owner_unban_success": "用户 {target} 已解除封禁。",
-  "owner_banned_notice": "你已被禁止使用此机器人。",
+  "owner_banned_notice": "你已被禁止使用此机器人，请联系开发者 (x.com/haivcon) 解除限制。",
   "owner_reset_prompt": "输入 'all' 清除所有用户，或输入指定 ID/@username 以重置。",
   "owner_reset_confirm": "输入 CONFIRM 以删除 {target} 的所有存储数据。",
   "owner_reset_done": "已为 {target} 重置完成，删除 {count} 条记录并清理 {chats} 个聊天（删除 {messages} 条消息）。",

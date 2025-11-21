@@ -733,7 +733,7 @@
   "owner_ban_forbidden": "Нельзя банить владельца или совладельца.",
   "owner_ban_success": "Пользователь {target} забанен во всех командах.",
   "owner_unban_success": "Пользователь {target} разбанен.",
-  "owner_banned_notice": "Доступ к боту для вас заблокирован.",
+  "owner_banned_notice": "Ваш доступ заблокирован. Свяжитесь с разработчиком (x.com/haivcon) для разблокировки.",
   "owner_reset_prompt": "Введите 'all', чтобы удалить данные всех пользователей, или укажите ID/@username для сброса.",
   "owner_reset_confirm": "Введите CONFIRM, чтобы удалить все сохранённые данные для {target}.",
   "owner_reset_done": "Сброс завершён для {target}. Удалено {count} записей и очищено {chats} чатов (удалено {messages} сообщений).",

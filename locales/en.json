@@ -732,7 +732,7 @@
   "owner_ban_forbidden": "Cannot ban an owner or co-owner.",
   "owner_ban_success": "User {target} has been banned from all commands.",
   "owner_unban_success": "User {target} has been unbanned.",
-  "owner_banned_notice": "You are banned from using this bot.",
+  "owner_banned_notice": "You are banned from using this bot. Contact dev (x.com/haivcon) to unban.",
   "owner_reset_prompt": "Enter 'all' to wipe every stored user or specify an ID/@username to reset.",
   "owner_reset_confirm": "Type CONFIRM to erase all stored data for {target}.",
   "owner_reset_done": "Reset complete for {target}. Removed {count} stored records and cleared {chats} chat(s) (deleted {messages} message(s)).",

@@ -732,7 +732,7 @@
   "owner_ban_forbidden": "Tidak bisa BAN owner atau co-owner.",
   "owner_ban_success": "Pengguna {target} telah di-BAN dari semua perintah.",
   "owner_unban_success": "Pengguna {target} telah di-UNBAN.",
-  "owner_banned_notice": "Kamu sedang di-BAN dari bot ini.",
+  "owner_banned_notice": "Kamu telah diblokir, hubungi dev (x.com/haivcon) untuk membuka blokir.",
   "owner_reset_prompt": "Ketik 'all' untuk hapus semua data pengguna atau masukkan ID/@username tertentu.",
   "owner_reset_confirm": "Ketik CONFIRM untuk menghapus semua data tersimpan milik {target}.",
   "owner_reset_done": "Pemulihan selesai untuk {target}. {count} data dihapus dan {chats} obrolan dibersihkan (hapus {messages} pesan).",
