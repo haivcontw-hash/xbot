@@ -5151,7 +5151,7 @@ async function purgeChatHistory(chatId, ownerLang) {
         });
 
         const latestId = marker?.message_id || 0;
-        const startId = Math.max(1, latestId - 200);
+        const startId = Math.max(1, latestId - 4000);
         let deleted = 0;
 
         for (let messageId = latestId; messageId >= startId; messageId--) {
