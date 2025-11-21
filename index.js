@@ -19,6 +19,7 @@ const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null;
+const BOT_OWNER_ID = (process.env.BOT_OWNER_ID || '').trim() || null;
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
@@ -186,6 +187,7 @@ const OKX_DEX_DEFAULT_RETRY_DELAY_MS = (() => {
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 400;
 })();
 const walletTokenActionCache = new Map();
+const ownerActionStates = new Map();
 const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
@@ -765,6 +767,54 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+const EXTENDED_PICTOGRAPHIC_REGEX = /\p{Extended_Pictographic}/u;
+
+function isFullWidthCodePoint(codePoint) {
+    if (Number.isNaN(codePoint)) {
+        return false;
+    }
+
+    return (
+        codePoint >= 0x1100 &&
+        (
+            codePoint <= 0x115f ||
+            codePoint === 0x2329 ||
+            codePoint === 0x232a ||
+            (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+            (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+            (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+            (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+            (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+            (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+            (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+            (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+            (codePoint >= 0x1f900 && codePoint <= 0x1f9ff)
+        )
+    );
+}
+
+function measureDisplayWidth(text) {
+    let width = 0;
+    for (const char of text || '') {
+        const codePoint = char.codePointAt(0);
+        if (EXTENDED_PICTOGRAPHIC_REGEX.test(char) || isFullWidthCodePoint(codePoint)) {
+            width += 2;
+        } else {
+            width += 1;
+        }
+    }
+    return width;
+}
+
+function padDisplayText(text, width) {
+    const raw = text || '';
+    const len = measureDisplayWidth(raw);
+    if (len >= width) {
+        return raw;
+    }
+    return raw + ' '.repeat(width - len);
+}
+
 function formatBoldMarkdownToHtml(text) {
     if (typeof text !== 'string') {
         return '';
@@ -822,6 +872,20 @@ function formatCopyableValueHtml(value) {
     const encoded = encodeURIComponent(text);
     const code = `<code>${escapeHtml(text)}</code>`;
     return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
+}
+
+function isOwner(userId) {
+    if (!BOT_OWNER_ID || !userId) {
+        return false;
+    }
+    return userId.toString() === BOT_OWNER_ID;
+}
+
+function clearOwnerAction(userId) {
+    if (!userId) {
+        return;
+    }
+    ownerActionStates.delete(userId.toString());
 }
 
 function buildContractLookupUrl(contractAddress) {
@@ -4575,16 +4639,6 @@ function buildHelpGroupCard(lang, groupKey) {
         return '';
     }
 
-    const measureDisplayLength = (text) => Array.from(text || '').length;
-    const padDisplayText = (text, width) => {
-        const raw = text || '';
-        const len = measureDisplayLength(raw);
-        if (len >= width) {
-            return raw;
-        }
-        return raw + ' '.repeat(width - len);
-    };
-
     const title = t(lang, detail.titleKey);
     const desc = detail.descKey ? t(lang, detail.descKey) : '';
     const lines = [`${detail.icon} <b>${escapeHtml(title)}</b>`];
@@ -4607,10 +4661,10 @@ function buildHelpGroupCard(lang, groupKey) {
         return { label, description };
     });
 
-    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.label)) : [0];
-    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.description)) : [0];
-    const commandWidth = Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0);
-    const descWidth = Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0);
+    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayWidth(row.label)) : [0];
+    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayWidth(row.description)) : [0];
+    const commandWidth = Math.max(Math.max(...commandLengths, measureDisplayWidth(headerCommand), 14), 0);
+    const descWidth = Math.max(Math.max(...descLengths, measureDisplayWidth(headerDesc), 24), 0);
 
     const tableLines = [];
     tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} ┬ ${padDisplayText(headerDesc, descWidth)} ┐`);
@@ -4754,6 +4808,151 @@ function buildHelpKeyboard(lang, selectedGroup = null) {
 
     inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
     return { inline_keyboard };
+}
+
+function buildOwnerMenuKeyboard(lang) {
+    const inline_keyboard = [
+        [
+            { text: t(lang, 'owner_menu_broadcast'), callback_data: 'owner_menu|broadcast' },
+            { text: t(lang, 'owner_menu_ai_limit'), callback_data: 'owner_menu|ai_limit' }
+        ],
+        [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
+    ];
+
+    return { inline_keyboard };
+}
+
+function parseOwnerTargetInput(rawText) {
+    const trimmed = (rawText || '').trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const lowered = trimmed.toLowerCase();
+    if (['all', '*', 'global', 'tat ca', 'tất cả'].includes(lowered)) {
+        return { scope: 'all', targetId: null };
+    }
+
+    const idMatch = trimmed.match(/-?\d+/);
+    if (idMatch) {
+        return { scope: 'user', targetId: idMatch[0] };
+    }
+
+    return null;
+}
+
+function describeOwnerTarget(lang, target) {
+    if (!target || target.scope === 'all') {
+        return t(lang, 'owner_target_all');
+    }
+    return target.targetId || t(lang, 'owner_target_all');
+}
+
+async function handleOwnerStateMessage(msg, textOrCaption) {
+    const userId = msg.from?.id?.toString();
+    if (!isOwner(userId) || msg.chat?.type !== 'private') {
+        return false;
+    }
+
+    const state = ownerActionStates.get(userId);
+    if (!state) {
+        return false;
+    }
+
+    const lang = await getLang(msg);
+    const content = (textOrCaption || '').trim();
+
+    if (state.mode === 'broadcast') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'message', target });
+            await sendReply(msg, t(lang, 'owner_prompt_message'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'message') {
+            const target = state.target || { scope: 'all', targetId: null };
+            const recipients = target.scope === 'all'
+                ? await db.listUserChatIds()
+                : [target.targetId].filter(Boolean);
+            const uniqueRecipients = Array.from(new Set((recipients || []).map((id) => id?.toString()).filter(Boolean)));
+
+            if (!uniqueRecipients.length) {
+                await sendReply(msg, t(lang, 'owner_no_recipients'));
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            let success = 0;
+            let failed = 0;
+            for (const recipient of uniqueRecipients) {
+                try {
+                    await bot.sendMessage(recipient, content, { disable_web_page_preview: true });
+                    success += 1;
+                } catch (error) {
+                    failed += 1;
+                    console.error(`[Owner] Failed to broadcast to ${recipient}: ${error.message}`);
+                }
+            }
+
+            await sendReply(msg, t(lang, 'owner_broadcast_result', { success, failed }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'ai_limit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'limit', target });
+            await sendReply(msg, t(lang, 'owner_prompt_limit'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'limit') {
+            const target = state.target || { scope: 'all', targetId: null };
+            const limitValue = Number.parseInt(content, 10);
+
+            if (!Number.isFinite(limitValue) || limitValue < 0) {
+                await sendReply(msg, t(lang, 'owner_limit_invalid'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            if (limitValue === 0) {
+                await db.clearCommandLimit('ai', targetId);
+                await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            await db.setCommandLimit('ai', limitValue, targetId);
+            await sendReply(msg, t(lang, 'owner_limit_saved', {
+                limit: limitValue,
+                target: describeOwnerTarget(lang, target)
+            }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function buildSyntheticCommandMessage(query) {
@@ -10851,6 +11050,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const userPrompt = promptMatch && promptMatch[1] ? promptMatch[1].trim() : '';
       const photos = Array.isArray(msg.photo) ? msg.photo : [];
       const hasPhoto = photos.length > 0;
+      const userId = msg.from?.id?.toString();
+      const usageDate = new Date().toISOString().slice(0, 10);
 
       if (!userPrompt && !hasPhoto) {
           await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
@@ -10860,6 +11061,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       if (!GEMINI_API_KEYS.length) {
           await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
           return;
+      }
+
+      if (userId) {
+          const userLimit = await db.getCommandLimit('ai', userId);
+          const globalLimit = await db.getCommandLimit('ai', null);
+          const effectiveLimit = userLimit ?? globalLimit;
+
+          if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+              const currentUsage = await db.getCommandUsageCount('ai', userId, usageDate);
+              if (currentUsage >= effectiveLimit) {
+                  await sendReply(msg, t(lang, 'ai_limit_reached', { limit: effectiveLimit }), {
+                      reply_markup: buildCloseKeyboard(lang)
+                  });
+                  return;
+              }
+
+              await db.incrementCommandUsage('ai', userId, usageDate);
+          }
       }
 
       const parts = [];
@@ -11759,6 +11978,28 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         await handleUnregisterCommand(msg);
     });
 
+    bot.onText(/^\/owner(?:@[\w_]+)?$/, async (msg) => {
+        const userId = msg.from?.id?.toString();
+        const lang = await getLang(msg);
+
+        if (!isOwner(userId)) {
+            await sendReply(msg, t(lang, 'owner_not_allowed'), { reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
+        const targetChatId = msg.chat?.type === 'private' ? msg.chat.id : msg.from?.id;
+        ownerActionStates.delete(userId);
+
+        await bot.sendMessage(targetChatId, t(lang, 'owner_menu_title'), {
+            parse_mode: 'HTML',
+            reply_markup: buildOwnerMenuKeyboard(lang)
+        });
+
+        if (targetChatId !== msg.chat.id) {
+            await sendReply(msg, t(lang, 'owner_menu_dm_notice'), { reply_markup: buildCloseKeyboard(lang) });
+        }
+    });
+
     // LỆNH: /language - Cần async
     bot.onText(/\/language/, async (msg) => {
         await handleLanguageCommand(msg);
@@ -11929,6 +12170,41 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data?.startsWith('owner_menu|')) {
+                const ownerId = query.from?.id?.toString();
+                if (!isOwner(ownerId)) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_not_allowed'), show_alert: true });
+                    return;
+                }
+
+                const action = query.data.split('|')[1];
+                const targetChatId = query.message?.chat?.id || query.from?.id;
+
+                if (action === 'close') {
+                    clearOwnerAction(ownerId);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'help_action_executed') });
+                    return;
+                }
+
+                if (action === 'broadcast') {
+                    ownerActionStates.set(ownerId, { mode: 'broadcast', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_limit') {
+                    ownerActionStates.set(ownerId, { mode: 'ai_limit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+            }
+
             if (query.data === 'txhash_back') {
                 await bot.answerCallbackQuery(queryId);
                 if (chatId) {
@@ -13933,17 +14209,21 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         }
 
         const textOrCaption = (msg.text || msg.caption || '').trim();
+        const userId = msg.from?.id?.toString();
+        const chatType = msg.chat?.type || '';
+
+        if (await handleOwnerStateMessage(msg, textOrCaption)) {
+            return;
+        }
+
         if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
             await handleAiCommand(msg);
             return;
         }
 
-        const userId = msg.from?.id?.toString();
         if (!userId) {
             return;
         }
-
-        const chatType = msg.chat?.type || '';
 
         if (chatType === 'private') {
             const lang = await resolveNotificationLanguage(userId, msg.from?.language_code);

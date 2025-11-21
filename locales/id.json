@@ -681,5 +681,21 @@
   "donatecm_updated": "Donasi komunitas diperbarui ke {address}. Catatan: {note}",
   "donatecm_broadcast_button": "Kirim pengumuman donasi",
   "donatecm_broadcast_message": "📢 Ajakan donasi komunitas:\n<b>{address}</b>\n<i>{note}</i>\nYuk ikut berdonasi untuk mendukung komunitas!",
-  "donatecm_broadcast_sent": "Pengumuman donasi telah dikirim."
+  "donatecm_broadcast_sent": "Pengumuman donasi telah dikirim.",
+  "owner_not_allowed": "Perintah ini hanya untuk pemilik bot.",
+  "owner_menu_title": "👑 Panel pemilik bot",
+  "owner_menu_dm_notice": "Menu telah dikirim ke DM kamu.",
+  "owner_menu_broadcast": "Kirim pesan",
+  "owner_menu_ai_limit": "Batas /ai",
+  "owner_prompt_target": "Ketik 'all' untuk semua pengguna atau masukkan ID pengguna tertentu.",
+  "owner_invalid_target": "Harap masukkan 'all' atau ID pengguna yang valid.",
+  "owner_prompt_message": "Kirimkan pesan yang ingin dibagikan.",
+  "owner_broadcast_result": "Selesai. Berhasil: {success}. Gagal: {failed}.",
+  "owner_no_recipients": "Tidak ada penerima yang valid untuk permintaan ini.",
+  "owner_prompt_limit": "Masukkan batas penggunaan /ai per hari (0 untuk menghapus batas).",
+  "owner_limit_saved": "Batas /ai {limit} per hari disimpan untuk {target}.",
+  "owner_limit_cleared": "Batas /ai untuk {target} telah dihapus.",
+  "owner_limit_invalid": "Mohon masukkan angka tidak negatif.",
+  "owner_target_all": "semua pengguna",
+  "ai_limit_reached": "Kamu telah mencapai batas harian /ai sebanyak {limit} permintaan."
 }

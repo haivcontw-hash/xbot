@@ -681,5 +681,21 @@
   "donatecm_updated": "社区捐赠已更新为 {address}。备注：{note}",
   "donatecm_broadcast_button": "发布捐赠公告",
   "donatecm_broadcast_message": "📢 社区捐赠呼吁：\n<b>{address}</b>\n<i>{note}</i>\n欢迎为社区发展贡献一份力量！",
-  "donatecm_broadcast_sent": "捐赠公告已发送。"
+  "donatecm_broadcast_sent": "捐赠公告已发送。",
+  "owner_not_allowed": "此命令仅限机器人拥有者使用。",
+  "owner_menu_title": "👑 机器人拥有者面板",
+  "owner_menu_dm_notice": "已在私聊发送管理菜单。",
+  "owner_menu_broadcast": "发送消息",
+  "owner_menu_ai_limit": "限制 /ai",
+  "owner_prompt_target": "输入 'all' 作用于所有人，或输入指定的用户 ID。",
+  "owner_invalid_target": "请输入 'all' 或有效的用户 ID。",
+  "owner_prompt_message": "发送你想推送的内容。",
+  "owner_broadcast_result": "发送完成。成功：{success}。失败：{failed}。",
+  "owner_no_recipients": "没有可用的接收者。",
+  "owner_prompt_limit": "输入每日 /ai 上限（填 0 移除限制）。",
+  "owner_limit_saved": "已为 {target} 设置每天 {limit} 次 /ai。",
+  "owner_limit_cleared": "已移除 {target} 的 /ai 限制。",
+  "owner_limit_invalid": "请填写一个不小于 0 的数字。",
+  "owner_target_all": "所有用户",
+  "ai_limit_reached": "你已达到今日 {limit} 次 /ai 的限制。"
 }

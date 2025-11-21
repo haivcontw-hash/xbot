@@ -681,5 +681,21 @@
   "donatecm_updated": "Updated community donation to {address}. Note: {note}",
   "donatecm_broadcast_button": "Post a donation call",
   "donatecm_broadcast_message": "📢 Community donation call:\n<b>{address}</b>\n<i>{note}</i>\nPlease chip in to grow the community!",
-  "donatecm_broadcast_sent": "Donation notice posted."
+  "donatecm_broadcast_sent": "Donation notice posted.",
+  "owner_not_allowed": "This command is reserved for the bot owner.",
+  "owner_menu_title": "👑 Owner control panel",
+  "owner_menu_dm_notice": "I've sent the owner menu to your DM.",
+  "owner_menu_broadcast": "Send message",
+  "owner_menu_ai_limit": "Limit /ai",
+  "owner_prompt_target": "Reply with 'all' for everyone or enter a specific user ID.",
+  "owner_invalid_target": "Please enter 'all' or a valid user ID.",
+  "owner_prompt_message": "Send the content you want to deliver.",
+  "owner_broadcast_result": "Broadcast finished. Success: {success}. Failed: {failed}.",
+  "owner_no_recipients": "No valid recipients for this request.",
+  "owner_prompt_limit": "Enter the maximum /ai uses per day (0 to remove the limit).",
+  "owner_limit_saved": "Saved a {limit}-per-day /ai limit for {target}.",
+  "owner_limit_cleared": "Removed the /ai limit for {target}.",
+  "owner_limit_invalid": "Please provide a non-negative number.",
+  "owner_target_all": "all users",
+  "ai_limit_reached": "You've reached today's /ai limit of {limit} requests."
 }

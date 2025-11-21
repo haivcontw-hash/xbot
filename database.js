@@ -1086,6 +1086,24 @@ async function init() {
         );
     `);
     await dbRun(`
+        CREATE TABLE IF NOT EXISTS command_limits (
+            command TEXT NOT NULL,
+            targetId TEXT,
+            limit INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (command, targetId)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS command_usage_logs (
+            userId TEXT NOT NULL,
+            command TEXT NOT NULL,
+            usageDate TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (userId, command, usageDate)
+        );
+    `);
+    await dbRun(`
         CREATE TABLE IF NOT EXISTS group_bot_settings (
             chatId TEXT PRIMARY KEY,
             settings TEXT NOT NULL,
@@ -1984,6 +2002,102 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
     );
 }
 
+async function listUserChatIds() {
+    const rows = await dbAll('SELECT chatId FROM users');
+    return (rows || []).map((row) => row.chatId);
+}
+
+function normalizeCommandKey(command) {
+    return typeof command === 'string' ? command.trim().toLowerCase() : '';
+}
+
+function normalizeTargetId(targetId) {
+    return targetId === undefined || targetId === null ? null : targetId.toString();
+}
+
+async function setCommandLimit(command, limit, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    const numericLimit = Math.max(0, Math.floor(Number(limit)));
+    const now = Math.floor(Date.now() / 1000);
+
+    await dbRun(
+        `INSERT INTO command_limits (command, targetId, limit, updatedAt)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(command, targetId) DO UPDATE SET limit = excluded.limit, updatedAt = excluded.updatedAt`,
+        [normalizedCommand, normalizedTarget, numericLimit, now]
+    );
+}
+
+async function clearCommandLimit(command, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    await dbRun(
+        'DELETE FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
+        [normalizedCommand, normalizedTarget, normalizedTarget]
+    );
+}
+
+async function getCommandLimit(command, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return null;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    const row = await dbGet(
+        'SELECT limit FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
+        [normalizedCommand, normalizedTarget, normalizedTarget]
+    );
+
+    return row && Number.isFinite(Number(row.limit)) ? Number(row.limit) : null;
+}
+
+async function getCommandUsageCount(command, userId, usageDate = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const normalizedUserId = normalizeTargetId(userId);
+    if (!normalizedCommand || !normalizedUserId) {
+        return 0;
+    }
+
+    const date = usageDate || getTodayDateString('UTC');
+    const row = await dbGet(
+        'SELECT count FROM command_usage_logs WHERE userId = ? AND command = ? AND usageDate = ?',
+        [normalizedUserId, normalizedCommand, date]
+    );
+
+    return row && Number.isFinite(Number(row.count)) ? Number(row.count) : 0;
+}
+
+async function incrementCommandUsage(command, userId, usageDate = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const normalizedUserId = normalizeTargetId(userId);
+    if (!normalizedCommand || !normalizedUserId) {
+        return 0;
+    }
+
+    const date = usageDate || getTodayDateString('UTC');
+    const current = await getCommandUsageCount(normalizedCommand, normalizedUserId, date);
+    const nextCount = current + 1;
+
+    await dbRun(
+        `INSERT INTO command_usage_logs (userId, command, usageDate, count)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(userId, command, usageDate) DO UPDATE SET count = excluded.count`,
+        [normalizedUserId, normalizedCommand, date, nextCount]
+    );
+
+    return nextCount;
+}
+
 module.exports = {
     init,
     ensureCheckinGroup,
@@ -2059,5 +2173,11 @@ module.exports = {
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
-    updateGroupSubscriptionTopic
+    updateGroupSubscriptionTopic,
+    listUserChatIds,
+    setCommandLimit,
+    clearCommandLimit,
+    getCommandLimit,
+    getCommandUsageCount,
+    incrementCommandUsage
 };

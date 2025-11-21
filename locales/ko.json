@@ -681,5 +681,21 @@
   "donatecm_updated": "커뮤니티 후원 정보가 {address}로 업데이트되었습니다. 메모: {note}",
   "donatecm_broadcast_button": "후원 안내 보내기",
   "donatecm_broadcast_message": "📢 커뮤니티 후원 안내:\n<b>{address}</b>\n<i>{note}</i>\n커뮤니티 성장을 위해 함께 후원해 주세요!",
-  "donatecm_broadcast_sent": "후원 안내를 전송했습니다."
+  "donatecm_broadcast_sent": "후원 안내를 전송했습니다.",
+  "owner_not_allowed": "이 명령어는 봇 소유자만 사용할 수 있습니다.",
+  "owner_menu_title": "👑 봇 소유자 패널",
+  "owner_menu_dm_notice": "개인 채팅으로 메뉴를 보냈어요.",
+  "owner_menu_broadcast": "메시지 보내기",
+  "owner_menu_ai_limit": "/ai 제한 설정",
+  "owner_prompt_target": "모두에게 적용하려면 'all', 아니면 사용자 ID를 입력하세요.",
+  "owner_invalid_target": "'all' 또는 올바른 사용자 ID를 입력하세요.",
+  "owner_prompt_message": "보낼 내용을 입력하세요.",
+  "owner_broadcast_result": "전송 완료. 성공: {success}. 실패: {failed}.",
+  "owner_no_recipients": "유효한 수신자가 없습니다.",
+  "owner_prompt_limit": "/ai 일일 최대 횟수를 입력하세요 (0이면 제한 해제).",
+  "owner_limit_saved": "{target} 대상으로 하루 {limit}회 /ai 제한을 설정했습니다.",
+  "owner_limit_cleared": "{target}의 /ai 제한을 해제했습니다.",
+  "owner_limit_invalid": "0 이상의 숫자를 입력하세요.",
+  "owner_target_all": "모든 사용자",
+  "ai_limit_reached": "오늘 /ai 사용 한도 {limit}회를 모두 사용했습니다."
 }
