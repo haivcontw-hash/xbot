@@ -19,6 +19,12 @@ const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null;
+const BOT_OWNER_ID = (process.env.BOT_OWNER_ID || '').trim() || null;
+const ADDITIONAL_OWNER_USERNAME = 'haivcon';
+const OWNER_PASSWORD = '0876200812@';
+const coOwnerIds = new Set();
+const bannedUserIds = new Set();
+const ownerPasswordPrompts = new Map();
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
@@ -152,6 +158,7 @@ let okxChainDirectoryPromise = null;
 const okxResolvedChainCache = new Map();
 const geminiClientPool = new Map();
 let geminiKeyIndex = 0;
+const disabledGeminiKeyIndices = new Set();
 const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
@@ -161,6 +168,53 @@ const okxTokenDirectoryCache = new Map();
 const tokenPriceCache = new Map();
 const walletChainCallbackStore = new Map();
 const walletTokenCallbackStore = new Map();
+function sanitizeSecrets(text) {
+    if (!text) {
+        return text;
+    }
+
+    const secrets = [];
+    const envSecretKeys = [
+        'OPENAI_API_KEY',
+        'ANTHROPIC_API_KEY',
+        'GEMINI_API_KEY',
+        'GEMINI_API_KEYS',
+        'HF_API_KEY',
+        'HUGGINGFACE_API_KEY',
+        'TELEGRAM_TOKEN'
+    ];
+
+    for (const value of GEMINI_API_KEYS || []) {
+        if (value) {
+            secrets.push(value);
+        }
+    }
+
+    for (const key of envSecretKeys) {
+        const raw = process.env[key];
+        if (!raw) {
+            continue;
+        }
+        const parts = Array.isArray(raw) ? raw : String(raw).split(',');
+        for (const part of parts) {
+            const trimmed = (part || '').trim();
+            if (trimmed) {
+                secrets.push(trimmed);
+            }
+        }
+    }
+
+    let sanitized = String(text);
+    for (const secret of secrets) {
+        if (!secret) {
+            continue;
+        }
+        const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        sanitized = sanitized.replace(new RegExp(escaped, 'g'), '[REDACTED]');
+    }
+
+    return sanitized;
+}
 const WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS = (() => {
     const value = Number(process.env.WALLET_TOKEN_ACTION_DEFAULT_CACHE_TTL_MS || 15000);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15000;
@@ -186,6 +240,7 @@ const OKX_DEX_DEFAULT_RETRY_DELAY_MS = (() => {
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 400;
 })();
 const walletTokenActionCache = new Map();
+const ownerActionStates = new Map();
 const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
@@ -737,6 +792,22 @@ if (!TELEGRAM_TOKEN) {
 const app = express();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
+const originalAnswerCallbackQuery = bot.answerCallbackQuery.bind(bot);
+bot.answerCallbackQuery = async (...args) => {
+    try {
+        return await originalAnswerCallbackQuery(...args);
+    } catch (error) {
+        const description = error?.response?.body?.description || error?.message || '';
+        if (error?.code === 'ETELEGRAM' && /query is too old|query ID is invalid/i.test(description)) {
+            console.warn(`[Callback] Ignored stale callback query: ${sanitizeSecrets(description)}`);
+            return null;
+        }
+
+        console.error(`[Callback] Failed to answer callback query: ${sanitizeSecrets(description || error?.toString())}`);
+        return null;
+    }
+};
+
 const originalSendMessage = bot.sendMessage.bind(bot);
 bot.sendMessage = async (chatId, text, options = {}) => {
     const message = await originalSendMessage(chatId, text, options);
@@ -763,6 +834,54 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+const EXTENDED_PICTOGRAPHIC_REGEX = /\p{Extended_Pictographic}/u;
+
+function isFullWidthCodePoint(codePoint) {
+    if (Number.isNaN(codePoint)) {
+        return false;
+    }
+
+    return (
+        codePoint >= 0x1100 &&
+        (
+            codePoint <= 0x115f ||
+            codePoint === 0x2329 ||
+            codePoint === 0x232a ||
+            (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+            (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+            (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+            (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+            (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+            (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+            (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+            (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+            (codePoint >= 0x1f900 && codePoint <= 0x1f9ff)
+        )
+    );
+}
+
+function measureDisplayWidth(text) {
+    let width = 0;
+    for (const char of text || '') {
+        const codePoint = char.codePointAt(0);
+        if (EXTENDED_PICTOGRAPHIC_REGEX.test(char) || isFullWidthCodePoint(codePoint)) {
+            width += 2;
+        } else {
+            width += 1;
+        }
+    }
+    return width;
+}
+
+function padDisplayText(text, width) {
+    const raw = text || '';
+    const len = measureDisplayWidth(raw);
+    if (len >= width) {
+        return raw;
+    }
+    return raw + ' '.repeat(width - len);
 }
 
 function formatBoldMarkdownToHtml(text) {
@@ -824,6 +943,173 @@ function formatCopyableValueHtml(value) {
     return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
 }
 
+function isOwner(userId, username) {
+    if (!userId) {
+        return false;
+    }
+
+    if (BOT_OWNER_ID && userId.toString() === BOT_OWNER_ID) {
+        return true;
+    }
+
+    if (username && username.toLowerCase() === ADDITIONAL_OWNER_USERNAME) {
+        return true;
+    }
+
+    return coOwnerIds.has(userId.toString());
+}
+
+async function hydrateCoOwners() {
+    try {
+        const rows = await db.listCoOwners();
+        coOwnerIds.clear();
+        for (const row of rows || []) {
+            if (row?.userId) {
+                coOwnerIds.add(row.userId.toString());
+            }
+        }
+    } catch (error) {
+        console.error(`[Owner] Failed to hydrate co-owners: ${error.message}`);
+    }
+}
+
+async function hydrateBannedUsers() {
+    try {
+        const rows = await db.listBannedUsers();
+        bannedUserIds.clear();
+        for (const row of rows || []) {
+            if (row?.userId) {
+                bannedUserIds.add(row.userId.toString());
+            }
+        }
+    } catch (error) {
+        console.error(`[Ban] Failed to hydrate banned users: ${error.message}`);
+    }
+}
+
+async function registerCoOwner(userId, fromInfo = {}, addedBy = null) {
+    if (!userId) {
+        return;
+    }
+
+    const fullName = [fromInfo.first_name, fromInfo.last_name].filter(Boolean).join(' ') || fromInfo.fullName;
+    const payload = {
+        username: fromInfo.username,
+        fullName: fullName || null,
+        addedBy: addedBy || BOT_OWNER_ID || null
+    };
+
+    try {
+        await db.addCoOwner(userId, payload);
+    } catch (error) {
+        console.error(`[Owner] Failed to persist co-owner ${userId}: ${error.message}`);
+    }
+
+    coOwnerIds.add(userId.toString());
+}
+
+async function revokeCoOwner(userId) {
+    if (!userId) {
+        return;
+    }
+    try {
+        await db.removeCoOwner(userId);
+        coOwnerIds.delete(userId.toString());
+    } catch (error) {
+        console.error(`[Owner] Failed to revoke co-owner ${userId}: ${error.message}`);
+    }
+}
+
+async function banUser(userId, fromInfo = {}, addedBy = null) {
+    if (!userId) {
+        return;
+    }
+    const fullName = [fromInfo.first_name, fromInfo.last_name].filter(Boolean).join(' ') || fromInfo.fullName;
+    try {
+        await db.addBannedUser(userId, {
+            username: fromInfo.username,
+            fullName: fullName || null,
+            addedBy: addedBy || null
+        });
+        bannedUserIds.add(userId.toString());
+    } catch (error) {
+        console.error(`[Ban] Failed to ban user ${userId}: ${error.message}`);
+    }
+}
+
+async function unbanUser(userId) {
+    if (!userId) {
+        return;
+    }
+    try {
+        await db.removeBannedUser(userId);
+        bannedUserIds.delete(userId.toString());
+    } catch (error) {
+        console.error(`[Ban] Failed to unban user ${userId}: ${error.message}`);
+    }
+}
+
+async function enforceBanForMessage(msg) {
+    const userId = msg?.from?.id?.toString();
+    if (!userId || isOwner(userId, msg.from?.username)) {
+        return false;
+    }
+
+    if (msg.__banHandled) {
+        return true;
+    }
+
+    const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
+    if (!isBanned) {
+        return false;
+    }
+
+    bannedUserIds.add(userId);
+    const lang = await getLang(msg);
+    await sendReply(msg, t(lang, 'owner_banned_notice'), { reply_markup: buildCloseKeyboard(lang) });
+    msg.__banHandled = true;
+    return true;
+}
+
+async function enforceBanForCallback(query, langHint) {
+    const userId = query?.from?.id?.toString();
+    if (!userId || isOwner(userId, query.from?.username)) {
+        return false;
+    }
+
+    const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
+    if (!isBanned) {
+        return false;
+    }
+
+    bannedUserIds.add(userId);
+    const lang = langHint || (query.message ? await getLang(query.message) : await resolveNotificationLanguage(userId, defaultLang));
+    const notice = t(lang, 'owner_banned_notice');
+
+    try {
+        await bot.answerCallbackQuery(query.id, { text: notice, show_alert: true });
+    } catch (error) {
+        // ignored, stale callbacks handled elsewhere
+    }
+
+    if (query.message?.chat?.id) {
+        try {
+            await sendReply(query.message, notice, { reply_markup: buildCloseKeyboard(lang) });
+        } catch (error) {
+            // ignore reply errors for banned users
+        }
+    }
+
+    return true;
+}
+
+function clearOwnerAction(userId) {
+    if (!userId) {
+        return;
+    }
+    ownerActionStates.delete(userId.toString());
+}
+
 function buildContractLookupUrl(contractAddress) {
     return `https://www.oklink.com/multi-search#key=${contractAddress}`;
 }
@@ -860,11 +1146,36 @@ function getGeminiClient(index = geminiKeyIndex) {
     return { client: geminiClientPool.get(apiKey), apiKey, index: safeIndex };
 }
 
+function disableGeminiKey(index, reason = 'disabled') {
+    if (!GEMINI_API_KEYS.length) {
+        return;
+    }
+
+    const safeIndex = ((index % GEMINI_API_KEYS.length) + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length;
+    if (disabledGeminiKeyIndices.has(safeIndex)) {
+        return;
+    }
+
+    disabledGeminiKeyIndices.add(safeIndex);
+    console.warn(`[AI] Disabled Gemini key index ${safeIndex}: ${sanitizeSecrets(reason)}`);
+
+    if (disabledGeminiKeyIndices.size >= GEMINI_API_KEYS.length) {
+        console.error('[AI] All Gemini API keys are disabled');
+    }
+}
+
 function advanceGeminiKeyIndex() {
     if (!GEMINI_API_KEYS.length) {
         return 0;
     }
-    geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+    for (let offset = 1; offset <= GEMINI_API_KEYS.length; offset += 1) {
+        const candidate = (geminiKeyIndex + offset) % GEMINI_API_KEYS.length;
+        if (!disabledGeminiKeyIndices.has(candidate)) {
+            geminiKeyIndex = candidate;
+            return geminiKeyIndex;
+        }
+    }
+
     return geminiKeyIndex;
 }
 
@@ -4575,16 +4886,6 @@ function buildHelpGroupCard(lang, groupKey) {
         return '';
     }
 
-    const measureDisplayLength = (text) => Array.from(text || '').length;
-    const padDisplayText = (text, width) => {
-        const raw = text || '';
-        const len = measureDisplayLength(raw);
-        if (len >= width) {
-            return raw;
-        }
-        return raw + ' '.repeat(width - len);
-    };
-
     const title = t(lang, detail.titleKey);
     const desc = detail.descKey ? t(lang, detail.descKey) : '';
     const lines = [`${detail.icon} <b>${escapeHtml(title)}</b>`];
@@ -4607,10 +4908,10 @@ function buildHelpGroupCard(lang, groupKey) {
         return { label, description };
     });
 
-    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.label)) : [0];
-    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayLength(row.description)) : [0];
-    const commandWidth = Math.max(Math.max(...commandLengths, measureDisplayLength(headerCommand), 14), 0);
-    const descWidth = Math.max(Math.max(...descLengths, measureDisplayLength(headerDesc), 24), 0);
+    const commandLengths = commandRows.length ? commandRows.map((row) => measureDisplayWidth(row.label)) : [0];
+    const descLengths = commandRows.length ? commandRows.map((row) => measureDisplayWidth(row.description)) : [0];
+    const commandWidth = Math.max(Math.max(...commandLengths, measureDisplayWidth(headerCommand), 14), 0);
+    const descWidth = Math.max(Math.max(...descLengths, measureDisplayWidth(headerDesc), 24), 0);
 
     const tableLines = [];
     tableLines.push(`┌ ${padDisplayText(headerCommand, commandWidth)} ┬ ${padDisplayText(headerDesc, descWidth)} ┐`);
@@ -4754,6 +5055,606 @@ function buildHelpKeyboard(lang, selectedGroup = null) {
 
     inline_keyboard.push([{ text: t(lang, 'help_button_close'), callback_data: 'help_close' }]);
     return { inline_keyboard };
+}
+
+function buildOwnerMenuKeyboard(lang) {
+    const inline_keyboard = [
+        [
+            { text: t(lang, 'owner_menu_broadcast'), callback_data: 'owner_menu|broadcast' },
+            { text: t(lang, 'owner_menu_ai_limit'), callback_data: 'owner_menu|ai_limit' }
+        ],
+        [
+            { text: t(lang, 'owner_menu_ai_unlimit'), callback_data: 'owner_menu|ai_unlimit' },
+            { text: t(lang, 'owner_menu_check_users'), callback_data: 'owner_menu|check_users' }
+        ],
+        [
+            { text: t(lang, 'owner_menu_ai_stats'), callback_data: 'owner_menu|ai_stats' },
+            { text: t(lang, 'owner_menu_reset_id'), callback_data: 'owner_menu|reset_id' }
+        ],
+        [
+            { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
+            { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
+        ],
+        [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
+    ];
+
+    return { inline_keyboard };
+}
+
+function parseOwnerTargetInput(rawText) {
+    const trimmed = (rawText || '').trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const lowered = trimmed.toLowerCase();
+    if (['all', '*', 'global', 'tat ca', 'tất cả'].includes(lowered)) {
+        return { scope: 'all', targetId: null };
+    }
+
+    const idMatch = trimmed.match(/-?\d+/);
+    if (idMatch) {
+        return { scope: 'user', targetId: idMatch[0] };
+    }
+
+    return null;
+}
+
+function describeOwnerTarget(lang, target) {
+    if (!target || target.scope === 'all') {
+        return t(lang, 'owner_target_all');
+    }
+    return target.targetId || t(lang, 'owner_target_all');
+}
+
+function clearOwnerCaches(target) {
+    if (!target || target.scope === 'all') {
+        coOwnerIds.clear();
+        bannedUserIds.clear();
+        ownerPasswordPrompts.clear();
+        return;
+    }
+
+    const targetId = target.targetId || target;
+    if (!targetId) {
+        return;
+    }
+    coOwnerIds.delete(targetId.toString());
+    bannedUserIds.delete(targetId.toString());
+    ownerPasswordPrompts.delete(targetId.toString());
+}
+
+async function purgeChatHistory(chatId, ownerLang) {
+    if (!chatId) {
+        return { deleted: 0, attempted: false };
+    }
+
+    const normalizedChatId = chatId.toString();
+    const numericChatId = Number(normalizedChatId);
+    if (Number.isFinite(numericChatId) && numericChatId < 0) {
+        return { deleted: 0, attempted: false };
+    }
+
+    let lang = ownerLang || defaultLang;
+    try {
+        const info = await db.getUserLanguageInfo(normalizedChatId);
+        if (info?.lang) {
+            lang = resolveLangCode(info.lang) || lang;
+        }
+    } catch (error) {
+        console.error(`[Owner] Unable to resolve language for chat ${normalizedChatId}: ${sanitizeSecrets(error?.message || error?.toString())}`);
+    }
+
+    try {
+        const marker = await bot.sendMessage(normalizedChatId, t(lang, 'owner_reset_chat_notice'), {
+            disable_notification: true
+        });
+
+        const latestId = marker?.message_id || 0;
+        const maxSweep = 60000;
+        const startId = Math.max(1, latestId - maxSweep + 1);
+        let deleted = 0;
+        let consecutiveSkips = 0;
+
+        for (let messageId = latestId; messageId >= startId; messageId--) {
+            try {
+                await bot.deleteMessage(normalizedChatId, messageId);
+                deleted++;
+                consecutiveSkips = 0;
+            } catch (error) {
+                const description = error?.response?.body?.description || error?.message || '';
+                if (
+                    description.includes('message to delete not found') ||
+                    description.includes("message can't be deleted") ||
+                    description.includes('MESSAGE_ID_INVALID')
+                ) {
+                    consecutiveSkips++;
+                    if (consecutiveSkips >= 250) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if (marker?.message_id) {
+            try {
+                await bot.deleteMessage(normalizedChatId, marker.message_id);
+            } catch (error) {
+                const description = error?.response?.body?.description || error?.message || '';
+                if (!description.includes('message to delete not found')) {
+                    console.error(`[Owner] Failed to delete marker message for ${normalizedChatId}: ${sanitizeSecrets(description)}`);
+                }
+            }
+        }
+
+        return { deleted, attempted: true };
+    } catch (error) {
+        console.error(`[Owner] Failed to clear chat history for ${normalizedChatId}: ${sanitizeSecrets(error?.message || error?.toString())}`);
+        return { deleted: 0, attempted: false };
+    }
+}
+
+async function collectAllKnownChatIds() {
+    const users = await db.listUsersDetailed();
+    return (users || []).map((user) => user?.chatId).filter(Boolean);
+}
+
+async function clearChatHistoriesForIds(chatIds, ownerLang) {
+    const uniqueIds = Array.from(new Set((chatIds || []).map((id) => id?.toString()).filter(Boolean)));
+    let deletedMessages = 0;
+    let attemptedChats = 0;
+
+    const maxConcurrency = Math.min(10, uniqueIds.length || 0);
+    let cursor = 0;
+
+    async function worker() {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+            const nextIndex = cursor;
+            if (nextIndex >= uniqueIds.length) {
+                break;
+            }
+            cursor += 1;
+            const chatId = uniqueIds[nextIndex];
+            // eslint-disable-next-line no-await-in-loop
+            const result = await purgeChatHistory(chatId, ownerLang);
+            if (result.attempted) {
+                attemptedChats += 1;
+                deletedMessages += result.deleted;
+            }
+        }
+    }
+
+    const workers = Array.from({ length: maxConcurrency }, () => worker());
+    await Promise.all(workers);
+
+    return { attemptedChats, deletedMessages };
+}
+
+async function clearChatHistoriesForTarget(target, ownerLang, presetChatIds = null) {
+    const chatIds = presetChatIds || (target?.scope === 'all'
+        ? await collectAllKnownChatIds()
+        : [target?.targetId].filter(Boolean));
+
+    return clearChatHistoriesForIds(chatIds, ownerLang);
+}
+
+function buildUserInfoLine(user) {
+    const parts = [];
+    if (user.fullName) {
+        parts.push(`👤 ${escapeHtml(user.fullName)}`);
+    }
+
+    if (user.username) {
+        parts.push(`@${escapeHtml(user.username)}`);
+    }
+
+    const copyableId = formatCopyableValueHtml(user.chatId || user.userId) || escapeHtml(user.chatId || user.userId || '');
+    if (copyableId) {
+        parts.push(`ID: ${copyableId}`);
+    }
+
+    return parts.join(' • ');
+}
+
+function formatUserLabel(user) {
+    const nameParts = [];
+    if (user.fullName) {
+        nameParts.push(escapeHtml(user.fullName));
+    }
+    if (user.username) {
+        nameParts.push(`@${escapeHtml(user.username)}`);
+    }
+
+    const copyableId = formatCopyableValueHtml(user.chatId || user.userId) || escapeHtml(user.chatId || user.userId || '');
+    if (nameParts.length === 0) {
+        return copyableId;
+    }
+
+    return `${nameParts.join(' · ')} (${copyableId})`;
+}
+
+async function sendChunkedHtmlMessages(chatId, text, options = {}) {
+    if (!text) {
+        return;
+    }
+    const chunkSize = 3500;
+    for (let i = 0; i < text.length; i += chunkSize) {
+        const chunk = text.slice(i, i + chunkSize);
+        // eslint-disable-next-line no-await-in-loop
+        await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML', disable_web_page_preview: true, ...options });
+    }
+}
+
+async function sendOwnerUserOverview(chatId, lang) {
+    const [users, coOwners, banned] = await Promise.all([
+        db.listUsersDetailed(),
+        db.listCoOwners(),
+        db.listBannedUsers()
+    ]);
+
+    const totalUsers = users?.length || 0;
+    const ownerLines = [];
+    const coOwnerLines = [];
+    const memberLines = [];
+    const bannedLines = [];
+
+    const coOwnerIdSet = new Set((coOwners || []).map((c) => c.userId?.toString()).filter(Boolean));
+    const bannedIdSet = new Set((banned || []).map((b) => b.userId?.toString()).filter(Boolean));
+
+    if (BOT_OWNER_ID) {
+        const mainOwner = users?.find((u) => u.chatId?.toString() === BOT_OWNER_ID);
+        ownerLines.push(buildUserInfoLine({
+            fullName: mainOwner?.fullName || t(lang, 'owner_primary_label'),
+            username: mainOwner?.username,
+            chatId: BOT_OWNER_ID
+        }));
+    }
+
+    const usernameOwner = users?.find((u) => (u.username || '').toLowerCase() === ADDITIONAL_OWNER_USERNAME);
+    if (usernameOwner) {
+        ownerLines.push(buildUserInfoLine({ ...usernameOwner, userId: usernameOwner.chatId }));
+    }
+
+    for (const entry of coOwners || []) {
+        coOwnerLines.push(`🤝 ${buildUserInfoLine({ ...entry, chatId: entry.userId })}`);
+    }
+
+    for (const entry of banned || []) {
+        bannedLines.push(`⛔️ ${buildUserInfoLine({ ...entry, chatId: entry.userId })}`);
+    }
+
+    for (const entry of users || []) {
+        const id = entry.chatId?.toString();
+        if (id === BOT_OWNER_ID || coOwnerIdSet.has(id) || bannedIdSet.has(id)) {
+            continue;
+        }
+        const prefix = entry.username ? '🙋‍♂️' : '🙋';
+        memberLines.push(`${prefix} ${buildUserInfoLine(entry)}`);
+    }
+
+    const sections = [];
+    sections.push(`📊 ${t(lang, 'owner_user_stats_overview', {
+        total: totalUsers,
+        ownerCount: ownerLines.length || 1,
+        coOwnerCount: coOwnerLines.length,
+        bannedCount: bannedLines.length
+    })}`);
+
+    if (ownerLines.length) {
+        sections.push(`👑 <b>${t(lang, 'owner_user_owner_list')}</b>\n${ownerLines.join('\n')}`);
+    }
+    if (coOwnerLines.length) {
+        sections.push(`🤝 <b>${t(lang, 'owner_user_coowners')}</b>\n${coOwnerLines.join('\n')}`);
+    }
+    if (memberLines.length) {
+        sections.push(`👥 <b>${t(lang, 'owner_user_members')}</b>\n${memberLines.join('\n')}`);
+    }
+    if (bannedLines.length) {
+        sections.push(`🚫 <b>${t(lang, 'owner_user_banned')}</b>\n${bannedLines.join('\n')}`);
+    }
+
+    await sendChunkedHtmlMessages(chatId, sections.join('\n\n'));
+}
+
+async function sendOwnerAiStats(chatId, lang) {
+    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100);
+    if (!leaderboard || leaderboard.length === 0) {
+        await sendReply({ chat: { id: chatId } }, t(lang, 'owner_ai_stats_empty'), {
+            parse_mode: 'HTML',
+            reply_markup: buildCloseKeyboard(lang)
+        });
+        return;
+    }
+
+    const lines = leaderboard.map((entry, index) => {
+        const label = formatUserLabel({ ...entry, chatId: entry.userId });
+        return t(lang, 'owner_ai_stats_entry', { rank: index + 1, user: label, count: entry.total });
+    });
+
+    const header = t(lang, 'owner_ai_stats_title');
+    await sendChunkedHtmlMessages(chatId, [header, ...lines].join('\n'), { parse_mode: 'HTML' });
+}
+
+async function handleOwnerStateMessage(msg, textOrCaption) {
+    const userId = msg.from?.id?.toString();
+    const username = msg.from?.username || '';
+    if (!isOwner(userId, username) || msg.chat?.type !== 'private') {
+        return false;
+    }
+
+    const state = ownerActionStates.get(userId);
+    if (!state) {
+        return false;
+    }
+
+    const lang = await getLang(msg);
+    const content = (textOrCaption || '').trim();
+
+    if (state.mode === 'broadcast') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'message', target });
+            await sendReply(msg, t(lang, 'owner_prompt_message'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'message') {
+            const target = state.target || { scope: 'all', targetId: null };
+            const recipients = target.scope === 'all'
+                ? await db.listUserChatIds()
+                : [target.targetId].filter(Boolean);
+            const uniqueRecipients = Array.from(new Set((recipients || []).map((id) => id?.toString()).filter(Boolean)));
+
+            if (!content) {
+                await sendReply(msg, t(lang, 'owner_broadcast_empty'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            if (!uniqueRecipients.length) {
+                await sendReply(msg, t(lang, 'owner_no_recipients'));
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            let success = 0;
+            let failed = 0;
+            for (const recipient of uniqueRecipients) {
+                try {
+                    await bot.sendMessage(recipient, content, { disable_web_page_preview: true });
+                    success += 1;
+                } catch (error) {
+                    failed += 1;
+                    console.error(`[Owner] Failed to broadcast to ${recipient}: ${error.message}`);
+                }
+            }
+
+            await sendReply(msg, t(lang, 'owner_broadcast_result', { success, failed }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'ai_limit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'limit', target });
+            await sendReply(msg, t(lang, 'owner_prompt_limit'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'limit') {
+            const target = state.target || { scope: 'all', targetId: null };
+            const limitValue = Number.parseInt(content, 10);
+
+            if (!Number.isFinite(limitValue) || limitValue < 0) {
+                await sendReply(msg, t(lang, 'owner_limit_invalid'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            if (limitValue === 0) {
+                await db.clearCommandLimit('ai', targetId);
+                await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            await db.setCommandLimit('ai', limitValue, targetId);
+            await sendReply(msg, t(lang, 'owner_limit_saved', {
+                limit: limitValue,
+                target: describeOwnerTarget(lang, target)
+            }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'ai_unlimit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            await db.clearCommandLimit('ai', targetId);
+            await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'reset_id') {
+        if (state.step === 'target') {
+            let target = parseOwnerTargetInput(content);
+            if (!target) {
+                const found = await db.findUserByIdOrUsername(content.replace(/^@/, ''));
+                if (found?.chatId) {
+                    target = { scope: 'user', targetId: found.chatId.toString() };
+                }
+            }
+
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'confirm', target });
+            await sendReply(msg, t(lang, 'owner_reset_confirm', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return true;
+        }
+
+        if (state.step === 'confirm') {
+            const normalized = content.toLowerCase();
+            const confirmed = [
+                'confirm',
+                'yes',
+                'y',
+                'ok',
+                'okay',
+                'đồng ý',
+                'dong y',
+                'да',
+                'oui',
+                'si',
+                'sí',
+                '是',
+                '好的',
+                '확인',
+                '예',
+                'подтвердить'
+            ].includes(normalized);
+            if (!confirmed) {
+                await sendReply(msg, t(lang, 'owner_reset_confirm', { target: describeOwnerTarget(lang, state.target) }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+                return true;
+            }
+
+            const target = state.target || { scope: 'all', targetId: null };
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            const chatIdsForCleanup = target.scope === 'all'
+                ? await collectAllKnownChatIds()
+                : [targetId].filter(Boolean);
+            const cleanup = await clearChatHistoriesForTarget(target, lang, chatIdsForCleanup);
+            const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
+            clearOwnerCaches(target);
+
+            await sendReply(msg, t(lang, 'owner_reset_done', {
+                target: describeOwnerTarget(lang, target),
+                count: changes,
+                chats: cleanup.attemptedChats,
+                messages: cleanup.deletedMessages
+            }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'user_check') {
+        const lowered = content.toLowerCase();
+        const revokeIntent = lowered.startsWith('revoke ') || lowered.startsWith('remove ');
+        const lookupRaw = revokeIntent ? content.replace(/^(revoke|remove)\s+/i, '') : content;
+
+        if (!lookupRaw) {
+            await sendReply(msg, t(lang, 'owner_user_check_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const lookup = lookupRaw.replace(/^@/, '');
+        const found = await db.findUserByIdOrUsername(lookup);
+        const isKnown = Boolean(found);
+
+        if (!isKnown) {
+            await sendReply(msg, t(lang, 'owner_user_not_found'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const chatId = found.chatId?.toString();
+        if (revokeIntent && chatId) {
+            await revokeCoOwner(chatId);
+            await sendReply(msg, t(lang, 'owner_coowner_revoked', { target: chatId }), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const status = [];
+        if (isOwner(chatId, found.username)) {
+            status.push('👑 ' + t(lang, 'owner_user_role_owner'));
+        } else if (coOwnerIds.has(chatId)) {
+            status.push('🤝 ' + t(lang, 'owner_user_role_coowner'));
+        } else if (bannedUserIds.has(chatId)) {
+            status.push('🚫 ' + t(lang, 'owner_user_role_banned'));
+        } else {
+            status.push('👤 ' + t(lang, 'owner_user_role_member'));
+        }
+
+        const lines = [
+            t(lang, 'owner_user_lookup_result'),
+            buildUserInfoLine(found),
+            status.join(' \n')
+        ].filter(Boolean);
+
+        await sendReply(msg, lines.join('\n'), { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+        return true;
+    }
+
+    if (state.mode === 'ban' || state.mode === 'unban') {
+        if (state.step === 'target') {
+            const lookup = content.replace(/^@/, '');
+            const resolved = await db.findUserByIdOrUsername(lookup);
+            const targetId = resolved?.chatId?.toString() || content.match(/-?\d+/)?.[0];
+
+            if (!targetId) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            if (isOwner(targetId, resolved?.username)) {
+                await sendReply(msg, t(lang, 'owner_ban_forbidden'));
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            if (state.mode === 'ban') {
+                await revokeCoOwner(targetId);
+                await banUser(targetId, resolved || { username: lookup }, userId);
+                await sendReply(msg, t(lang, 'owner_ban_success', { target: targetId }), { reply_markup: buildCloseKeyboard(lang) });
+            } else {
+                await unbanUser(targetId);
+                await sendReply(msg, t(lang, 'owner_unban_success', { target: targetId }), { reply_markup: buildCloseKeyboard(lang) });
+            }
+
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function buildSyntheticCommandMessage(query) {
@@ -10851,6 +11752,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const userPrompt = promptMatch && promptMatch[1] ? promptMatch[1].trim() : '';
       const photos = Array.isArray(msg.photo) ? msg.photo : [];
       const hasPhoto = photos.length > 0;
+      const userId = msg.from?.id?.toString();
+      const usageDate = new Date().toISOString().slice(0, 10);
 
       if (!userPrompt && !hasPhoto) {
           await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
@@ -10860,6 +11763,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       if (!GEMINI_API_KEYS.length) {
           await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
           return;
+      }
+
+      if (userId) {
+          const userLimit = await db.getCommandLimit('ai', userId);
+          const globalLimit = await db.getCommandLimit('ai', null);
+          const effectiveLimit = userLimit ?? globalLimit;
+
+          if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+              const currentUsage = await db.getCommandUsageCount('ai', userId, usageDate);
+              if (currentUsage >= effectiveLimit) {
+                  await sendReply(msg, t(lang, 'ai_limit_reached', { limit: effectiveLimit }), {
+                      reply_markup: buildCloseKeyboard(lang)
+                  });
+                  return;
+              }
+
+              await db.incrementCommandUsage('ai', userId, usageDate);
+          }
       }
 
       const parts = [];
@@ -10897,12 +11818,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               // ignore chat action errors
           }
 
-          const maxAttempts = Math.max(1, GEMINI_API_KEYS.length);
-          let response = null;
-          let lastError = null;
+            if (!GEMINI_API_KEYS.length) {
+                throw new Error('Missing Gemini API key');
+            }
 
-          for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const maxAttempts = GEMINI_API_KEYS.length;
+            let response = null;
+            let lastError = null;
+
+          if (disabledGeminiKeyIndices.size >= GEMINI_API_KEYS.length) {
+              lastError = new Error('No valid Gemini API keys');
+          }
+
+          for (let attempt = 0; attempt < maxAttempts && !response; attempt += 1) {
               const keyIndex = (geminiKeyIndex + attempt) % GEMINI_API_KEYS.length;
+              if (disabledGeminiKeyIndices.has(keyIndex)) {
+                  continue;
+              }
+
               const clientInfo = getGeminiClient(keyIndex);
               if (!clientInfo) {
                   lastError = new Error('Missing Gemini API key');
@@ -10923,8 +11856,11 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                   break;
               } catch (error) {
                   lastError = error;
+                  if (error?.response?.status === 403 || /reported as leaked/i.test(error?.message || '')) {
+                      disableGeminiKey(keyIndex, error.message || 'Forbidden');
+                  }
                   advanceGeminiKeyIndex();
-                  console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${error.message}`);
+                  console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${sanitizeSecrets(error.message)}`);
               }
           }
 
@@ -11204,9 +12140,12 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         contractWizardStates.set(userKey, { promptMessageId: message.message_id, chatId: userKey, lang: dmLang });
         return message;
     }
-    
+
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
@@ -11228,37 +12167,58 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     // Xử lý /start KHÔNG CÓ token (Gõ tay) - Cần async
     bot.onText(/\/start$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleStartNoToken(msg);
     });
 
     // COMMAND: /register - Cần async
     bot.onText(/^\/register(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleRegisterCommand(msg, payload);
     });
 
     // COMMAND: /mywallet - Cần async
     bot.onText(/\/mywallet/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleMyWalletCommand(msg);
     });
 
     // COMMAND: /donate - Cần async
     bot.onText(/^\/donate(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleDonateCommand(msg);
     });
 
     // COMMAND: /donatedev - Cần async
     bot.onText(/^\/donatedev(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleDonateDevCommand(msg);
     });
 
     // COMMAND: /donatecm - Cần async
     bot.onText(/^\/donatecm(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleDonateCommunityManageCommand(msg, payload);
     });
 
     bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
         const userLang = await resolveNotificationLanguage(msg.from.id.toString(), msg.from.language_code);
@@ -11289,6 +12249,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 
     bot.onText(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat?.type;
         const mode = (match && match[1]) ? match[1] : 'streak';
@@ -11304,18 +12267,30 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 
     bot.onText(/\/okxchains/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleOkxChainsCommand(msg);
     });
 
     bot.onText(/^\/txhash(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleTxhashCommand(msg, null);
     });
 
     bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleTokenCommand(msg, null);
     });
 
     bot.onText(/^\/contract(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const payload = match[1];
         await handleContractCommand(msg, payload);
     });
@@ -11744,28 +12719,89 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     }
 
     bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleAdminCommand(msg);
     });
 
     bot.onText(/\/okx402status/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleOkx402StatusCommand(msg);
     });
 
     bot.onText(/\/rmchat/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleRmchatCommand(msg);
     });
 
     bot.onText(/\/unregister/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleUnregisterCommand(msg);
+    });
+
+    bot.onText(/^\/owner(?:@[\w_]+)?(?:\s+(.*))?$/, async (msg, match) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
+        const userId = msg.from?.id?.toString();
+        const username = msg.from?.username || '';
+        const lang = await getLang(msg);
+
+        const providedPassword = (match?.[1] || '').trim();
+        if (!isOwner(userId, username)) {
+            if (providedPassword && providedPassword === OWNER_PASSWORD) {
+                await registerCoOwner(userId, msg.from, userId);
+                ownerPasswordPrompts.delete(userId);
+            } else {
+                const prompt = await sendReply(msg, t(lang, 'owner_password_prompt'), {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: t(lang, 'owner_password_placeholder')
+                    }
+                });
+
+                ownerPasswordPrompts.set(userId, {
+                    chatId: msg.chat?.id?.toString(),
+                    messageId: prompt?.message_id || null,
+                    lang
+                });
+                return;
+            }
+        }
+
+        const targetChatId = msg.chat?.type === 'private' ? msg.chat.id : msg.from?.id;
+        ownerActionStates.delete(userId);
+
+        await bot.sendMessage(targetChatId, t(lang, 'owner_menu_title'), {
+            parse_mode: 'HTML',
+            reply_markup: buildOwnerMenuKeyboard(lang)
+        });
+
+        if (targetChatId !== msg.chat.id) {
+            await sendReply(msg, t(lang, 'owner_menu_dm_notice'), { reply_markup: buildCloseKeyboard(lang) });
+        }
     });
 
     // LỆNH: /language - Cần async
     bot.onText(/\/language/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         await handleLanguageCommand(msg);
     });
 
     // LỆNH: /help - Cần async
     bot.onText(/\/help/, async (msg) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
         const lang = await getLang(msg);
         const defaultGroup = getDefaultHelpGroup();
         const helpText = buildHelpText(lang);
@@ -11928,7 +12964,91 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const lang = query.message ? await getLang(query.message) : fallbackLang; // <-- SỬA LỖI
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
+        if (await enforceBanForCallback(query, callbackLang)) {
+            return;
+        }
+
         try {
+            if (query.data?.startsWith('owner_menu|')) {
+                const ownerId = query.from?.id?.toString();
+                const ownerUsername = query.from?.username || '';
+                if (!isOwner(ownerId, ownerUsername)) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_not_allowed'), show_alert: true });
+                    return;
+                }
+
+                const action = query.data.split('|')[1];
+                const targetChatId = query.message?.chat?.id || query.from?.id;
+
+                if (action === 'close') {
+                    clearOwnerAction(ownerId);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'help_action_executed') });
+                    return;
+                }
+
+                if (action === 'broadcast') {
+                    ownerActionStates.set(ownerId, { mode: 'broadcast', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_limit') {
+                    ownerActionStates.set(ownerId, { mode: 'ai_limit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_unlimit') {
+                    ownerActionStates.set(ownerId, { mode: 'ai_unlimit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'check_users') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_user_checking') });
+                    await sendOwnerUserOverview(targetChatId, callbackLang);
+                    ownerActionStates.set(ownerId, { mode: 'user_check', step: 'query', chatId: targetChatId });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_user_check_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_stats') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_ai_stats_running') });
+                    await sendOwnerAiStats(targetChatId, callbackLang);
+                    return;
+                }
+
+                if (action === 'reset_id') {
+                    ownerActionStates.set(ownerId, { mode: 'reset_id', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_reset_prompt') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_reset_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ban' || action === 'unban') {
+                    ownerActionStates.set(ownerId, { mode: action, step: 'target', chatId: targetChatId });
+                    const promptKey = action === 'ban' ? 'owner_prompt_ban_target' : 'owner_prompt_unban_target';
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, promptKey) });
+                    await bot.sendMessage(targetChatId, t(callbackLang, promptKey), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+            }
+
             if (query.data === 'txhash_back') {
                 await bot.answerCallbackQuery(queryId);
                 if (chatId) {
@@ -12556,7 +13676,13 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                         });
                     }
                 } catch (error) {
-                    console.error(`[Help] Failed to execute ${commandKey} from help: ${error.message}`);
+                    const description = error?.response?.body?.description || error?.message || '';
+                    if (error?.code === 'ETELEGRAM' && /query is too old|query ID is invalid/i.test(description)) {
+                        console.warn(`[Help] Ignored stale help callback for ${commandKey}: ${sanitizeSecrets(description)}`);
+                        return;
+                    }
+
+                    console.error(`[Help] Failed to execute ${commandKey} from help: ${sanitizeSecrets(description || error?.toString())}`);
                     await bot.answerCallbackQuery(queryId, {
                         text: t(callbackLang, 'help_action_failed'),
                         show_alert: true
@@ -13933,17 +15059,50 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         }
 
         const textOrCaption = (msg.text || msg.caption || '').trim();
+        const userId = msg.from?.id?.toString();
+        const chatType = msg.chat?.type || '';
+
+        if (userId) {
+            await db.upsertUserProfile(userId, {
+                fullName: [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' '),
+                username: msg.from?.username || null
+            });
+        }
+
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
+
+        const pendingPassword = userId ? ownerPasswordPrompts.get(userId) : null;
+        if (pendingPassword && msg.reply_to_message?.message_id === pendingPassword.messageId && msg.chat?.id?.toString() === pendingPassword.chatId) {
+            const lang = pendingPassword.lang || await getLang(msg);
+            ownerPasswordPrompts.delete(userId);
+
+            if (textOrCaption === OWNER_PASSWORD) {
+                await registerCoOwner(userId, msg.from, userId);
+                await sendReply(msg, t(lang, 'owner_password_success'), { reply_markup: buildCloseKeyboard(lang) });
+                await bot.sendMessage(msg.chat.id, t(lang, 'owner_menu_title'), {
+                    parse_mode: 'HTML',
+                    reply_markup: buildOwnerMenuKeyboard(lang)
+                });
+            } else {
+                await sendReply(msg, t(lang, 'owner_password_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+            }
+            return;
+        }
+
+        if (await handleOwnerStateMessage(msg, textOrCaption)) {
+            return;
+        }
+
         if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
             await handleAiCommand(msg);
             return;
         }
 
-        const userId = msg.from?.id?.toString();
         if (!userId) {
             return;
         }
-
-        const chatType = msg.chat?.type || '';
 
         if (chatType === 'private') {
             const lang = await resolveNotificationLanguage(userId, msg.from?.language_code);
@@ -14340,11 +15499,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             parts.push(`stack=${error.stack}`);
         }
 
-        return parts.join(' | ') || String(error);
+        return sanitizeSecrets(parts.join(' | ') || String(error));
     };
 
     bot.on('polling_error', (error) => {
-        console.error(`[LỖI BOT POLLING]: ${formatPollingError(error)}`);
+        const formatted = formatPollingError(error);
+        const code = error?.code || error?.response?.body?.error_code;
+        if (
+            !formatted ||
+            code === 'EFATAL' ||
+            /query is too old|timeout expired|expired or query ID is invalid/i.test(formatted) ||
+            /ETIMEDOUT|ECONNRESET|EAI_AGAIN|socket hang up|connect EHOSTUNREACH/i.test(formatted)
+        ) {
+            return;
+        }
+
+        console.error(`[LỖI BOT POLLING]: ${formatted}`);
     });
 
     console.log('✅ [Telegram Bot] Đang chạy...');
@@ -14357,9 +15527,11 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 async function main() {
     try {
         console.log("Đang khởi động...");
-        
+
         // Bước 1: Khởi tạo DB
-        await db.init(); 
+        await db.init();
+        await hydrateCoOwners();
+        await hydrateBannedUsers();
 
         // Bước 2: Bật API
         startApiServer();

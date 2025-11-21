@@ -1033,12 +1033,44 @@ async function init() {
             chatId TEXT PRIMARY KEY,
             lang TEXT,
             wallets TEXT,
-            lang_source TEXT DEFAULT 'auto'
+            lang_source TEXT DEFAULT 'auto',
+            fullName TEXT,
+            username TEXT,
+            firstSeen INTEGER,
+            lastSeen INTEGER
         );
     `);
 
     try {
         await dbRun(`ALTER TABLE users ADD COLUMN lang_source TEXT DEFAULT 'auto'`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN fullName TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN username TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN firstSeen INTEGER`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN lastSeen INTEGER`);
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
@@ -1083,6 +1115,66 @@ async function init() {
             lang TEXT NOT NULL,
             updatedAt INTEGER NOT NULL,
             PRIMARY KEY (groupChatId, userId)
+        );
+    `);
+    const existingCommandLimits = await dbAll('PRAGMA table_info(command_limits);');
+    if (existingCommandLimits && existingCommandLimits.length > 0) {
+        const hasLimitColumn = existingCommandLimits.some((c) => c.name === 'limit');
+        const hasLimitValueColumn = existingCommandLimits.some((c) => c.name === 'limitValue');
+
+        if (hasLimitColumn && !hasLimitValueColumn) {
+            await dbRun('ALTER TABLE command_limits RENAME TO command_limits_old');
+            await dbRun(`
+                CREATE TABLE command_limits (
+                    command TEXT NOT NULL,
+                    targetId TEXT,
+                    limitValue INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL,
+                    PRIMARY KEY (command, targetId)
+                );
+            `);
+            await dbRun(`
+                INSERT INTO command_limits (command, targetId, limitValue, updatedAt)
+                SELECT command, targetId, "limit", updatedAt FROM command_limits_old;
+            `);
+            await dbRun('DROP TABLE command_limits_old');
+        }
+    } else {
+        await dbRun(`
+            CREATE TABLE IF NOT EXISTS command_limits (
+                command TEXT NOT NULL,
+                targetId TEXT,
+                limitValue INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL,
+                PRIMARY KEY (command, targetId)
+            );
+        `);
+    }
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS co_owners (
+            userId TEXT PRIMARY KEY,
+            username TEXT,
+            fullName TEXT,
+            addedBy TEXT,
+            createdAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS banned_users (
+            userId TEXT PRIMARY KEY,
+            username TEXT,
+            fullName TEXT,
+            addedBy TEXT,
+            createdAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS command_usage_logs (
+            userId TEXT NOT NULL,
+            command TEXT NOT NULL,
+            usageDate TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (userId, command, usageDate)
         );
     `);
     await dbRun(`
@@ -1388,11 +1480,18 @@ async function addWalletToUser(chatId, lang, walletAddress, options = {}) {
         nextSource = 'auto';
     }
 
-    if (user) {
-        await dbRun('UPDATE users SET lang = ?, lang_source = ?, wallets = ? WHERE chatId = ?', [langToPersist, nextSource, JSON.stringify(wallets), chatId]);
-    } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify(wallets), 'auto']);
-    }
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        `INSERT INTO users (chatId, lang, wallets, lang_source, firstSeen, lastSeen)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chatId) DO UPDATE SET
+             lang = excluded.lang,
+             lang_source = excluded.lang_source,
+             wallets = excluded.wallets,
+             lastSeen = excluded.lastSeen,
+             firstSeen = COALESCE(users.firstSeen, excluded.firstSeen)`,
+        [chatId, langToPersist, JSON.stringify(wallets), nextSource, now, now]
+    );
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
     return { added, wallet: normalizedAddr, name: finalName, nameChanged };
 }
@@ -1792,7 +1891,11 @@ async function wipeChatFootprint(chatId) {
         { table: 'checkin_attempts', column: 'chatId' },
         { table: 'checkin_attempts', column: 'userId' },
         { table: 'checkin_auto_logs', column: 'chatId' },
-        { table: 'checkin_summary_logs', column: 'chatId' }
+        { table: 'checkin_summary_logs', column: 'chatId' },
+        { table: 'co_owners', column: 'userId' },
+        { table: 'banned_users', column: 'userId' },
+        { table: 'command_limits', column: 'targetId' },
+        { table: 'command_usage_logs', column: 'userId' }
     ];
 
     let totalChanges = 0;
@@ -1803,6 +1906,55 @@ async function wipeChatFootprint(chatId) {
 
     await removeAllWalletTokens(normalized);
     await removeAllWalletHoldingsCache(normalized);
+
+    return totalChanges;
+}
+
+async function resetUserData(targetId = null) {
+    const normalized = targetId === null || targetId === undefined ? null : targetId.toString();
+    const scopedTables = [
+        { table: 'users', column: 'chatId' },
+        { table: 'group_subscriptions', column: 'chatId' },
+        { table: 'group_member_languages', column: 'groupChatId' },
+        { table: 'group_member_languages', column: 'userId' },
+        { table: 'group_bot_settings', column: 'chatId' },
+        { table: 'user_wallet_tokens', column: 'chatId' },
+        { table: 'wallet_holdings_cache', column: 'chatId' },
+        { table: 'user_warnings', column: 'chatId' },
+        { table: 'pending_memes', column: 'chatId' },
+        { table: 'checkin_groups', column: 'chatId' },
+        { table: 'checkin_members', column: 'chatId' },
+        { table: 'checkin_members', column: 'userId' },
+        { table: 'checkin_records', column: 'chatId' },
+        { table: 'checkin_records', column: 'userId' },
+        { table: 'checkin_attempts', column: 'chatId' },
+        { table: 'checkin_attempts', column: 'userId' },
+        { table: 'checkin_auto_logs', column: 'chatId' },
+        { table: 'checkin_summary_logs', column: 'chatId' },
+        { table: 'co_owners', column: 'userId' },
+        { table: 'banned_users', column: 'userId' },
+        { table: 'command_limits', column: 'targetId' },
+        { table: 'command_usage_logs', column: 'userId' }
+    ];
+
+    let totalChanges = 0;
+    for (const entry of scopedTables) {
+        const result = normalized === null
+            ? await dbRun(`DELETE FROM ${entry.table}`)
+            : await dbRun(`DELETE FROM ${entry.table} WHERE ${entry.column} = ?`, [normalized]);
+        totalChanges += result?.changes || 0;
+    }
+
+    if (normalized === null) {
+        await dbRun('DELETE FROM user_wallet_tokens');
+        await dbRun('DELETE FROM wallet_holdings_cache');
+        await dbRun('DELETE FROM pending_tokens');
+        await dbRun('DELETE FROM game_stats');
+        await dbRun('DELETE FROM user_warnings');
+    } else {
+        await removeAllWalletTokens(normalized);
+        await removeAllWalletHoldingsCache(normalized);
+    }
 
     return totalChanges;
 }
@@ -1984,6 +2136,261 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
     );
 }
 
+async function listUserChatIds() {
+    const rows = await dbAll('SELECT chatId FROM users');
+    return (rows || []).map((row) => row.chatId);
+}
+
+async function upsertUserProfile(chatId, profile = {}) {
+    if (!chatId) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
+    const username = profile.username ? profile.username.toLowerCase() : null;
+    const hasLang = Object.prototype.hasOwnProperty.call(profile, 'lang');
+    const lang = hasLang ? normalizeLanguageCode(profile.lang) : null;
+    const hasLangSource =
+        Object.prototype.hasOwnProperty.call(profile, 'lang_source') ||
+        Object.prototype.hasOwnProperty.call(profile, 'langSource');
+    const langSource = hasLangSource
+        ? (profile.lang_source === 'manual' || profile.langSource === 'manual' ? 'manual' : 'auto')
+        : null;
+    const firstSeen = profile.firstSeen || now;
+    const wallets =
+        profile.wallets && typeof profile.wallets !== 'string'
+            ? JSON.stringify(profile.wallets)
+            : profile.wallets || '[]';
+
+    const normalizedChatId = chatId.toString();
+    const existing = await dbGet('SELECT firstSeen FROM users WHERE chatId = ?', [normalizedChatId]);
+
+    const updateResult = await dbRun(
+        `UPDATE users
+         SET
+            lang = COALESCE(?, lang),
+            wallets = COALESCE(?, wallets),
+            lang_source = COALESCE(?, lang_source),
+            fullName = COALESCE(?, fullName),
+            username = COALESCE(?, username),
+            firstSeen = COALESCE(firstSeen, ?),
+            lastSeen = ?
+         WHERE chatId = ?`,
+        [lang, wallets, langSource, fullName || null, username, firstSeen, now, normalizedChatId]
+    );
+
+    if (!updateResult?.changes) {
+        await dbRun(
+            `INSERT OR IGNORE INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)` ,
+            [normalizedChatId, lang, wallets, langSource, fullName || null, username, firstSeen, now]
+        );
+
+        if (existing?.firstSeen === undefined || existing?.firstSeen === null) {
+            await dbRun('UPDATE users SET firstSeen = ? WHERE chatId = ? AND firstSeen IS NULL', [firstSeen, normalizedChatId]);
+        }
+    }
+}
+
+async function listUsersDetailed() {
+    return dbAll('SELECT chatId, username, fullName, firstSeen, lastSeen FROM users');
+}
+
+async function findUserByIdOrUsername(identifier) {
+    if (!identifier) {
+        return null;
+    }
+    const idCandidate = identifier.toString();
+    const normalizedUsername = identifier.toString().replace(/^@/, '').toLowerCase();
+
+    const row = await dbGet(
+        'SELECT chatId, username, fullName, firstSeen, lastSeen FROM users WHERE chatId = ? OR LOWER(username) = ?',
+        [idCandidate, normalizedUsername]
+    );
+
+    return row || null;
+}
+
+async function addCoOwner(userId, data = {}) {
+    if (!userId) {
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const username = data.username ? data.username.toLowerCase() : null;
+    await dbRun(
+        `INSERT INTO co_owners (userId, username, fullName, addedBy, createdAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET username = excluded.username, fullName = excluded.fullName, addedBy = excluded.addedBy, createdAt = excluded.createdAt`,
+        [userId.toString(), username, data.fullName || null, data.addedBy || null, now]
+    );
+}
+
+async function removeCoOwner(userId) {
+    if (!userId) {
+        return;
+    }
+    await dbRun('DELETE FROM co_owners WHERE userId = ?', [userId.toString()]);
+}
+
+async function listCoOwners() {
+    return dbAll('SELECT userId, username, fullName, addedBy, createdAt FROM co_owners');
+}
+
+async function isCoOwner(userId) {
+    if (!userId) {
+        return false;
+    }
+    const row = await dbGet('SELECT userId FROM co_owners WHERE userId = ?', [userId.toString()]);
+    return !!row;
+}
+
+async function addBannedUser(userId, data = {}) {
+    if (!userId) {
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const username = data.username ? data.username.toLowerCase() : null;
+    await dbRun(
+        `INSERT INTO banned_users (userId, username, fullName, addedBy, createdAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET username = excluded.username, fullName = excluded.fullName, addedBy = excluded.addedBy, createdAt = excluded.createdAt`,
+        [userId.toString(), username, data.fullName || null, data.addedBy || null, now]
+    );
+}
+
+async function removeBannedUser(userId) {
+    if (!userId) {
+        return;
+    }
+    await dbRun('DELETE FROM banned_users WHERE userId = ?', [userId.toString()]);
+}
+
+async function listBannedUsers() {
+    return dbAll('SELECT userId, username, fullName, addedBy, createdAt FROM banned_users');
+}
+
+async function isUserBanned(userId) {
+    if (!userId) {
+        return false;
+    }
+    const row = await dbGet('SELECT userId FROM banned_users WHERE userId = ?', [userId.toString()]);
+    return !!row;
+}
+
+function normalizeCommandKey(command) {
+    return typeof command === 'string' ? command.trim().toLowerCase() : '';
+}
+
+function normalizeTargetId(targetId) {
+    return targetId === undefined || targetId === null ? null : targetId.toString();
+}
+
+async function setCommandLimit(command, limit, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    const numericLimit = Math.max(0, Math.floor(Number(limit)));
+    const now = Math.floor(Date.now() / 1000);
+
+    await dbRun(
+        `INSERT INTO command_limits (command, targetId, limitValue, updatedAt)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(command, targetId) DO UPDATE SET limitValue = excluded.limitValue, updatedAt = excluded.updatedAt`,
+        [normalizedCommand, normalizedTarget, numericLimit, now]
+    );
+}
+
+async function clearCommandLimit(command, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    await dbRun(
+        'DELETE FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
+        [normalizedCommand, normalizedTarget, normalizedTarget]
+    );
+}
+
+async function getCommandLimit(command, targetId = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    if (!normalizedCommand) {
+        return null;
+    }
+
+    const normalizedTarget = normalizeTargetId(targetId);
+    const row = await dbGet(
+        'SELECT limitValue FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
+        [normalizedCommand, normalizedTarget, normalizedTarget]
+    );
+
+    return row && Number.isFinite(Number(row.limitValue)) ? Number(row.limitValue) : null;
+}
+
+async function getCommandUsageCount(command, userId, usageDate = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const normalizedUserId = normalizeTargetId(userId);
+    if (!normalizedCommand || !normalizedUserId) {
+        return 0;
+    }
+
+    const date = usageDate || getTodayDateString('UTC');
+    const row = await dbGet(
+        'SELECT count FROM command_usage_logs WHERE userId = ? AND command = ? AND usageDate = ?',
+        [normalizedUserId, normalizedCommand, date]
+    );
+
+    return row && Number.isFinite(Number(row.count)) ? Number(row.count) : 0;
+}
+
+async function incrementCommandUsage(command, userId, usageDate = null) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const normalizedUserId = normalizeTargetId(userId);
+    if (!normalizedCommand || !normalizedUserId) {
+        return 0;
+    }
+
+    const date = usageDate || getTodayDateString('UTC');
+    const current = await getCommandUsageCount(normalizedCommand, normalizedUserId, date);
+    const nextCount = current + 1;
+
+    await dbRun(
+        `INSERT INTO command_usage_logs (userId, command, usageDate, count)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(userId, command, usageDate) DO UPDATE SET count = excluded.count`,
+        [normalizedUserId, normalizedCommand, date, nextCount]
+    );
+
+    return nextCount;
+}
+
+async function getCommandUsageLeaderboard(command, limit = 50) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const numericLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 50;
+    if (!normalizedCommand) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        `SELECT logs.userId, SUM(logs.count) AS total, users.username, users.fullName
+         FROM command_usage_logs AS logs
+         LEFT JOIN users ON users.chatId = logs.userId
+         WHERE logs.command = ?
+         GROUP BY logs.userId, users.username, users.fullName
+         HAVING total > 0
+         ORDER BY total DESC
+         LIMIT ?`,
+        [normalizedCommand, numericLimit]
+    );
+
+    return rows || [];
+}
+
 module.exports = {
     init,
     ensureCheckinGroup,
@@ -2059,5 +2466,24 @@ module.exports = {
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
-    updateGroupSubscriptionTopic
+    updateGroupSubscriptionTopic,
+    listUserChatIds,
+    upsertUserProfile,
+    listUsersDetailed,
+    findUserByIdOrUsername,
+    addCoOwner,
+    removeCoOwner,
+    listCoOwners,
+    isCoOwner,
+    addBannedUser,
+    removeBannedUser,
+    listBannedUsers,
+    isUserBanned,
+    setCommandLimit,
+    clearCommandLimit,
+    getCommandLimit,
+    getCommandUsageCount,
+    incrementCommandUsage,
+    getCommandUsageLeaderboard,
+    resetUserData
 };
