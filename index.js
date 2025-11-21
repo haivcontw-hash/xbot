@@ -4801,22 +4801,6 @@ function buildUserMention(user) {
     };
 }
 
-  bot.on('message', async (msg) => {
-      const chatId = msg?.chat?.id;
-      if (!chatId || !msg?.message_id) {
-          return;
-      }
-
-      if (!msg.from?.is_bot) {
-          rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
-      }
-
-      const textOrCaption = (msg.text || msg.caption || '').trim();
-      if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
-          await handleAiCommand(msg);
-      }
-  });
-
 function buildAdminProfileLink(userId, displayName) {
     const safeName = escapeHtml(displayName || userId?.toString() || 'user');
     const safeId = encodeURIComponent(userId?.toString() || '');
@@ -10716,7 +10700,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const rawPayload = (payload || '').trim();
 
       if (!rawPayload) {
-          await sendReply(msg, t(lang, 'contract_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          await sendReply(msg, t(lang, 'contract_usage'), { reply_markup: buildCloseKeyboard(lang) });
           return;
       }
 
@@ -10724,7 +10708,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const contractAddress = normalizeAddress(parts[0]);
 
       if (!contractAddress) {
-          await sendReply(msg, t(lang, 'contract_invalid'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          await sendReply(msg, t(lang, 'contract_invalid'), { reply_markup: buildCloseKeyboard(lang) });
           return;
       }
 
@@ -13735,7 +13719,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 
     bot.on('message', async (msg) => {
+        const chatId = msg?.chat?.id;
+        if (!chatId || !msg?.message_id) {
+            return;
+        }
+
+        if (!msg.from?.is_bot) {
+            rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
+        }
+
         if (await handleGoalTextInput(msg)) {
+            return;
+        }
+
+        const textOrCaption = (msg.text || msg.caption || '').trim();
+        if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
+            await handleAiCommand(msg);
             return;
         }
 
