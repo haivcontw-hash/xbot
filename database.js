@@ -1884,7 +1884,11 @@ async function wipeChatFootprint(chatId) {
         { table: 'checkin_attempts', column: 'chatId' },
         { table: 'checkin_attempts', column: 'userId' },
         { table: 'checkin_auto_logs', column: 'chatId' },
-        { table: 'checkin_summary_logs', column: 'chatId' }
+        { table: 'checkin_summary_logs', column: 'chatId' },
+        { table: 'co_owners', column: 'userId' },
+        { table: 'banned_users', column: 'userId' },
+        { table: 'command_limits', column: 'targetId' },
+        { table: 'command_usage_logs', column: 'userId' }
     ];
 
     let totalChanges = 0;
@@ -1895,6 +1899,55 @@ async function wipeChatFootprint(chatId) {
 
     await removeAllWalletTokens(normalized);
     await removeAllWalletHoldingsCache(normalized);
+
+    return totalChanges;
+}
+
+async function resetUserData(targetId = null) {
+    const normalized = targetId === null || targetId === undefined ? null : targetId.toString();
+    const scopedTables = [
+        { table: 'users', column: 'chatId' },
+        { table: 'group_subscriptions', column: 'chatId' },
+        { table: 'group_member_languages', column: 'groupChatId' },
+        { table: 'group_member_languages', column: 'userId' },
+        { table: 'group_bot_settings', column: 'chatId' },
+        { table: 'user_wallet_tokens', column: 'chatId' },
+        { table: 'wallet_holdings_cache', column: 'chatId' },
+        { table: 'user_warnings', column: 'chatId' },
+        { table: 'pending_memes', column: 'chatId' },
+        { table: 'checkin_groups', column: 'chatId' },
+        { table: 'checkin_members', column: 'chatId' },
+        { table: 'checkin_members', column: 'userId' },
+        { table: 'checkin_records', column: 'chatId' },
+        { table: 'checkin_records', column: 'userId' },
+        { table: 'checkin_attempts', column: 'chatId' },
+        { table: 'checkin_attempts', column: 'userId' },
+        { table: 'checkin_auto_logs', column: 'chatId' },
+        { table: 'checkin_summary_logs', column: 'chatId' },
+        { table: 'co_owners', column: 'userId' },
+        { table: 'banned_users', column: 'userId' },
+        { table: 'command_limits', column: 'targetId' },
+        { table: 'command_usage_logs', column: 'userId' }
+    ];
+
+    let totalChanges = 0;
+    for (const entry of scopedTables) {
+        const result = normalized === null
+            ? await dbRun(`DELETE FROM ${entry.table}`)
+            : await dbRun(`DELETE FROM ${entry.table} WHERE ${entry.column} = ?`, [normalized]);
+        totalChanges += result?.changes || 0;
+    }
+
+    if (normalized === null) {
+        await dbRun('DELETE FROM user_wallet_tokens');
+        await dbRun('DELETE FROM wallet_holdings_cache');
+        await dbRun('DELETE FROM pending_tokens');
+        await dbRun('DELETE FROM game_stats');
+        await dbRun('DELETE FROM user_warnings');
+    } else {
+        await removeAllWalletTokens(normalized);
+        await removeAllWalletHoldingsCache(normalized);
+    }
 
     return totalChanges;
 }
@@ -2278,6 +2331,28 @@ async function incrementCommandUsage(command, userId, usageDate = null) {
     return nextCount;
 }
 
+async function getCommandUsageLeaderboard(command, limit = 50) {
+    const normalizedCommand = normalizeCommandKey(command);
+    const numericLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 50;
+    if (!normalizedCommand) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        `SELECT logs.userId, SUM(logs.count) AS total, users.username, users.fullName
+         FROM command_usage_logs AS logs
+         LEFT JOIN users ON users.chatId = logs.userId
+         WHERE logs.command = ?
+         GROUP BY logs.userId, users.username, users.fullName
+         HAVING total > 0
+         ORDER BY total DESC
+         LIMIT ?`,
+        [normalizedCommand, numericLimit]
+    );
+
+    return rows || [];
+}
+
 module.exports = {
     init,
     ensureCheckinGroup,
@@ -2370,5 +2445,7 @@ module.exports = {
     clearCommandLimit,
     getCommandLimit,
     getCommandUsageCount,
-    incrementCommandUsage
+    incrementCommandUsage,
+    getCommandUsageLeaderboard,
+    resetUserData
 };

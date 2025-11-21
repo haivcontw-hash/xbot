@@ -4997,6 +4997,10 @@ function buildOwnerMenuKeyboard(lang) {
             { text: t(lang, 'owner_menu_check_users'), callback_data: 'owner_menu|check_users' }
         ],
         [
+            { text: t(lang, 'owner_menu_ai_stats'), callback_data: 'owner_menu|ai_stats' },
+            { text: t(lang, 'owner_menu_reset_id'), callback_data: 'owner_menu|reset_id' }
+        ],
+        [
             { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
             { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
         ],
@@ -5032,6 +5036,21 @@ function describeOwnerTarget(lang, target) {
     return target.targetId || t(lang, 'owner_target_all');
 }
 
+function clearOwnerCaches(target) {
+    if (!target || target.scope === 'all') {
+        coOwnerIds.clear();
+        bannedUserIds.clear();
+        return;
+    }
+
+    const targetId = target.targetId || target;
+    if (!targetId) {
+        return;
+    }
+    coOwnerIds.delete(targetId.toString());
+    bannedUserIds.delete(targetId.toString());
+}
+
 function buildUserInfoLine(user) {
     const parts = [];
     if (user.fullName) {
@@ -5048,6 +5067,23 @@ function buildUserInfoLine(user) {
     }
 
     return parts.join(' • ');
+}
+
+function formatUserLabel(user) {
+    const nameParts = [];
+    if (user.fullName) {
+        nameParts.push(escapeHtml(user.fullName));
+    }
+    if (user.username) {
+        nameParts.push(`@${escapeHtml(user.username)}`);
+    }
+
+    const copyableId = formatCopyableValueHtml(user.chatId || user.userId) || escapeHtml(user.chatId || user.userId || '');
+    if (nameParts.length === 0) {
+        return copyableId;
+    }
+
+    return `${nameParts.join(' · ')} (${copyableId})`;
 }
 
 async function sendChunkedHtmlMessages(chatId, text, options = {}) {
@@ -5131,6 +5167,25 @@ async function sendOwnerUserOverview(chatId, lang) {
     }
 
     await sendChunkedHtmlMessages(chatId, sections.join('\n\n'));
+}
+
+async function sendOwnerAiStats(chatId, lang) {
+    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100);
+    if (!leaderboard || leaderboard.length === 0) {
+        await sendReply({ chat: { id: chatId } }, t(lang, 'owner_ai_stats_empty'), {
+            parse_mode: 'HTML',
+            reply_markup: buildCloseKeyboard(lang)
+        });
+        return;
+    }
+
+    const lines = leaderboard.map((entry, index) => {
+        const label = formatUserLabel({ ...entry, chatId: entry.userId });
+        return t(lang, 'owner_ai_stats_entry', { rank: index + 1, user: label, count: entry.total });
+    });
+
+    const header = t(lang, 'owner_ai_stats_title');
+    await sendChunkedHtmlMessages(chatId, [header, ...lines].join('\n'), { parse_mode: 'HTML' });
 }
 
 async function handleOwnerStateMessage(msg, textOrCaption) {
@@ -5254,6 +5309,71 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
             const targetId = target.scope === 'user' ? target.targetId : null;
             await db.clearCommandLimit('ai', targetId);
             await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'reset_id') {
+        if (state.step === 'target') {
+            let target = parseOwnerTargetInput(content);
+            if (!target) {
+                const found = await db.findUserByIdOrUsername(content.replace(/^@/, ''));
+                if (found?.chatId) {
+                    target = { scope: 'user', targetId: found.chatId.toString() };
+                }
+            }
+
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'confirm', target });
+            await sendReply(msg, t(lang, 'owner_reset_confirm', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return true;
+        }
+
+        if (state.step === 'confirm') {
+            const normalized = content.toLowerCase();
+            const confirmed = [
+                'confirm',
+                'yes',
+                'y',
+                'ok',
+                'okay',
+                'đồng ý',
+                'dong y',
+                'да',
+                'oui',
+                'si',
+                'sí',
+                '是',
+                '好的',
+                '확인',
+                '예',
+                'подтвердить'
+            ].includes(normalized);
+            if (!confirmed) {
+                await sendReply(msg, t(lang, 'owner_reset_confirm', { target: describeOwnerTarget(lang, state.target) }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+                return true;
+            }
+
+            const target = state.target || { scope: 'all', targetId: null };
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
+            clearOwnerCaches(target);
+
+            await sendReply(msg, t(lang, 'owner_reset_done', {
+                target: describeOwnerTarget(lang, target),
+                count: changes
+            }), {
                 reply_markup: buildCloseKeyboard(lang)
             });
             clearOwnerAction(userId);
@@ -12639,6 +12759,21 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     await sendOwnerUserOverview(targetChatId, callbackLang);
                     ownerActionStates.set(ownerId, { mode: 'user_check', step: 'query', chatId: targetChatId });
                     await bot.sendMessage(targetChatId, t(callbackLang, 'owner_user_check_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_stats') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_ai_stats_running') });
+                    await sendOwnerAiStats(targetChatId, callbackLang);
+                    return;
+                }
+
+                if (action === 'reset_id') {
+                    ownerActionStates.set(ownerId, { mode: 'reset_id', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_reset_prompt') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_reset_prompt'), {
                         reply_markup: buildCloseKeyboard(callbackLang)
                     });
                     return;

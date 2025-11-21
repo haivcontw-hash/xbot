@@ -689,6 +689,8 @@
   "owner_menu_ai_limit": "Limit /ai",
   "owner_menu_ai_unlimit": "Remove /ai limit",
   "owner_menu_check_users": "Check users",
+  "owner_menu_ai_stats": "AI stats",
+  "owner_menu_reset_id": "Reset ID",
   "owner_menu_ban": "Ban user",
   "owner_menu_unban": "Unban user",
   "owner_prompt_target": "Reply with 'all' for everyone or enter a specific user ID.",
@@ -719,6 +721,10 @@
   "owner_user_role_member": "Member",
   "owner_primary_label": "Primary owner",
   "owner_coowner_revoked": "Removed co-owner access for {target}.",
+  "owner_ai_stats_running": "Preparing stats...",
+  "owner_ai_stats_title": "📈 AI usage leaderboard",
+  "owner_ai_stats_entry": "{rank}. {user} — {count} /ai",
+  "owner_ai_stats_empty": "No /ai usage recorded yet.",
   "owner_password_prompt": "🔒 Enter the owner password to access the hidden panel.",
   "owner_password_placeholder": "Password to become co-owner",
   "owner_password_success": "Password accepted. You now have co-owner access to /owner.",
@@ -727,5 +733,8 @@
   "owner_ban_success": "User {target} has been banned from all commands.",
   "owner_unban_success": "User {target} has been unbanned.",
   "owner_banned_notice": "You are banned from using this bot.",
+  "owner_reset_prompt": "Enter 'all' to wipe every stored user or specify an ID/@username to reset.",
+  "owner_reset_confirm": "Type CONFIRM to erase all stored data for {target}.",
+  "owner_reset_done": "Reset complete for {target}. Removed {count} stored records.",
   "ai_limit_reached": "You've reached today's /ai limit of {limit} requests."
 }

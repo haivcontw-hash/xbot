@@ -687,6 +687,8 @@
   "owner_menu_dm_notice": "Menu telah dikirim ke DM kamu.",
   "owner_menu_broadcast": "Kirim pesan",
   "owner_menu_ai_limit": "Batas /ai",
+  "owner_menu_ai_stats": "Statistik /ai",
+  "owner_menu_reset_id": "Pulihkan ID",
   "owner_prompt_target": "Ketik 'all' untuk semua pengguna atau masukkan ID pengguna tertentu.",
   "owner_invalid_target": "Harap masukkan 'all' atau ID pengguna yang valid.",
   "owner_prompt_message": "Kirimkan pesan yang ingin dibagikan.",
@@ -698,7 +700,6 @@
   "owner_limit_cleared": "Batas /ai untuk {target} telah dihapus.",
   "owner_limit_invalid": "Mohon masukkan angka tidak negatif.",
   "owner_target_all": "semua pengguna",
-  "ai_limit_reached": "Kamu telah mencapai batas harian /ai sebanyak {limit} permintaan.",
   "owner_menu_ai_unlimit": "Hapus batas /ai",
   "owner_menu_check_users": "Periksa pengguna",
   "owner_menu_ban": "BAN pengguna",
@@ -720,6 +721,10 @@
   "owner_user_role_member": "Member",
   "owner_primary_label": "Pemilik utama",
   "owner_coowner_revoked": "Akses co-owner {target} telah dicabut.",
+  "owner_ai_stats_running": "Menyiapkan statistik...",
+  "owner_ai_stats_title": "📈 Peringkat penggunaan /ai",
+  "owner_ai_stats_entry": "{rank}. {user} — {count} /ai",
+  "owner_ai_stats_empty": "Belum ada penggunaan /ai yang tercatat.",
   "owner_password_prompt": "🔒 Masukkan kata sandi untuk membuka panel tersembunyi.",
   "owner_password_placeholder": "Kata sandi co-owner",
   "owner_password_success": "Kata sandi benar, kamu sekarang co-owner untuk /owner.",
@@ -727,5 +732,9 @@
   "owner_ban_forbidden": "Tidak bisa BAN owner atau co-owner.",
   "owner_ban_success": "Pengguna {target} telah di-BAN dari semua perintah.",
   "owner_unban_success": "Pengguna {target} telah di-UNBAN.",
-  "owner_banned_notice": "Kamu sedang di-BAN dari bot ini."
+  "owner_banned_notice": "Kamu sedang di-BAN dari bot ini.",
+  "owner_reset_prompt": "Ketik 'all' untuk hapus semua data pengguna atau masukkan ID/@username tertentu.",
+  "owner_reset_confirm": "Ketik CONFIRM untuk menghapus semua data tersimpan milik {target}.",
+  "owner_reset_done": "Pemulihan selesai untuk {target}. {count} data dihapus.",
+  "ai_limit_reached": "Kamu telah mencapai batas harian /ai sebanyak {limit} permintaan."
 }
