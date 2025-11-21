@@ -123,7 +123,7 @@
   "contract_help_prompt": "Send the contract address you want to check on Xlayer.",
   "contract_help_placeholder": "Paste contract address...",
   "contract_usage": "Use /contract to paste a contract address and get an OKLink lookup link.",
-  "ai_usage": "How to use /ai:\n• Ask in text: `/ai Who founded Xlayer?`\n• Ask with an image: send a photo with caption `/ai What is this?`\n• Multimodal: combine text + image for richer answers.\n• Support the dev to upgrade more professional Ai features ( x.com/haivcon )",
+  "ai_usage": "How to use /ai:\n• Ask in text: `/ai Who founded Xlayer - OKX ?`\n• Ask with an image: send a photo with caption `/ai What is this?`\n• Multimodal: combine text + image for richer answers.\n• Support the dev to upgrade more professional Ai features ( x.com/haivcon )",
   "ai_missing_api_key": "AI is not configured. Please set Xlayer_API_KEY.",
   "ai_default_prompt": "Describe or analyze this image.",
   "ai_response_title": "Xlayer B-Ai reply:",

@@ -121,7 +121,7 @@
   "contract_help_prompt": "发送你想在 Xlayer 查询的合约地址。",
   "contract_help_placeholder": "粘贴合约地址...",
   "contract_usage": "使用 /contract 然后粘贴合约地址，即可获取 OKLink 查询链接。",
-  "ai_usage": "如何使用 /ai：\n• 文字：`/ai Xlayer的创始人是谁？`\n• 图片：发送照片并加上 `/ai 这是什么？` 说明\n• 多模态：文字 + 图片一起发，答案更全面。\n• 支持开发者升级更多专业AI功能（ x.com/haivcon ）",
+  "ai_usage": "如何使用 /ai：\n• 文字：`/ai Xlayer - OKX的创始人是谁？`\n• 图片：发送照片并加上 `/ai 这是什么？` 说明\n• 多模态：文字 + 图片一起发，答案更全面。\n• 支持开发者升级更多专业AI功能（ x.com/haivcon ）",
   "ai_missing_api_key": "AI 尚未配置，请设置 Xlayer_API_KEY。",
   "ai_default_prompt": "请描述或分析这张图片。",
   "ai_response_title": "Xlayer B-Ai 回复：",

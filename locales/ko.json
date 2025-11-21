@@ -123,7 +123,7 @@
   "contract_help_prompt": "Xlayer에서 조회할 계약 주소를 보내주세요.",
   "contract_help_placeholder": "계약 주소 붙여넣기...",
   "contract_usage": "/contract 를 입력하고 계약 주소를 붙여넣어 OKLink 링크를 받으세요.",
-  "ai_usage": "/ai 사용법:\n• 텍스트: `/ai Xlayer를 창립한 사람은 누구인가요?`\n• 이미지: 사진에 `/ai 이게 뭐야?` 캡션 추가\n• 멀티모달: 텍스트 + 이미지를 함께 보내 더 풍부한 답변 받기.\n• 개발자가 더욱 전문적인 AI 기능을 업그레이드할 수 있도록 지원( x.com/haivcon )",
+  "ai_usage": "/ai 사용법:\n• 텍스트: `/ai Xlayer - OKX 를 창립한 사람은 누구인가요?`\n• 이미지: 사진에 `/ai 이게 뭐야?` 캡션 추가\n• 멀티모달: 텍스트 + 이미지를 함께 보내 더 풍부한 답변 받기.\n• 개발자가 더욱 전문적인 AI 기능을 업그레이드할 수 있도록 지원( x.com/haivcon )",
   "ai_missing_api_key": "AI가 설정되지 않았습니다. Xlayer_API_KEY를 설정하세요.",
   "ai_default_prompt": "이 이미지를 설명하거나 분석해 주세요.",
   "ai_response_title": "Xlayer B-Ai 답변:",

@@ -123,7 +123,7 @@
   "contract_help_prompt": "Gửi địa chỉ hợp đồng bạn muốn tra cứu trên Xlayer.",
   "contract_help_placeholder": "Dán địa chỉ hợp đồng...",
   "contract_usage": "Dùng /contract rồi dán địa chỉ hợp đồng để nhận link tra cứu trên OKLink.",
-  "ai_usage": "Cách dùng /ai:\n• Hỏi bằng chữ: `/ai Xlayer do ai sáng lập?`\n• Hỏi kèm ảnh: gửi ảnh kèm caption `/ai Đây là gì?`\n• Đa phương thức: kết hợp chữ + ảnh để có câu trả lời đầy đủ hơn.\n• Ủng hộ dev để nâng cấp thêm nhiều tính năng Ai chuyên nghiệp hơn ( x.com/haivcon )",
+  "ai_usage": "Cách dùng /ai:\n• Hỏi bằng chữ: `/ai Xlayer - OKX do ai sáng lập?`\n• Hỏi kèm ảnh: gửi ảnh kèm caption `/ai Đây là gì?`\n• Đa phương thức: kết hợp chữ + ảnh để có câu trả lời đầy đủ hơn.\n• Ủng hộ dev để nâng cấp thêm nhiều tính năng Ai chuyên nghiệp hơn ( x.com/haivcon )",
   "ai_missing_api_key": "AI chưa được cấu hình. Vui lòng đặt biến môi trường Xlayer_API_KEY.",
   "ai_default_prompt": "Hãy mô tả hoặc phân tích bức ảnh này.",
   "ai_response_title": "Xlayer B-Ai trả lời:",

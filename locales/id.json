@@ -123,7 +123,7 @@
   "contract_help_prompt": "Kirim alamat kontrak yang ingin kamu cek di Xlayer.",
   "contract_help_placeholder": "Tempel alamat kontrak...",
   "contract_usage": "Gunakan /contract lalu tempel alamat kontrak untuk mendapatkan link OKLink.",
-  "ai_usage": "Cara pakai /ai:\n• Teks: `/ai Siapa pendiri Xlayer?`\n• Gambar: kirim foto dengan caption `/ai Ini apa?`\n• Multimodal: gabungkan teks + gambar untuk jawaban lebih kaya.\n• Dukung pengembang untuk meningkatkan fitur Ai yang lebih profesional ( x.com/haivcon )",
+  "ai_usage": "Cara pakai /ai:\n• Teks: `/ai Siapa pendiri Xlayer - OKX ?`\n• Gambar: kirim foto dengan caption `/ai Ini apa?`\n• Multimodal: gabungkan teks + gambar untuk jawaban lebih kaya.\n• Dukung pengembang untuk meningkatkan fitur Ai yang lebih profesional ( x.com/haivcon )",
   "ai_missing_api_key": "AI belum dikonfigurasi. Harap setel Xlayer_API_KEY.",
   "ai_default_prompt": "Jelaskan atau analisis gambar ini.",
   "ai_response_title": "Jawaban Xlayer B-Ai:",
