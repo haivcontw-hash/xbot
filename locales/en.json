@@ -128,6 +128,8 @@
   "ai_default_prompt": "Describe or analyze this image.",
   "ai_response_title": "Gemini reply:",
   "ai_error": "Sorry, something went wrong while contacting Gemini. Please try again.",
+  "ai_image_too_large": "⚠️ That photo is too large to process (max {limitMb} MB). Please send a smaller image.",
+  "ai_image_download_timeout": "⚠️ Downloading the image took too long. Try again with a smaller image or later.",
   "ai_quota_exhausted": "Gemini usage quota is currently limited. Please try again in a moment.",
   "ai_session_expired": "The AI chat has expired. Start a new one with /ai.",
   "txhash_title": "🔎 Transaction detail",

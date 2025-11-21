@@ -128,6 +128,8 @@
   "ai_default_prompt": "이 이미지를 설명하거나 분석해 주세요.",
   "ai_response_title": "Gemini 답변:",
   "ai_error": "죄송합니다. Gemini 호출 중 오류가 발생했습니다. 다시 시도해 주세요.",
+  "ai_image_too_large": "⚠️ 사진 크기가 너무 커서 처리할 수 없습니다(최대 {limitMb}MB). 더 작은 이미지를 보내주세요.",
+  "ai_image_download_timeout": "⚠️ 이미지를 다운로드하는 데 너무 오래 걸립니다. 더 작은 이미지로 다시 시도하거나 잠시 후 다시 시도해 주세요.",
   "ai_quota_exhausted": "Gemini 쿼터가 일시적으로 제한되었습니다. 잠시 후 다시 시도해 주세요.",
   "ai_session_expired": "AI 채팅이 만료되었습니다. /ai로 새로 시작하세요.",
   "txhash_title": "🔎 거래 세부 정보",
