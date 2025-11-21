@@ -676,7 +676,7 @@
   "donatecm_group_only": "该指令仅限群组使用。",
   "donatecm_no_permission": "只有群管理员可以修改社区捐赠信息。",
   "donatecm_default_note": "支持社区钱包。",
-  "donatecm_overview": "当前社区捐赠信息:\n<b>{address}</b>\n<i>{note}</i>\n\n发送 /donatecm <钱包地址> <备注> 进行更新。",
+  "donatecm_overview": "当前社区捐赠信息:\n<b>{address}</b>\n<i>{note}</i>\n\n发送 /donatecm &lt;钱包地址&gt; &lt;备注&gt; 进行更新。",
   "donatecm_invalid_wallet": "请提供有效的钱包地址。",
   "donatecm_updated": "社区捐赠已更新为 {address}。备注：{note}",
   "donatecm_broadcast_button": "发布捐赠公告",

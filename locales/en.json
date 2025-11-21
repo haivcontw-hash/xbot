@@ -676,7 +676,7 @@
   "donatecm_group_only": "This command is only available in groups.",
   "donatecm_no_permission": "Only group admins can edit community donations.",
   "donatecm_default_note": "Support the community wallet.",
-  "donatecm_overview": "Current community donation info:\n<b>{address}</b>\n<i>{note}</i>\n\nSend /donatecm <wallet_address> <note> to update.",
+  "donatecm_overview": "Current community donation info:\n<b>{address}</b>\n<i>{note}</i>\n\nSend /donatecm &lt;wallet_address&gt; &lt;note&gt; to update.",
   "donatecm_invalid_wallet": "Please provide a valid wallet address.",
   "donatecm_updated": "Updated community donation to {address}. Note: {note}",
   "donatecm_broadcast_button": "Post a donation call",

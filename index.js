@@ -180,7 +180,8 @@ function sanitizeSecrets(text) {
         'GEMINI_API_KEY',
         'GEMINI_API_KEYS',
         'HF_API_KEY',
-        'HUGGINGFACE_API_KEY'
+        'HUGGINGFACE_API_KEY',
+        'TELEGRAM_TOKEN'
     ];
 
     for (const value of GEMINI_API_KEYS || []) {
@@ -15240,7 +15241,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             parts.push(`stack=${error.stack}`);
         }
 
-        return parts.join(' | ') || String(error);
+        return sanitizeSecrets(parts.join(' | ') || String(error));
     };
 
     bot.on('polling_error', (error) => {

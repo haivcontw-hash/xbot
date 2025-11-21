@@ -676,7 +676,7 @@
   "donatecm_group_only": "Lệnh này chỉ dùng trong nhóm.",
   "donatecm_no_permission": "Chỉ quản trị viên nhóm mới được chỉnh sửa nội dung ủng hộ cộng đồng.",
   "donatecm_default_note": "Ủng hộ vì phát triển chung 😘",
-  "donatecm_overview": "Thông tin quyên góp cộng đồng hiện tại:\n<b>{address}</b>\n<i>{note}</i>\n\nGửi /donatecm <địa_chỉ_ví> <ghi_chú> để cập nhật.",
+  "donatecm_overview": "Thông tin quyên góp cộng đồng hiện tại:\n<b>{address}</b>\n<i>{note}</i>\n\nGửi /donatecm &lt;địa_chỉ_ví&gt; &lt;ghi_chú&gt; để cập nhật.",
   "donatecm_invalid_wallet": "Vui lòng cung cấp địa chỉ ví hợp lệ.",
   "donatecm_updated": "Đã cập nhật ví quyên góp cộng đồng thành {address}. Ghi chú: {note}",
   "donatecm_broadcast_button": "Gửi thông báo ủng hộ",

@@ -676,7 +676,7 @@
   "donatecm_group_only": "이 명령어는 그룹에서만 사용 가능합니다.",
   "donatecm_no_permission": "커뮤니티 후원 정보를 수정하려면 그룹 관리자여야 합니다.",
   "donatecm_default_note": "커뮤니티 지갑을 후원하세요.",
-  "donatecm_overview": "현재 커뮤니티 후원 정보:\n<b>{address}</b>\n<i>{note}</i>\n\n업데이트하려면 /donatecm <지갑주소> <메모> 를 보내세요.",
+  "donatecm_overview": "현재 커뮤니티 후원 정보:\n<b>{address}</b>\n<i>{note}</i>\n\n업데이트하려면 /donatecm &lt;지갑주소&gt; &lt;메모&gt; 를 보내세요.",
   "donatecm_invalid_wallet": "올바른 지갑 주소를 입력하세요.",
   "donatecm_updated": "커뮤니티 후원 정보가 {address}로 업데이트되었습니다. 메모: {note}",
   "donatecm_broadcast_button": "후원 안내 보내기",

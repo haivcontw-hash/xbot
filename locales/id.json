@@ -676,7 +676,7 @@
   "donatecm_group_only": "Perintah ini hanya tersedia di grup.",
   "donatecm_no_permission": "Hanya admin grup yang bisa mengubah donasi komunitas.",
   "donatecm_default_note": "Dukung dompet komunitas.",
-  "donatecm_overview": "Info donasi komunitas saat ini:\n<b>{address}</b>\n<i>{note}</i>\n\nKirim /donatecm <alamat_dompet> <catatan> untuk memperbarui.",
+  "donatecm_overview": "Info donasi komunitas saat ini:\n<b>{address}</b>\n<i>{note}</i>\n\nKirim /donatecm &lt;alamat_dompet&gt; &lt;catatan&gt; untuk memperbarui.",
   "donatecm_invalid_wallet": "Harap berikan alamat dompet yang valid.",
   "donatecm_updated": "Donasi komunitas diperbarui ke {address}. Catatan: {note}",
   "donatecm_broadcast_button": "Kirim pengumuman donasi",
