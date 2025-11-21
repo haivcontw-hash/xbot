@@ -156,6 +156,7 @@ let okxChainDirectoryPromise = null;
 const okxResolvedChainCache = new Map();
 const geminiClientPool = new Map();
 let geminiKeyIndex = 0;
+const disabledGeminiKeyIndices = new Set();
 const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
@@ -936,11 +937,36 @@ function getGeminiClient(index = geminiKeyIndex) {
     return { client: geminiClientPool.get(apiKey), apiKey, index: safeIndex };
 }
 
+function disableGeminiKey(index, reason = 'disabled') {
+    if (!GEMINI_API_KEYS.length) {
+        return;
+    }
+
+    const safeIndex = ((index % GEMINI_API_KEYS.length) + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length;
+    if (disabledGeminiKeyIndices.has(safeIndex)) {
+        return;
+    }
+
+    disabledGeminiKeyIndices.add(safeIndex);
+    console.warn(`[AI] Disabled Gemini key index ${safeIndex}: ${reason}`);
+
+    if (disabledGeminiKeyIndices.size >= GEMINI_API_KEYS.length) {
+        console.error('[AI] All Gemini API keys are disabled');
+    }
+}
+
 function advanceGeminiKeyIndex() {
     if (!GEMINI_API_KEYS.length) {
         return 0;
     }
-    geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+    for (let offset = 1; offset <= GEMINI_API_KEYS.length; offset += 1) {
+        const candidate = (geminiKeyIndex + offset) % GEMINI_API_KEYS.length;
+        if (!disabledGeminiKeyIndices.has(candidate)) {
+            geminiKeyIndex = candidate;
+            return geminiKeyIndex;
+        }
+    }
+
     return geminiKeyIndex;
 }
 
@@ -11129,12 +11155,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               // ignore chat action errors
           }
 
-          const maxAttempts = Math.max(1, GEMINI_API_KEYS.length);
-          let response = null;
-          let lastError = null;
+            if (!GEMINI_API_KEYS.length) {
+                throw new Error('Missing Gemini API key');
+            }
 
-          for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const maxAttempts = GEMINI_API_KEYS.length;
+            let response = null;
+            let lastError = null;
+
+          if (disabledGeminiKeyIndices.size >= GEMINI_API_KEYS.length) {
+              lastError = new Error('No valid Gemini API keys');
+          }
+
+          for (let attempt = 0; attempt < maxAttempts && !response; attempt += 1) {
               const keyIndex = (geminiKeyIndex + attempt) % GEMINI_API_KEYS.length;
+              if (disabledGeminiKeyIndices.has(keyIndex)) {
+                  continue;
+              }
+
               const clientInfo = getGeminiClient(keyIndex);
               if (!clientInfo) {
                   lastError = new Error('Missing Gemini API key');
@@ -11155,6 +11193,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                   break;
               } catch (error) {
                   lastError = error;
+                  if (error?.response?.status === 403 || /reported as leaked/i.test(error?.message || '')) {
+                      disableGeminiKey(keyIndex, error.message || 'Forbidden');
+                  }
                   advanceGeminiKeyIndex();
                   console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${error.message}`);
               }
