@@ -2149,8 +2149,14 @@ async function upsertUserProfile(chatId, profile = {}) {
     const now = Math.floor(Date.now() / 1000);
     const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
     const username = profile.username ? profile.username.toLowerCase() : null;
-    const lang = normalizeLanguageCode(profile.lang) || null;
-    const langSource = profile.lang_source || profile.langSource || 'auto';
+    const hasLang = Object.prototype.hasOwnProperty.call(profile, 'lang');
+    const lang = hasLang ? normalizeLanguageCode(profile.lang) : null;
+    const hasLangSource =
+        Object.prototype.hasOwnProperty.call(profile, 'lang_source') ||
+        Object.prototype.hasOwnProperty.call(profile, 'langSource');
+    const langSource = hasLangSource
+        ? (profile.lang_source === 'manual' || profile.langSource === 'manual' ? 'manual' : 'auto')
+        : null;
     const firstSeen = profile.firstSeen || now;
     const wallets =
         profile.wallets && typeof profile.wallets !== 'string'
