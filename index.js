@@ -792,6 +792,22 @@ if (!TELEGRAM_TOKEN) {
 const app = express();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
+const originalAnswerCallbackQuery = bot.answerCallbackQuery.bind(bot);
+bot.answerCallbackQuery = async (...args) => {
+    try {
+        return await originalAnswerCallbackQuery(...args);
+    } catch (error) {
+        const description = error?.response?.body?.description || error?.message || '';
+        if (error?.code === 'ETELEGRAM' && /query is too old|query ID is invalid/i.test(description)) {
+            console.warn(`[Callback] Ignored stale callback query: ${sanitizeSecrets(description)}`);
+            return null;
+        }
+
+        console.error(`[Callback] Failed to answer callback query: ${sanitizeSecrets(description || error?.toString())}`);
+        throw error;
+    }
+};
+
 const originalSendMessage = bot.sendMessage.bind(bot);
 bot.sendMessage = async (chatId, text, options = {}) => {
     const message = await originalSendMessage(chatId, text, options);
@@ -13507,7 +13523,13 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                         });
                     }
                 } catch (error) {
-                    console.error(`[Help] Failed to execute ${commandKey} from help: ${error.message}`);
+                    const description = error?.response?.body?.description || error?.message || '';
+                    if (error?.code === 'ETELEGRAM' && /query is too old|query ID is invalid/i.test(description)) {
+                        console.warn(`[Help] Ignored stale help callback for ${commandKey}: ${sanitizeSecrets(description)}`);
+                        return;
+                    }
+
+                    console.error(`[Help] Failed to execute ${commandKey} from help: ${sanitizeSecrets(description || error?.toString())}`);
                     await bot.answerCallbackQuery(queryId, {
                         text: t(callbackLang, 'help_action_failed'),
                         show_alert: true
