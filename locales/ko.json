@@ -123,11 +123,12 @@
   "contract_help_prompt": "Xlayer에서 조회할 계약 주소를 보내주세요.",
   "contract_help_placeholder": "계약 주소 붙여넣기...",
   "contract_usage": "/contract 를 입력하고 계약 주소를 붙여넣어 OKLink 링크를 받으세요.",
-  "ai_usage": "/ai 사용법:\n• 텍스트: `/ai 롤업이 어떻게 작동하나요?`\n• 이미지: 사진에 `/ai 이게 뭐야?` 캡션 추가\n• 멀티모달: 텍스트 + 이미지를 함께 보내 더 풍부한 답변 받기.",
+  "ai_usage": "/ai 사용법:\n• 텍스트: `/ai 롤업이 어떻게 작동하나요?`\n• 이미지: 사진에 `/ai 이게 뭐야?` 캡션 추가\n• 멀티모달: 텍스트 + 이미지를 함께 보내 더 풍부한 답변 받기.\n• 대화 이어가기: Gemini 답변에 답글로 달아 15분 동안 맥락을 유지하세요.",
   "ai_missing_api_key": "AI가 설정되지 않았습니다. GEMINI_API_KEY를 설정하세요.",
   "ai_default_prompt": "이 이미지를 설명하거나 분석해 주세요.",
   "ai_response_title": "Gemini 답변:",
   "ai_error": "죄송합니다. Gemini 호출 중 오류가 발생했습니다. 다시 시도해 주세요.",
+  "ai_session_expired": "AI 채팅이 만료되었습니다. /ai로 새로 시작하세요."
   "txhash_title": "🔎 거래 세부 정보",
   "txhash_hash_line": "Hash: {hash}",
   "txhash_summary_line": "체인: {chain} | 상태: {status} | 수량: {amount}",

@@ -123,11 +123,12 @@
   "contract_help_prompt": "Send the contract address you want to check on Xlayer.",
   "contract_help_placeholder": "Paste contract address...",
   "contract_usage": "Use /contract to paste a contract address and get an OKLink lookup link.",
-  "ai_usage": "How to use /ai:\n• Ask in text: `/ai How do rollups work?`\n• Ask with an image: send a photo with caption `/ai What is this?`\n• Multimodal: combine text + image for richer answers.",
+  "ai_usage": "How to use /ai:\n• Ask in text: `/ai How do rollups work?`\n• Ask with an image: send a photo with caption `/ai What is this?`\n• Multimodal: combine text + image for richer answers.\n• Continue chatting: reply to Gemini's answer to keep the context for 15 minutes.",
   "ai_missing_api_key": "AI is not configured. Please set GEMINI_API_KEY.",
   "ai_default_prompt": "Describe or analyze this image.",
   "ai_response_title": "Gemini reply:",
   "ai_error": "Sorry, something went wrong while contacting Gemini. Please try again.",
+  "ai_session_expired": "The AI chat has expired. Start a new one with /ai."
   "txhash_title": "🔎 Transaction detail",
   "txhash_hash_line": "Hash: {hash}",
   "txhash_summary_line": "Chain: {chain} | Status: {status} | Amount: {amount}",
