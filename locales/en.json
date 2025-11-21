@@ -735,6 +735,7 @@
   "owner_banned_notice": "You are banned from using this bot.",
   "owner_reset_prompt": "Enter 'all' to wipe every stored user or specify an ID/@username to reset.",
   "owner_reset_confirm": "Type CONFIRM to erase all stored data for {target}.",
-  "owner_reset_done": "Reset complete for {target}. Removed {count} stored records.",
+  "owner_reset_done": "Reset complete for {target}. Removed {count} stored records and cleared {chats} chat(s) (deleted {messages} message(s)).",
+  "owner_reset_chat_notice": "🧹 Clearing your chat history and stored data… you will be treated like a brand new user.",
   "ai_limit_reached": "You've reached today's /ai limit of {limit} requests."
 }

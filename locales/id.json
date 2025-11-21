@@ -735,6 +735,7 @@
   "owner_banned_notice": "Kamu sedang di-BAN dari bot ini.",
   "owner_reset_prompt": "Ketik 'all' untuk hapus semua data pengguna atau masukkan ID/@username tertentu.",
   "owner_reset_confirm": "Ketik CONFIRM untuk menghapus semua data tersimpan milik {target}.",
-  "owner_reset_done": "Pemulihan selesai untuk {target}. {count} data dihapus.",
+  "owner_reset_done": "Pemulihan selesai untuk {target}. {count} data dihapus dan {chats} obrolan dibersihkan (hapus {messages} pesan).",
+  "owner_reset_chat_notice": "🧹 Sedang membersihkan riwayat chat dan data tersimpan. Akunmu akan dianggap seperti pengguna baru.",
   "ai_limit_reached": "Kamu telah mencapai batas harian /ai sebanyak {limit} permintaan."
 }

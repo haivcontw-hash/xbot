@@ -736,5 +736,6 @@
   "owner_banned_notice": "이 봇 사용이 차단되었습니다.",
   "owner_reset_prompt": "'all'을 입력하면 전체 사용자 데이터를 삭제하거나 ID/@username을 입력해 초기화하세요.",
   "owner_reset_confirm": "{target}의 모든 저장 데이터를 삭제하려면 CONFIRM을 입력하세요.",
-  "owner_reset_done": "{target} 데이터 초기화 완료. {count}개의 기록을 삭제했습니다."
+  "owner_reset_done": "{target} 데이터 초기화 완료. {count}개의 기록을 삭제하고 {chats}개의 채팅을 정리했습니다(메시지 {messages}개 삭제).",
+  "owner_reset_chat_notice": "🧹 대화 기록과 저장된 데이터를 지우는 중입니다. 이제 새 사용자처럼 취급됩니다."
 }

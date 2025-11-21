@@ -5041,6 +5041,7 @@ function clearOwnerCaches(target) {
     if (!target || target.scope === 'all') {
         coOwnerIds.clear();
         bannedUserIds.clear();
+        ownerPasswordPrompts.clear();
         return;
     }
 
@@ -5050,6 +5051,91 @@ function clearOwnerCaches(target) {
     }
     coOwnerIds.delete(targetId.toString());
     bannedUserIds.delete(targetId.toString());
+    ownerPasswordPrompts.delete(targetId.toString());
+}
+
+async function purgeChatHistory(chatId, ownerLang) {
+    if (!chatId) {
+        return { deleted: 0, attempted: false };
+    }
+
+    const normalizedChatId = chatId.toString();
+    const numericChatId = Number(normalizedChatId);
+    if (Number.isFinite(numericChatId) && numericChatId < 0) {
+        return { deleted: 0, attempted: false };
+    }
+
+    let lang = ownerLang || defaultLang;
+    try {
+        const info = await db.getUserLanguageInfo(normalizedChatId);
+        if (info?.lang) {
+            lang = resolveLangCode(info.lang) || lang;
+        }
+    } catch (error) {
+        console.error(`[Owner] Unable to resolve language for chat ${normalizedChatId}: ${sanitizeSecrets(error?.message || error?.toString())}`);
+    }
+
+    try {
+        const marker = await bot.sendMessage(normalizedChatId, t(lang, 'owner_reset_chat_notice'), {
+            disable_notification: true
+        });
+
+        const latestId = marker?.message_id || 0;
+        const startId = Math.max(1, latestId - 200);
+        let deleted = 0;
+
+        for (let messageId = latestId; messageId >= startId; messageId--) {
+            try {
+                await bot.deleteMessage(normalizedChatId, messageId);
+                deleted++;
+            } catch (error) {
+                const description = error?.response?.body?.description || error?.message || '';
+                if (
+                    description.includes('message to delete not found') ||
+                    description.includes("message can't be deleted") ||
+                    description.includes('MESSAGE_ID_INVALID')
+                ) {
+                    continue;
+                }
+            }
+        }
+
+        if (marker?.message_id) {
+            try {
+                await bot.deleteMessage(normalizedChatId, marker.message_id);
+            } catch (error) {
+                const description = error?.response?.body?.description || error?.message || '';
+                if (!description.includes('message to delete not found')) {
+                    console.error(`[Owner] Failed to delete marker message for ${normalizedChatId}: ${sanitizeSecrets(description)}`);
+                }
+            }
+        }
+
+        return { deleted, attempted: true };
+    } catch (error) {
+        console.error(`[Owner] Failed to clear chat history for ${normalizedChatId}: ${sanitizeSecrets(error?.message || error?.toString())}`);
+        return { deleted: 0, attempted: false };
+    }
+}
+
+async function clearChatHistoriesForTarget(target, ownerLang) {
+    const chatIds = target?.scope === 'all'
+        ? await db.listUserChatIds()
+        : [target?.targetId].filter(Boolean);
+
+    const uniqueIds = Array.from(new Set((chatIds || []).map((id) => id?.toString()).filter(Boolean)));
+    let deletedMessages = 0;
+    let attemptedChats = 0;
+
+    for (const chatId of uniqueIds) {
+        const result = await purgeChatHistory(chatId, ownerLang);
+        if (result.attempted) {
+            attemptedChats += 1;
+            deletedMessages += result.deleted;
+        }
+    }
+
+    return { attemptedChats, deletedMessages };
 }
 
 function buildUserInfoLine(user) {
@@ -5369,11 +5455,14 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
             const target = state.target || { scope: 'all', targetId: null };
             const targetId = target.scope === 'user' ? target.targetId : null;
             const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
+            const cleanup = await clearChatHistoriesForTarget(target, lang);
             clearOwnerCaches(target);
 
             await sendReply(msg, t(lang, 'owner_reset_done', {
                 target: describeOwnerTarget(lang, target),
-                count: changes
+                count: changes,
+                chats: cleanup.attemptedChats,
+                messages: cleanup.deletedMessages
             }), {
                 reply_markup: buildCloseKeyboard(lang)
             });

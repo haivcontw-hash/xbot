@@ -735,6 +735,7 @@
   "owner_banned_notice": "Bạn đang bị BAN khỏi bot này.",
   "owner_reset_prompt": "Nhập 'all' để xoá toàn bộ dữ liệu người dùng hoặc nhập ID/@username để khôi phục.",
   "owner_reset_confirm": "Nhập CONFIRM để xoá sạch dữ liệu đã lưu của {target}.",
-  "owner_reset_done": "Đã khôi phục dữ liệu cho {target}. Đã xoá {count} bản ghi.",
+  "owner_reset_done": "Đã khôi phục dữ liệu cho {target}. Đã xoá {count} bản ghi và dọn {chats} đoạn chat (xoá {messages} tin nhắn).",
+  "owner_reset_chat_notice": "🧹 Đang xoá lịch sử trò chuyện và dữ liệu đã lưu. Tài khoản của bạn sẽ như người dùng mới.",
   "ai_limit_reached": "Bạn đã dùng hết {limit} lượt /ai trong ngày."
 }
