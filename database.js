@@ -1033,12 +1033,44 @@ async function init() {
             chatId TEXT PRIMARY KEY,
             lang TEXT,
             wallets TEXT,
-            lang_source TEXT DEFAULT 'auto'
+            lang_source TEXT DEFAULT 'auto',
+            fullName TEXT,
+            username TEXT,
+            firstSeen INTEGER,
+            lastSeen INTEGER
         );
     `);
 
     try {
         await dbRun(`ALTER TABLE users ADD COLUMN lang_source TEXT DEFAULT 'auto'`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN fullName TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN username TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN firstSeen INTEGER`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN lastSeen INTEGER`);
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
@@ -1092,6 +1124,24 @@ async function init() {
             limitValue INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL,
             PRIMARY KEY (command, targetId)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS co_owners (
+            userId TEXT PRIMARY KEY,
+            username TEXT,
+            fullName TEXT,
+            addedBy TEXT,
+            createdAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS banned_users (
+            userId TEXT PRIMARY KEY,
+            username TEXT,
+            fullName TEXT,
+            addedBy TEXT,
+            createdAt INTEGER NOT NULL
         );
     `);
     await dbRun(`
@@ -2007,6 +2057,112 @@ async function listUserChatIds() {
     return (rows || []).map((row) => row.chatId);
 }
 
+async function upsertUserProfile(chatId, profile = {}) {
+    if (!chatId) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
+    const username = profile.username ? profile.username.toLowerCase() : null;
+
+    const existing = await dbGet('SELECT chatId, firstSeen FROM users WHERE chatId = ?', [chatId]);
+    if (existing) {
+        await dbRun('UPDATE users SET fullName = ?, username = ?, lastSeen = ? WHERE chatId = ?', [fullName || null, username, now, chatId]);
+        return;
+    }
+
+    await dbRun(
+        'INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)',
+        [chatId, '[]', 'auto', fullName || null, username, now, now]
+    );
+}
+
+async function listUsersDetailed() {
+    return dbAll('SELECT chatId, username, fullName, firstSeen, lastSeen FROM users');
+}
+
+async function findUserByIdOrUsername(identifier) {
+    if (!identifier) {
+        return null;
+    }
+    const idCandidate = identifier.toString();
+    const normalizedUsername = identifier.toString().replace(/^@/, '').toLowerCase();
+
+    const row = await dbGet(
+        'SELECT chatId, username, fullName, firstSeen, lastSeen FROM users WHERE chatId = ? OR LOWER(username) = ?',
+        [idCandidate, normalizedUsername]
+    );
+
+    return row || null;
+}
+
+async function addCoOwner(userId, data = {}) {
+    if (!userId) {
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const username = data.username ? data.username.toLowerCase() : null;
+    await dbRun(
+        `INSERT INTO co_owners (userId, username, fullName, addedBy, createdAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET username = excluded.username, fullName = excluded.fullName, addedBy = excluded.addedBy, createdAt = excluded.createdAt`,
+        [userId.toString(), username, data.fullName || null, data.addedBy || null, now]
+    );
+}
+
+async function removeCoOwner(userId) {
+    if (!userId) {
+        return;
+    }
+    await dbRun('DELETE FROM co_owners WHERE userId = ?', [userId.toString()]);
+}
+
+async function listCoOwners() {
+    return dbAll('SELECT userId, username, fullName, addedBy, createdAt FROM co_owners');
+}
+
+async function isCoOwner(userId) {
+    if (!userId) {
+        return false;
+    }
+    const row = await dbGet('SELECT userId FROM co_owners WHERE userId = ?', [userId.toString()]);
+    return !!row;
+}
+
+async function addBannedUser(userId, data = {}) {
+    if (!userId) {
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const username = data.username ? data.username.toLowerCase() : null;
+    await dbRun(
+        `INSERT INTO banned_users (userId, username, fullName, addedBy, createdAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET username = excluded.username, fullName = excluded.fullName, addedBy = excluded.addedBy, createdAt = excluded.createdAt`,
+        [userId.toString(), username, data.fullName || null, data.addedBy || null, now]
+    );
+}
+
+async function removeBannedUser(userId) {
+    if (!userId) {
+        return;
+    }
+    await dbRun('DELETE FROM banned_users WHERE userId = ?', [userId.toString()]);
+}
+
+async function listBannedUsers() {
+    return dbAll('SELECT userId, username, fullName, addedBy, createdAt FROM banned_users');
+}
+
+async function isUserBanned(userId) {
+    if (!userId) {
+        return false;
+    }
+    const row = await dbGet('SELECT userId FROM banned_users WHERE userId = ?', [userId.toString()]);
+    return !!row;
+}
+
 function normalizeCommandKey(command) {
     return typeof command === 'string' ? command.trim().toLowerCase() : '';
 }
@@ -2175,6 +2331,17 @@ module.exports = {
     updateGroupSubscriptionLanguage,
     updateGroupSubscriptionTopic,
     listUserChatIds,
+    upsertUserProfile,
+    listUsersDetailed,
+    findUserByIdOrUsername,
+    addCoOwner,
+    removeCoOwner,
+    listCoOwners,
+    isCoOwner,
+    addBannedUser,
+    removeBannedUser,
+    listBannedUsers,
+    isUserBanned,
     setCommandLimit,
     clearCommandLimit,
     getCommandLimit,

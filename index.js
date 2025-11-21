@@ -22,7 +22,9 @@ const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null
 const BOT_OWNER_ID = (process.env.BOT_OWNER_ID || '').trim() || null;
 const ADDITIONAL_OWNER_USERNAME = 'haivcon';
 const OWNER_PASSWORD = '0876200812@';
-const passwordOwnerIds = new Set();
+const coOwnerIds = new Set();
+const bannedUserIds = new Set();
+const ownerPasswordPrompts = new Map();
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
@@ -891,7 +893,97 @@ function isOwner(userId, username) {
         return true;
     }
 
-    return passwordOwnerIds.has(userId.toString());
+    return coOwnerIds.has(userId.toString());
+}
+
+async function hydrateCoOwners() {
+    try {
+        const rows = await db.listCoOwners();
+        coOwnerIds.clear();
+        for (const row of rows || []) {
+            if (row?.userId) {
+                coOwnerIds.add(row.userId.toString());
+            }
+        }
+    } catch (error) {
+        console.error(`[Owner] Failed to hydrate co-owners: ${error.message}`);
+    }
+}
+
+async function hydrateBannedUsers() {
+    try {
+        const rows = await db.listBannedUsers();
+        bannedUserIds.clear();
+        for (const row of rows || []) {
+            if (row?.userId) {
+                bannedUserIds.add(row.userId.toString());
+            }
+        }
+    } catch (error) {
+        console.error(`[Ban] Failed to hydrate banned users: ${error.message}`);
+    }
+}
+
+async function registerCoOwner(userId, fromInfo = {}, addedBy = null) {
+    if (!userId) {
+        return;
+    }
+
+    const fullName = [fromInfo.first_name, fromInfo.last_name].filter(Boolean).join(' ') || fromInfo.fullName;
+    const payload = {
+        username: fromInfo.username,
+        fullName: fullName || null,
+        addedBy: addedBy || BOT_OWNER_ID || null
+    };
+
+    try {
+        await db.addCoOwner(userId, payload);
+    } catch (error) {
+        console.error(`[Owner] Failed to persist co-owner ${userId}: ${error.message}`);
+    }
+
+    coOwnerIds.add(userId.toString());
+}
+
+async function revokeCoOwner(userId) {
+    if (!userId) {
+        return;
+    }
+    try {
+        await db.removeCoOwner(userId);
+        coOwnerIds.delete(userId.toString());
+    } catch (error) {
+        console.error(`[Owner] Failed to revoke co-owner ${userId}: ${error.message}`);
+    }
+}
+
+async function banUser(userId, fromInfo = {}, addedBy = null) {
+    if (!userId) {
+        return;
+    }
+    const fullName = [fromInfo.first_name, fromInfo.last_name].filter(Boolean).join(' ') || fromInfo.fullName;
+    try {
+        await db.addBannedUser(userId, {
+            username: fromInfo.username,
+            fullName: fullName || null,
+            addedBy: addedBy || null
+        });
+        bannedUserIds.add(userId.toString());
+    } catch (error) {
+        console.error(`[Ban] Failed to ban user ${userId}: ${error.message}`);
+    }
+}
+
+async function unbanUser(userId) {
+    if (!userId) {
+        return;
+    }
+    try {
+        await db.removeBannedUser(userId);
+        bannedUserIds.delete(userId.toString());
+    } catch (error) {
+        console.error(`[Ban] Failed to unban user ${userId}: ${error.message}`);
+    }
 }
 
 function clearOwnerAction(userId) {
@@ -4854,6 +4946,14 @@ function buildOwnerMenuKeyboard(lang) {
             { text: t(lang, 'owner_menu_broadcast'), callback_data: 'owner_menu|broadcast' },
             { text: t(lang, 'owner_menu_ai_limit'), callback_data: 'owner_menu|ai_limit' }
         ],
+        [
+            { text: t(lang, 'owner_menu_ai_unlimit'), callback_data: 'owner_menu|ai_unlimit' },
+            { text: t(lang, 'owner_menu_check_users'), callback_data: 'owner_menu|check_users' }
+        ],
+        [
+            { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
+            { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
+        ],
         [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
     ];
 
@@ -4884,6 +4984,107 @@ function describeOwnerTarget(lang, target) {
         return t(lang, 'owner_target_all');
     }
     return target.targetId || t(lang, 'owner_target_all');
+}
+
+function buildUserInfoLine(user) {
+    const parts = [];
+    if (user.fullName) {
+        parts.push(`👤 ${escapeHtml(user.fullName)}`);
+    }
+
+    if (user.username) {
+        parts.push(`@${escapeHtml(user.username)}`);
+    }
+
+    const copyableId = formatCopyableValueHtml(user.chatId || user.userId) || escapeHtml(user.chatId || user.userId || '');
+    if (copyableId) {
+        parts.push(`ID: ${copyableId}`);
+    }
+
+    return parts.join(' • ');
+}
+
+async function sendChunkedHtmlMessages(chatId, text, options = {}) {
+    if (!text) {
+        return;
+    }
+    const chunkSize = 3500;
+    for (let i = 0; i < text.length; i += chunkSize) {
+        const chunk = text.slice(i, i + chunkSize);
+        // eslint-disable-next-line no-await-in-loop
+        await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML', disable_web_page_preview: true, ...options });
+    }
+}
+
+async function sendOwnerUserOverview(chatId, lang) {
+    const [users, coOwners, banned] = await Promise.all([
+        db.listUsersDetailed(),
+        db.listCoOwners(),
+        db.listBannedUsers()
+    ]);
+
+    const totalUsers = users?.length || 0;
+    const ownerLines = [];
+    const coOwnerLines = [];
+    const memberLines = [];
+    const bannedLines = [];
+
+    const coOwnerIdSet = new Set((coOwners || []).map((c) => c.userId?.toString()).filter(Boolean));
+    const bannedIdSet = new Set((banned || []).map((b) => b.userId?.toString()).filter(Boolean));
+
+    if (BOT_OWNER_ID) {
+        const mainOwner = users?.find((u) => u.chatId?.toString() === BOT_OWNER_ID);
+        ownerLines.push(buildUserInfoLine({
+            fullName: mainOwner?.fullName || t(lang, 'owner_primary_label'),
+            username: mainOwner?.username,
+            chatId: BOT_OWNER_ID
+        }));
+    }
+
+    const usernameOwner = users?.find((u) => (u.username || '').toLowerCase() === ADDITIONAL_OWNER_USERNAME);
+    if (usernameOwner) {
+        ownerLines.push(buildUserInfoLine({ ...usernameOwner, userId: usernameOwner.chatId }));
+    }
+
+    for (const entry of coOwners || []) {
+        coOwnerLines.push(`🤝 ${buildUserInfoLine({ ...entry, chatId: entry.userId })}`);
+    }
+
+    for (const entry of banned || []) {
+        bannedLines.push(`⛔️ ${buildUserInfoLine({ ...entry, chatId: entry.userId })}`);
+    }
+
+    for (const entry of users || []) {
+        const id = entry.chatId?.toString();
+        if (id === BOT_OWNER_ID || coOwnerIdSet.has(id) || bannedIdSet.has(id)) {
+            continue;
+        }
+        const prefix = entry.username ? '🙋‍♂️' : '🙋';
+        memberLines.push(`${prefix} ${buildUserInfoLine(entry)}`);
+    }
+
+    const sections = [];
+    sections.push(`📊 ${t(lang, 'owner_user_stats_overview', {
+        total: totalUsers,
+        ownerCount: ownerLines.length || 1,
+        coOwnerCount: coOwnerLines.length,
+        bannedCount: bannedLines.length
+    })}`);
+
+    if (ownerLines.length) {
+        sections.push(`👑 <b>${t(lang, 'owner_user_owner_list')}</b>\n${ownerLines.join('\n')}`);
+    }
+    if (coOwnerLines.length) {
+        sections.push(`🤝 <b>${t(lang, 'owner_user_coowners')}</b>\n${coOwnerLines.join('\n')}`);
+    }
+    if (memberLines.length) {
+        sections.push(`👥 <b>${t(lang, 'owner_user_members')}</b>\n${memberLines.join('\n')}`);
+    }
+    if (bannedLines.length) {
+        sections.push(`🚫 <b>${t(lang, 'owner_user_banned')}</b>\n${bannedLines.join('\n')}`);
+    }
+
+    await sendChunkedHtmlMessages(chatId, sections.join('\n\n'));
 }
 
 async function handleOwnerStateMessage(msg, textOrCaption) {
@@ -4986,6 +5187,102 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
             }), {
                 reply_markup: buildCloseKeyboard(lang)
             });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'ai_unlimit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            await db.clearCommandLimit('ai', targetId);
+            await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'user_check') {
+        const lowered = content.toLowerCase();
+        const revokeIntent = lowered.startsWith('revoke ') || lowered.startsWith('remove ');
+        const lookupRaw = revokeIntent ? content.replace(/^(revoke|remove)\s+/i, '') : content;
+
+        if (!lookupRaw) {
+            await sendReply(msg, t(lang, 'owner_user_check_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const lookup = lookupRaw.replace(/^@/, '');
+        const found = await db.findUserByIdOrUsername(lookup);
+        const isKnown = Boolean(found);
+
+        if (!isKnown) {
+            await sendReply(msg, t(lang, 'owner_user_not_found'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const chatId = found.chatId?.toString();
+        if (revokeIntent && chatId) {
+            await revokeCoOwner(chatId);
+            await sendReply(msg, t(lang, 'owner_coowner_revoked', { target: chatId }), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        const status = [];
+        if (isOwner(chatId, found.username)) {
+            status.push('👑 ' + t(lang, 'owner_user_role_owner'));
+        } else if (coOwnerIds.has(chatId)) {
+            status.push('🤝 ' + t(lang, 'owner_user_role_coowner'));
+        } else if (bannedUserIds.has(chatId)) {
+            status.push('🚫 ' + t(lang, 'owner_user_role_banned'));
+        } else {
+            status.push('👤 ' + t(lang, 'owner_user_role_member'));
+        }
+
+        const lines = [
+            t(lang, 'owner_user_lookup_result'),
+            buildUserInfoLine(found),
+            status.join(' \n')
+        ].filter(Boolean);
+
+        await sendReply(msg, lines.join('\n'), { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) });
+        return true;
+    }
+
+    if (state.mode === 'ban' || state.mode === 'unban') {
+        if (state.step === 'target') {
+            const lookup = content.replace(/^@/, '');
+            const resolved = await db.findUserByIdOrUsername(lookup);
+            const targetId = resolved?.chatId?.toString() || content.match(/-?\d+/)?.[0];
+
+            if (!targetId) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            if (isOwner(targetId, resolved?.username)) {
+                await sendReply(msg, t(lang, 'owner_ban_forbidden'));
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            if (state.mode === 'ban') {
+                await revokeCoOwner(targetId);
+                await banUser(targetId, resolved || { username: lookup }, userId);
+                await sendReply(msg, t(lang, 'owner_ban_success', { target: targetId }), { reply_markup: buildCloseKeyboard(lang) });
+            } else {
+                await unbanUser(targetId);
+                await sendReply(msg, t(lang, 'owner_unban_success', { target: targetId }), { reply_markup: buildCloseKeyboard(lang) });
+            }
+
             clearOwnerAction(userId);
             return true;
         }
@@ -12040,9 +12337,21 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const providedPassword = (match?.[1] || '').trim();
         if (!isOwner(userId, username)) {
             if (providedPassword && providedPassword === OWNER_PASSWORD) {
-                passwordOwnerIds.add(userId);
+                await registerCoOwner(userId, msg.from, userId);
+                ownerPasswordPrompts.delete(userId);
             } else {
-                await sendReply(msg, t(lang, 'owner_not_allowed'), { reply_markup: buildCloseKeyboard(lang) });
+                const prompt = await sendReply(msg, t(lang, 'owner_password_prompt'), {
+                    reply_markup: {
+                        force_reply: true,
+                        input_field_placeholder: t(lang, 'owner_password_placeholder')
+                    }
+                });
+
+                ownerPasswordPrompts.set(userId, {
+                    chatId: msg.chat?.id?.toString(),
+                    messageId: prompt?.message_id || null,
+                    lang
+                });
                 return;
             }
         }
@@ -12260,6 +12569,35 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     ownerActionStates.set(ownerId, { mode: 'ai_limit', step: 'target', chatId: targetChatId });
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
                     await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ai_unlimit') {
+                    ownerActionStates.set(ownerId, { mode: 'ai_unlimit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'check_users') {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_user_checking') });
+                    await sendOwnerUserOverview(targetChatId, callbackLang);
+                    ownerActionStates.set(ownerId, { mode: 'user_check', step: 'query', chatId: targetChatId });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_user_check_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'ban' || action === 'unban') {
+                    ownerActionStates.set(ownerId, { mode: action, step: 'target', chatId: targetChatId });
+                    const promptKey = action === 'ban' ? 'owner_prompt_ban_target' : 'owner_prompt_unban_target';
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, promptKey) });
+                    await bot.sendMessage(targetChatId, t(callbackLang, promptKey), {
                         reply_markup: buildCloseKeyboard(callbackLang)
                     });
                     return;
@@ -14273,6 +14611,41 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const userId = msg.from?.id?.toString();
         const chatType = msg.chat?.type || '';
 
+        if (userId) {
+            await db.upsertUserProfile(userId, {
+                fullName: [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' '),
+                username: msg.from?.username || null
+            });
+        }
+
+        if (userId && !isOwner(userId, msg.from?.username)) {
+            const isBanned = bannedUserIds.has(userId) || await db.isUserBanned(userId);
+            if (isBanned) {
+                bannedUserIds.add(userId);
+                const lang = await getLang(msg);
+                await sendReply(msg, t(lang, 'owner_banned_notice'), { reply_markup: buildCloseKeyboard(lang) });
+                return;
+            }
+        }
+
+        const pendingPassword = userId ? ownerPasswordPrompts.get(userId) : null;
+        if (pendingPassword && msg.reply_to_message?.message_id === pendingPassword.messageId && msg.chat?.id?.toString() === pendingPassword.chatId) {
+            const lang = pendingPassword.lang || await getLang(msg);
+            ownerPasswordPrompts.delete(userId);
+
+            if (textOrCaption === OWNER_PASSWORD) {
+                await registerCoOwner(userId, msg.from, userId);
+                await sendReply(msg, t(lang, 'owner_password_success'), { reply_markup: buildCloseKeyboard(lang) });
+                await bot.sendMessage(msg.chat.id, t(lang, 'owner_menu_title'), {
+                    parse_mode: 'HTML',
+                    reply_markup: buildOwnerMenuKeyboard(lang)
+                });
+            } else {
+                await sendReply(msg, t(lang, 'owner_password_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+            }
+            return;
+        }
+
         if (await handleOwnerStateMessage(msg, textOrCaption)) {
             return;
         }
@@ -14698,9 +15071,11 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 async function main() {
     try {
         console.log("Đang khởi động...");
-        
+
         // Bước 1: Khởi tạo DB
-        await db.init(); 
+        await db.init();
+        await hydrateCoOwners();
+        await hydrateBannedUsers();
 
         // Bước 2: Bật API
         startApiServer();
