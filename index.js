@@ -105,7 +105,37 @@ const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSP
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+const GEMINI_API_KEYS = (() => {
+    const raw = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
+    if (!raw || !raw.trim()) {
+        return [];
+    }
+
+    const keys = [];
+
+    try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            for (const value of parsed) {
+                if (typeof value === 'string' && value.trim()) {
+                    keys.push(value.trim());
+                }
+            }
+        }
+    } catch (error) {
+        // ignore JSON parse errors
+    }
+
+    if (!keys.length) {
+        raw.split(/[,|\s]+/).forEach((value) => {
+            if (typeof value === 'string' && value.trim()) {
+                keys.push(value.trim());
+            }
+        });
+    }
+
+    return Array.from(new Set(keys));
+})();
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const AI_IMAGE_MAX_BYTES = (() => {
     const value = Number(process.env.AI_IMAGE_MAX_BYTES || 15 * 1024 * 1024);
@@ -120,7 +150,8 @@ let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
 let okxChainDirectoryPromise = null;
 const okxResolvedChainCache = new Map();
-let geminiClient = null;
+const geminiClientPool = new Map();
+let geminiKeyIndex = 0;
 const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
@@ -734,6 +765,33 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function formatBoldMarkdownToHtml(text) {
+    if (typeof text !== 'string') {
+        return '';
+    }
+
+    const parts = [];
+    let lastIndex = 0;
+    const regex = /\*\*(.+?)\*\*/gs;
+    let match;
+
+    while ((match = regex.exec(text)) !== null) {
+        const [fullMatch, boldContent] = match;
+        const start = match.index;
+        if (start > lastIndex) {
+            parts.push(escapeHtml(text.slice(lastIndex, start)));
+        }
+        parts.push(`<b>${escapeHtml(boldContent)}</b>`);
+        lastIndex = start + fullMatch.length;
+    }
+
+    if (lastIndex < text.length) {
+        parts.push(escapeHtml(text.slice(lastIndex)));
+    }
+
+    return parts.join('');
+}
+
 function normalizeAddressSafe(address) {
     if (!address) {
         return null;
@@ -787,16 +845,27 @@ async function urlToGenerativePart(url, mimeType, options = {}) {
     };
 }
 
-function getGeminiClient() {
-    if (!GEMINI_API_KEY) {
+function getGeminiClient(index = geminiKeyIndex) {
+    if (!GEMINI_API_KEYS.length) {
         return null;
     }
 
-    if (!geminiClient) {
-        geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const safeIndex = ((index % GEMINI_API_KEYS.length) + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length;
+    const apiKey = GEMINI_API_KEYS[safeIndex];
+
+    if (!geminiClientPool.has(apiKey)) {
+        geminiClientPool.set(apiKey, new GoogleGenAI({ apiKey }));
     }
 
-    return geminiClient;
+    return { client: geminiClientPool.get(apiKey), apiKey, index: safeIndex };
+}
+
+function advanceGeminiKeyIndex() {
+    if (!GEMINI_API_KEYS.length) {
+        return 0;
+    }
+    geminiKeyIndex = (geminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+    return geminiKeyIndex;
 }
 
 function getXlayerProvider() {
@@ -10788,8 +10857,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           return;
       }
 
-      const client = getGeminiClient();
-      if (!client) {
+      if (!GEMINI_API_KEYS.length) {
           await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
           return;
       }
@@ -10829,15 +10897,40 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               // ignore chat action errors
           }
 
-          const response = await client.models.generateContent({
-              model: GEMINI_MODEL,
-              contents: [
-                  {
-                      role: 'user',
-                      parts
-                  }
-              ]
-          });
+          const maxAttempts = Math.max(1, GEMINI_API_KEYS.length);
+          let response = null;
+          let lastError = null;
+
+          for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+              const keyIndex = (geminiKeyIndex + attempt) % GEMINI_API_KEYS.length;
+              const clientInfo = getGeminiClient(keyIndex);
+              if (!clientInfo) {
+                  lastError = new Error('Missing Gemini API key');
+                  break;
+              }
+
+              try {
+                  response = await clientInfo.client.models.generateContent({
+                      model: GEMINI_MODEL,
+                      contents: [
+                          {
+                              role: 'user',
+                              parts
+                          }
+                      ]
+                  });
+                  geminiKeyIndex = clientInfo.index;
+                  break;
+              } catch (error) {
+                  lastError = error;
+                  advanceGeminiKeyIndex();
+                  console.error(`[AI] Failed to generate content with Gemini key index ${keyIndex}: ${error.message}`);
+              }
+          }
+
+          if (!response) {
+              throw lastError || new Error('No Gemini response');
+          }
 
           const candidate = response?.candidates?.[0]?.content?.parts || [];
           const aiResponse = candidate
@@ -10850,6 +10943,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
           const replyMarkup = buildCloseKeyboard(lang);
           const chunks = splitTelegramMessageText(replyText);
+          const options = { reply_markup: replyMarkup, parse_mode: 'HTML', disable_web_page_preview: true };
 
           for (let i = 0; i < chunks.length; i += 1) {
               const chunk = chunks[i];
@@ -10857,8 +10951,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                   continue;
               }
 
-              const options = i === 0 ? { reply_markup: replyMarkup } : {};
-              await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
+              const htmlChunk = formatBoldMarkdownToHtml(chunk);
+              await sendMessageRespectingThread(msg.chat.id, msg, htmlChunk, options);
           }
       } catch (error) {
           console.error(`[AI] Failed to generate content: ${error.message}`);
