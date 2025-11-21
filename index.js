@@ -804,7 +804,7 @@ bot.answerCallbackQuery = async (...args) => {
         }
 
         console.error(`[Callback] Failed to answer callback query: ${sanitizeSecrets(description || error?.toString())}`);
-        throw error;
+        return null;
     }
 };
 
