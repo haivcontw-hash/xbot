@@ -1480,11 +1480,18 @@ async function addWalletToUser(chatId, lang, walletAddress, options = {}) {
         nextSource = 'auto';
     }
 
-    if (user) {
-        await dbRun('UPDATE users SET lang = ?, lang_source = ?, wallets = ? WHERE chatId = ?', [langToPersist, nextSource, JSON.stringify(wallets), chatId]);
-    } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify(wallets), 'auto']);
-    }
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        `INSERT INTO users (chatId, lang, wallets, lang_source, firstSeen, lastSeen)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chatId) DO UPDATE SET
+             lang = excluded.lang,
+             lang_source = excluded.lang_source,
+             wallets = excluded.wallets,
+             lastSeen = excluded.lastSeen,
+             firstSeen = COALESCE(users.firstSeen, excluded.firstSeen)`,
+        [chatId, langToPersist, JSON.stringify(wallets), nextSource, now, now]
+    );
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
     return { added, wallet: normalizedAddr, name: finalName, nameChanged };
 }
