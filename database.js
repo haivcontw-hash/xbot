@@ -2149,20 +2149,29 @@ async function upsertUserProfile(chatId, profile = {}) {
     const now = Math.floor(Date.now() / 1000);
     const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
     const username = profile.username ? profile.username.toLowerCase() : null;
+    const lang = normalizeLanguageCode(profile.lang) || null;
+    const langSource = profile.lang_source || profile.langSource || 'auto';
 
+    // First, try to insert a new record; if it exists, ignore to avoid UNIQUE conflicts.
     await dbRun(
-        `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chatId) DO UPDATE SET
-             fullName = COALESCE(excluded.fullName, users.fullName),
-             username = COALESCE(excluded.username, users.username),
-             lastSeen = excluded.lastSeen,
-             firstSeen = COALESCE(users.firstSeen, excluded.firstSeen),
-             lang = COALESCE(users.lang, excluded.lang),
-             wallets = COALESCE(users.wallets, excluded.wallets),
-             lang_source = COALESCE(users.lang_source, excluded.lang_source)
-        `,
-        [chatId, '[]', 'auto', fullName || null, username, now, now]
+        `INSERT OR IGNORE INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ,
+        [chatId, lang, '[]', langSource, fullName || null, username, now, now]
+    );
+
+    // Then update the existing row with the latest metadata without clobbering stored values.
+    await dbRun(
+        `UPDATE users
+         SET fullName = COALESCE(?, fullName),
+             username = COALESCE(?, username),
+             lastSeen = ?,
+             lang = COALESCE(lang, ?),
+             wallets = COALESCE(wallets, ?),
+             lang_source = COALESCE(lang_source, ?),
+             firstSeen = COALESCE(firstSeen, ?)
+         WHERE chatId = ?`,
+        [fullName || null, username, now, lang, '[]', langSource, now, chatId]
     );
 }
 
