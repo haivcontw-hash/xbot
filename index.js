@@ -11765,12 +11765,13 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           return;
       }
 
+      const usageTargetId = userId || msg.chat?.id?.toString() || null;
       const userLimit = userId ? await db.getCommandLimit('ai', userId) : null;
-      const globalLimit = userId ? await db.getCommandLimit('ai', null) : null;
+      const globalLimit = await db.getCommandLimit('ai', null);
       const effectiveLimit = userLimit ?? globalLimit;
 
-      if (userId && Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
-          const currentUsage = await db.getCommandUsageCount('ai', userId, usageDate);
+      if (usageTargetId && Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+          const currentUsage = await db.getCommandUsageCount('ai', usageTargetId, usageDate);
           if (currentUsage >= effectiveLimit) {
               await sendReply(msg, t(lang, 'ai_limit_reached', { limit: effectiveLimit }), {
                   reply_markup: buildCloseKeyboard(lang)
@@ -11779,8 +11780,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           }
       }
 
-      if (userId) {
-          await db.incrementCommandUsage('ai', userId, usageDate);
+      if (usageTargetId) {
+          await db.incrementCommandUsage('ai', usageTargetId, usageDate);
       }
 
       const parts = [];
