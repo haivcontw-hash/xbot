@@ -2143,14 +2143,24 @@ async function upsertUserProfile(chatId, profile = {}) {
     const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
     const username = profile.username ? profile.username.toLowerCase() : null;
 
+    const existingUser = await dbGet('SELECT firstSeen FROM users WHERE chatId = ?', [chatId]);
+
+    if (existingUser) {
+        await dbRun(
+            `UPDATE users
+             SET fullName = ?,
+                 username = ?,
+                 lastSeen = ?,
+                 firstSeen = COALESCE(firstSeen, ?)
+             WHERE chatId = ?`,
+            [fullName || null, username, now, now, chatId]
+        );
+        return;
+    }
+
     await dbRun(
         `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chatId) DO UPDATE SET
-            fullName = excluded.fullName,
-            username = excluded.username,
-            lastSeen = excluded.lastSeen,
-            firstSeen = COALESCE(users.firstSeen, excluded.firstSeen)`,
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
         [chatId, '[]', 'auto', fullName || null, username, now, now]
     );
 }
