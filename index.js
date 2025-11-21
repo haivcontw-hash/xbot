@@ -111,6 +111,14 @@ const AI_CHAT_TIMEOUT_MS = (() => {
     const value = Number(process.env.AI_CHAT_TIMEOUT_MS || 15 * 60 * 1000);
     return Number.isFinite(value) && value > 0 ? value : 15 * 60 * 1000;
 })();
+const AI_RESPONSE_SYSTEM_PROMPT = [
+    'Bạn là chuyên gia phân tích thị trường thân thiện. Hãy trả lời bằng Markdown thân thiện với Telegram:',
+    '- Dùng tiêu đề ngắn gọn, gạch đầu dòng, bảng đơn giản khi cần.',
+    '- Thêm emoji phù hợp (ví dụ: 🟢 cho tăng, 🔴 cho giảm).',
+    '- Giữ câu trả lời cô đọng, rõ ràng và dễ đọc trên màn hình nhỏ.',
+    '- Tránh dùng cú pháp Markdown phức tạp và hạn chế ký tự đặc biệt.',
+    '- Nếu dữ liệu mang tính kỹ thuật, ưu tiên tóm tắt ý chính trước, chi tiết sau.'
+].join('\n');
 
 let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
@@ -10902,6 +10910,15 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       return { parts, hasPhoto };
   }
 
+  function buildAiPrompt(promptText) {
+      const trimmed = (promptText || '').trim();
+      if (!trimmed) {
+          return AI_RESPONSE_SYSTEM_PROMPT;
+      }
+
+      return `${AI_RESPONSE_SYSTEM_PROMPT}\n\n${trimmed}`;
+  }
+
   function extractAiResponseText(response) {
       const candidate = response?.candidates?.[0]?.content?.parts || [];
       return candidate
@@ -10921,7 +10938,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               continue;
           }
 
-          const options = i === 0 ? { reply_markup: replyMarkup } : {};
+          const baseOptions = { parse_mode: 'Markdown', disable_web_page_preview: true };
+          const options = i === 0 ? { ...baseOptions, reply_markup: replyMarkup } : baseOptions;
           const sent = await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
           if (sent?.message_id) {
               sentMessageIds.push(sent.message_id);
@@ -10971,7 +10989,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       }
 
       const promptText = userPrompt || t(lang, 'ai_default_prompt');
-      const { parts, hasPhoto: hasMedia } = await buildAiUserParts(msg, promptText);
+      const formattedPrompt = buildAiPrompt(promptText);
+      const { parts, hasPhoto: hasMedia } = await buildAiUserParts(msg, formattedPrompt);
       const session = createAiChatSession(chatKey, client);
 
       if (!session) {
@@ -10986,7 +11005,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               // ignore chat action errors
           }
 
-          const response = await sendAiChatMessage(session, parts, promptText);
+          const response = await sendAiChatMessage(session, parts, formattedPrompt);
           const aiResponse = extractAiResponseText(response);
           const body = aiResponse || t(lang, 'ai_error');
           const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
@@ -11011,8 +11030,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       }
 
       const textOrCaption = (msg.text || msg.caption || '').trim();
+      const photos = Array.isArray(msg.photo) ? msg.photo : [];
+      const hasPhoto = photos.length > 0;
+
+      if (!textOrCaption && !hasPhoto) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+
       const promptText = textOrCaption || t(lang, 'ai_default_prompt');
-      const { parts, hasPhoto } = await buildAiUserParts(msg, promptText);
+      const formattedPrompt = buildAiPrompt(promptText);
+      const { parts } = await buildAiUserParts(msg, formattedPrompt);
 
       try {
           try {
@@ -11021,7 +11049,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
               // ignore chat action errors
           }
 
-          const response = await sendAiChatMessage(session, parts, promptText);
+          const response = await sendAiChatMessage(session, parts, formattedPrompt);
           const aiResponse = extractAiResponseText(response);
           const body = aiResponse || t(lang, 'ai_error');
           const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
