@@ -129,7 +129,7 @@
   "ai_response_title": "Gemini trả lời:",
   "ai_error": "Xin lỗi, có lỗi khi gọi Gemini. Vui lòng thử lại.",
   "ai_quota_exhausted": "Hạn mức Gemini đang tạm bị giới hạn, vui lòng thử lại sau ít phút.",
-  "ai_session_expired": "Phiên chat AI đã hết hạn. Hãy bắt đầu lại với /ai."
+  "ai_session_expired": "Phiên chat AI đã hết hạn. Hãy bắt đầu lại với /ai.",
   "txhash_title": "🔎 Phân tích giao dịch",
   "txhash_hash_line": "Hash: {hash}",
   "txhash_summary_line": "Chain: {chain} | Trạng thái: {status} | Số lượng: {amount}",
