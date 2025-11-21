@@ -15482,7 +15482,18 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     };
 
     bot.on('polling_error', (error) => {
-        console.error(`[LỖI BOT POLLING]: ${formatPollingError(error)}`);
+        const formatted = formatPollingError(error);
+        const code = error?.code || error?.response?.body?.error_code;
+        if (
+            !formatted ||
+            code === 'EFATAL' ||
+            /query is too old|timeout expired|expired or query ID is invalid/i.test(formatted) ||
+            /ETIMEDOUT|ECONNRESET|EAI_AGAIN|socket hang up|connect EHOSTUNREACH/i.test(formatted)
+        ) {
+            return;
+        }
+
+        console.error(`[LỖI BOT POLLING]: ${formatted}`);
     });
 
     console.log('✅ [Telegram Bot] Đang chạy...');

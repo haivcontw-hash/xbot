@@ -2157,19 +2157,34 @@ async function upsertUserProfile(chatId, profile = {}) {
             ? JSON.stringify(profile.wallets)
             : profile.wallets || '[]';
 
-    await dbRun(
-        `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chatId) DO UPDATE SET
-            fullName = COALESCE(excluded.fullName, users.fullName),
-            username = COALESCE(excluded.username, users.username),
-            lang = COALESCE(users.lang, excluded.lang),
-            wallets = COALESCE(users.wallets, excluded.wallets),
-            lang_source = COALESCE(excluded.lang_source, users.lang_source),
-            firstSeen = COALESCE(users.firstSeen, excluded.firstSeen),
-            lastSeen = excluded.lastSeen`,
-        [chatId, lang, wallets, langSource, fullName || null, username, firstSeen, now]
+    const normalizedChatId = chatId.toString();
+    const existing = await dbGet('SELECT firstSeen FROM users WHERE chatId = ?', [normalizedChatId]);
+
+    const updateResult = await dbRun(
+        `UPDATE users
+         SET
+            lang = COALESCE(?, lang),
+            wallets = COALESCE(?, wallets),
+            lang_source = COALESCE(?, lang_source),
+            fullName = COALESCE(?, fullName),
+            username = COALESCE(?, username),
+            firstSeen = COALESCE(firstSeen, ?),
+            lastSeen = ?
+         WHERE chatId = ?`,
+        [lang, wallets, langSource, fullName || null, username, firstSeen, now, normalizedChatId]
     );
+
+    if (!updateResult?.changes) {
+        await dbRun(
+            `INSERT OR IGNORE INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)` ,
+            [normalizedChatId, lang, wallets, langSource, fullName || null, username, firstSeen, now]
+        );
+
+        if (existing?.firstSeen === undefined || existing?.firstSeen === null) {
+            await dbRun('UPDATE users SET firstSeen = ? WHERE chatId = ? AND firstSeen IS NULL', [firstSeen, normalizedChatId]);
+        }
+    }
 }
 
 async function listUsersDetailed() {
