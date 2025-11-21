@@ -5195,25 +5195,46 @@ async function purgeChatHistory(chatId, ownerLang) {
     }
 }
 
+async function collectAllKnownChatIds() {
+    const users = await db.listUsersDetailed();
+    return (users || []).map((user) => user?.chatId).filter(Boolean);
+}
+
 async function clearChatHistoriesForIds(chatIds, ownerLang) {
     const uniqueIds = Array.from(new Set((chatIds || []).map((id) => id?.toString()).filter(Boolean)));
     let deletedMessages = 0;
     let attemptedChats = 0;
 
-    for (const chatId of uniqueIds) {
-        const result = await purgeChatHistory(chatId, ownerLang);
-        if (result.attempted) {
-            attemptedChats += 1;
-            deletedMessages += result.deleted;
+    const maxConcurrency = Math.min(10, uniqueIds.length || 0);
+    let cursor = 0;
+
+    async function worker() {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+            const nextIndex = cursor;
+            if (nextIndex >= uniqueIds.length) {
+                break;
+            }
+            cursor += 1;
+            const chatId = uniqueIds[nextIndex];
+            // eslint-disable-next-line no-await-in-loop
+            const result = await purgeChatHistory(chatId, ownerLang);
+            if (result.attempted) {
+                attemptedChats += 1;
+                deletedMessages += result.deleted;
+            }
         }
     }
+
+    const workers = Array.from({ length: maxConcurrency }, () => worker());
+    await Promise.all(workers);
 
     return { attemptedChats, deletedMessages };
 }
 
 async function clearChatHistoriesForTarget(target, ownerLang, presetChatIds = null) {
     const chatIds = presetChatIds || (target?.scope === 'all'
-        ? await db.listUserChatIds()
+        ? await collectAllKnownChatIds()
         : [target?.targetId].filter(Boolean));
 
     return clearChatHistoriesForIds(chatIds, ownerLang);
@@ -5536,10 +5557,10 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
             const target = state.target || { scope: 'all', targetId: null };
             const targetId = target.scope === 'user' ? target.targetId : null;
             const chatIdsForCleanup = target.scope === 'all'
-                ? await db.listUserChatIds()
+                ? await collectAllKnownChatIds()
                 : [targetId].filter(Boolean);
-            const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
             const cleanup = await clearChatHistoriesForTarget(target, lang, chatIdsForCleanup);
+            const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
             clearOwnerCaches(target);
 
             await sendReply(msg, t(lang, 'owner_reset_done', {
