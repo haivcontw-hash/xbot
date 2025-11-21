@@ -1089,7 +1089,7 @@ async function init() {
         CREATE TABLE IF NOT EXISTS command_limits (
             command TEXT NOT NULL,
             targetId TEXT,
-            limit INTEGER NOT NULL,
+            limitValue INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL,
             PRIMARY KEY (command, targetId)
         );
@@ -2026,9 +2026,9 @@ async function setCommandLimit(command, limit, targetId = null) {
     const now = Math.floor(Date.now() / 1000);
 
     await dbRun(
-        `INSERT INTO command_limits (command, targetId, limit, updatedAt)
+        `INSERT INTO command_limits (command, targetId, limitValue, updatedAt)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT(command, targetId) DO UPDATE SET limit = excluded.limit, updatedAt = excluded.updatedAt`,
+         ON CONFLICT(command, targetId) DO UPDATE SET limitValue = excluded.limitValue, updatedAt = excluded.updatedAt`,
         [normalizedCommand, normalizedTarget, numericLimit, now]
     );
 }
@@ -2054,11 +2054,11 @@ async function getCommandLimit(command, targetId = null) {
 
     const normalizedTarget = normalizeTargetId(targetId);
     const row = await dbGet(
-        'SELECT limit FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
+        'SELECT limitValue FROM command_limits WHERE command = ? AND (targetId = ? OR (targetId IS NULL AND ? IS NULL))',
         [normalizedCommand, normalizedTarget, normalizedTarget]
     );
 
-    return row && Number.isFinite(Number(row.limit)) ? Number(row.limit) : null;
+    return row && Number.isFinite(Number(row.limitValue)) ? Number(row.limitValue) : null;
 }
 
 async function getCommandUsageCount(command, userId, usageDate = null) {
