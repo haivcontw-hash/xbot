@@ -10,6 +10,8 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const https = require('https');
 const crypto = require('crypto');
+const axios = require('axios');
+const { GoogleGenAI } = require('@google/genai');
 const { t_, normalizeLanguageCode } = require('./i18n.js');
 const db = require('./database.js');
 const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
@@ -103,11 +105,28 @@ const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSP
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const AI_CHAT_TIMEOUT_MS = (() => {
+    const value = Number(process.env.AI_CHAT_TIMEOUT_MS || 15 * 60 * 1000);
+    return Number.isFinite(value) && value > 0 ? value : 15 * 60 * 1000;
+})();
+const AI_RESPONSE_SYSTEM_PROMPT = [
+    'Bạn là chuyên gia phân tích thị trường thân thiện. Hãy trả lời bằng Markdown thân thiện với Telegram:',
+    '- Dùng tiêu đề ngắn gọn, gạch đầu dòng, bảng đơn giản khi cần.',
+    '- Thêm emoji phù hợp (ví dụ: 🟢 cho tăng, 🔴 cho giảm).',
+    '- Giữ câu trả lời cô đọng, rõ ràng và dễ đọc trên màn hình nhỏ.',
+    '- Tránh dùng cú pháp Markdown phức tạp và hạn chế ký tự đặc biệt.',
+    '- Nếu dữ liệu mang tính kỹ thuật, ưu tiên tóm tắt ý chính trước, chi tiết sau.'
+].join('\n');
 
 let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
 let okxChainDirectoryPromise = null;
 const okxResolvedChainCache = new Map();
+let geminiClient = null;
+const aiChatSessions = new Map();
+let botId = null;
 const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
@@ -234,6 +253,7 @@ const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
     const value = Number(process.env.TELEGRAM_MESSAGE_SAFE_LENGTH || 3900);
     return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
 })();
+const AI_MESSAGE_CHUNK_LENGTH = Math.max(500, Math.min(3200, TELEGRAM_MESSAGE_SAFE_LENGTH - 600));
 const WALLET_TOKEN_HOLDER_LIMIT = 20;
 const WALLET_TOKEN_TRADE_LIMIT = 1;
 const WALLET_TOKEN_TX_HISTORY_LIMIT = 20;
@@ -563,6 +583,7 @@ const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 const txhashWizardStates = new Map();
 const tokenWizardStates = new Map();
+const contractWizardStates = new Map();
 const rmchatBotMessages = new Map();
 const rmchatUserMessages = new Map();
 let checkinSchedulerTimer = null;
@@ -699,6 +720,17 @@ bot.sendMessage = async (chatId, text, options = {}) => {
     return message;
 };
 
+bot.getMe()
+    .then((me) => {
+        botId = me?.id || null;
+        if (botId) {
+            console.log(`[BOT] Self ID: ${botId}`);
+        }
+    })
+    .catch((error) => {
+        console.warn(`[BOT] Unable to fetch bot info: ${error.message}`);
+    });
+
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
     return t_(lang_code, key, variables);
@@ -750,6 +782,136 @@ function formatCopyableValueHtml(value) {
     const encoded = encodeURIComponent(text);
     const code = `<code>${escapeHtml(text)}</code>`;
     return `<a href="https://t.me/share/url?url=${encoded}&text=${encoded}">${code}</a>`;
+}
+
+function buildContractLookupUrl(contractAddress) {
+    return `https://www.oklink.com/x-layer/${contractAddress}/contract`;
+}
+
+async function urlToGenerativePart(url, mimeType) {
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const base64Data = Buffer.from(response.data).toString('base64');
+    return {
+        inlineData: {
+            data: base64Data,
+            mimeType
+        }
+    };
+}
+
+function getGeminiClient() {
+    if (!GEMINI_API_KEY) {
+        return null;
+    }
+
+    if (!geminiClient) {
+        geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    }
+
+    return geminiClient;
+}
+
+function createSyntheticGeminiChat(client) {
+    const history = [];
+
+    return {
+        async sendMessage(payload = {}) {
+            const userParts = Array.isArray(payload.parts) && payload.parts.length > 0
+                ? payload.parts
+                : [{ text: payload.message || '' }];
+
+            history.push({ role: 'user', parts: userParts });
+
+            const response = await client.models.generateContent({
+                model: GEMINI_MODEL,
+                contents: [...history]
+            });
+
+            const candidateParts = response?.candidates?.[0]?.content?.parts || [];
+            history.push({ role: 'model', parts: candidateParts });
+
+            const text = candidateParts
+                .map((part) => part?.text || '')
+                .join('')
+                .trim()
+                || (typeof response?.text === 'function' ? response.text() : response?.text);
+
+            return { text };
+        }
+    };
+}
+
+function createGeminiChat(client) {
+    if (client?.chats?.create && typeof client.chats.create === 'function') {
+        try {
+            return client.chats.create({ model: GEMINI_MODEL });
+        } catch (error) {
+            console.warn(`[AI] Failed to create chat via client.chats.create: ${error.message}. Falling back to synthetic chat.`);
+        }
+    }
+
+    return createSyntheticGeminiChat(client);
+}
+
+function clearAiChatSession(chatKey) {
+    const existing = chatKey ? aiChatSessions.get(chatKey) : null;
+    if (existing?.timer) {
+        clearTimeout(existing.timer);
+    }
+    if (chatKey) {
+        aiChatSessions.delete(chatKey);
+    }
+}
+
+function touchAiChatSession(chatKey) {
+    const entry = chatKey ? aiChatSessions.get(chatKey) : null;
+    if (!entry) {
+        return null;
+    }
+
+    if (entry.timer) {
+        clearTimeout(entry.timer);
+    }
+
+    entry.timer = setTimeout(() => {
+        clearAiChatSession(chatKey);
+        console.log(`[AI] Chat session ${chatKey} expired after inactivity.`);
+    }, AI_CHAT_TIMEOUT_MS);
+
+    aiChatSessions.set(chatKey, entry);
+    return entry;
+}
+
+function createAiChatSession(chatKey, client) {
+    if (!chatKey || !client) {
+        return null;
+    }
+
+    clearAiChatSession(chatKey);
+
+    const session = {
+        chat: createGeminiChat(client),
+        replyMessageIds: new Set(),
+        timer: null
+    };
+
+    aiChatSessions.set(chatKey, session);
+    touchAiChatSession(chatKey);
+    return session;
+}
+
+function rememberAiReplyMessageId(chatKey, messageId) {
+    if (!chatKey || !messageId) {
+        return;
+    }
+
+    const entry = aiChatSessions.get(chatKey);
+    if (!entry) {
+        return;
+    }
+
+    entry.replyMessageIds.add(messageId);
+    touchAiChatSession(chatKey);
 }
 
 function getXlayerProvider() {
@@ -4395,6 +4557,7 @@ function parseRegisterPayload(rawText) {
 
 const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
+    ai: { command: '/ai', icon: '🤖', descKey: 'help_command_ai' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
     rmchat: { command: '/rmchat', icon: '🧹', descKey: 'help_command_rmchat' },
@@ -4404,6 +4567,7 @@ const HELP_COMMAND_DETAILS = {
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
     txhash: { command: '/txhash', icon: '🔎', descKey: 'help_command_txhash' },
+    contract: { command: '/contract', icon: '📜', descKey: 'help_command_contract' },
     token: { command: '/token', icon: '🧬', descKey: 'help_command_token' },
     unregister: { command: '/unregister', icon: '🗑️', descKey: 'help_command_unregister' },
     language: { command: '/language', icon: '🌐', descKey: 'help_command_language' },
@@ -4418,13 +4582,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🚀',
         titleKey: 'help_group_onboarding_title',
         descKey: 'help_group_onboarding_desc',
-        commands: ['start', 'help', 'language']
+        commands: ['start', 'help', 'language', 'ai']
     },
     xlayer_check: {
         icon: '🛰️',
         titleKey: 'help_group_xlayer_check_title',
         descKey: 'help_group_xlayer_check_desc',
-        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token']
+        commands: ['register', 'mywallet', 'unregister', 'rmchat', 'okxchains', 'okx402status', 'txhash', 'token', 'contract']
     },
     support: {
         icon: '🎁',
@@ -4766,17 +4930,6 @@ function buildUserMention(user) {
         parseMode: 'HTML'
     };
 }
-
-bot.on('message', (msg) => {
-    const chatId = msg?.chat?.id;
-    if (!chatId || !msg?.message_id) {
-        return;
-    }
-
-    if (!msg.from?.is_bot) {
-        rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
-    }
-});
 
 function buildAdminProfileLink(userId, displayName) {
     const safeName = escapeHtml(displayName || userId?.toString() || 'user');
@@ -10656,21 +10809,300 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     });
 }
 
-async function handleTokenCommand(msg, explicitAddress = null) {
-    const lang = await getLang(msg);
-    const text = msg.text || '';
-    const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
+  async function handleTokenCommand(msg, explicitAddress = null) {
+      const lang = await getLang(msg);
+      const text = msg.text || '';
+      const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
 
-    const contractAddress = explicitAddress || (match ? match[1] : null);
+      const contractAddress = explicitAddress || (match ? match[1] : null);
 
-    await startTokenFlow({
-        chatId: msg.chat.id,
-        userId: msg.from?.id,
-        lang,
-        sourceMessage: msg,
-        pendingAddress: contractAddress || null
-    });
-}
+      await startTokenFlow({
+          chatId: msg.chat.id,
+          userId: msg.from?.id,
+          lang,
+          sourceMessage: msg,
+          pendingAddress: contractAddress || null
+      });
+  }
+
+  async function handleContractCommand(msg, payload) {
+      const lang = await getLang(msg);
+      const rawPayload = (payload || '').trim();
+      const chatId = msg.chat?.id?.toString();
+      const userId = msg.from?.id?.toString();
+      const userKey = userId || chatId;
+
+      if (!rawPayload) {
+          if (userKey) {
+              const existing = contractWizardStates.get(userKey);
+              if (existing?.promptMessageId && existing.chatId === chatId) {
+                  try {
+                      await bot.deleteMessage(chatId, existing.promptMessageId);
+                  } catch (error) {
+                      // ignore cleanup errors
+                  }
+              }
+
+              const promptText = t(lang, 'contract_help_prompt');
+              const placeholder = t(lang, 'contract_help_placeholder');
+              const sent = await sendReply(msg, promptText, {
+                  reply_markup: {
+                      force_reply: true,
+                      input_field_placeholder: placeholder
+                  }
+              });
+
+              if (sent?.message_id) {
+                  contractWizardStates.set(userKey, { promptMessageId: sent.message_id, chatId, lang });
+              }
+              return;
+          }
+
+          await sendReply(msg, t(lang, 'contract_usage'), { reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const parts = rawPayload.split(/\s+/);
+      const contractAddress = normalizeAddress(parts[0]);
+
+      if (userKey) {
+          contractWizardStates.delete(userKey);
+      }
+
+      if (!contractAddress) {
+          await sendReply(msg, t(lang, 'contract_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const oklinkUrl = buildContractLookupUrl(contractAddress);
+      const addressLabel = formatCopyableValueHtml(contractAddress) || escapeHtml(contractAddress);
+      const linkLabel = `<a href="${oklinkUrl}">${escapeHtml(oklinkUrl)}</a>`;
+      const responseLines = [
+          t(lang, 'contract_result'),
+          t(lang, 'contract_result_address', { address: addressLabel }),
+          t(lang, 'contract_result_link', { link: linkLabel })
+      ];
+
+      await sendReply(msg, responseLines.join('\n'), {
+          parse_mode: 'HTML',
+          disable_web_page_preview: false,
+          reply_markup: buildCloseKeyboard(lang)
+      });
+  }
+
+  async function buildAiUserParts(msg, promptText) {
+      const photos = Array.isArray(msg.photo) ? msg.photo : [];
+      const hasPhoto = photos.length > 0;
+      const parts = [];
+
+      if (hasPhoto) {
+          const largestPhoto = photos[photos.length - 1];
+          const fileInfo = await bot.getFile(largestPhoto.file_id);
+          const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+          const mimeType = largestPhoto.mime_type || 'image/jpeg';
+          const imagePart = await urlToGenerativePart(fileUrl, mimeType);
+          parts.push(imagePart);
+      }
+
+      if (promptText) {
+          parts.push({ text: promptText });
+      }
+
+      return { parts, hasPhoto };
+  }
+
+  function buildAiPrompt(promptText) {
+      const trimmed = (promptText || '').trim();
+      if (!trimmed) {
+          return AI_RESPONSE_SYSTEM_PROMPT;
+      }
+
+      return `${AI_RESPONSE_SYSTEM_PROMPT}\n\n${trimmed}`;
+  }
+
+  function extractAiResponseText(response) {
+      const candidate = response?.candidates?.[0]?.content?.parts || [];
+      return candidate
+          .map((part) => part?.text || '')
+          .join('')
+          .trim()
+          || (typeof response?.text === 'function' ? response.text() : response?.text);
+  }
+
+  function isTelegramMessageTooLongError(error) {
+      const message = error?.message || '';
+      return /message is too long/i.test(message);
+  }
+
+  function isGeminiQuotaError(error) {
+      if (error?.code === 'ETELEGRAM') {
+          return false;
+      }
+
+      const status = error?.error?.status || error?.error?.code || error?.status;
+      const message = error?.error?.message || error?.message || '';
+      return status === 'RESOURCE_EXHAUSTED' || status === 429 || /quota|exhausted/i.test(message);
+  }
+
+  async function sendAiReplyChunks(msg, replyText, replyMarkup, chatKey) {
+      let chunkLimit = AI_MESSAGE_CHUNK_LENGTH;
+      let chunks = splitTelegramMessageText(replyText, chunkLimit);
+      const sentMessageIds = [];
+      let useReplyMarkup = true;
+
+      for (let i = 0; i < chunks.length; i += 1) {
+          const chunk = chunks[i];
+          if (!chunk || !chunk.trim()) {
+              continue;
+          }
+
+          const baseOptions = { parse_mode: 'Markdown', disable_web_page_preview: true };
+          const options = useReplyMarkup ? { ...baseOptions, reply_markup: replyMarkup } : baseOptions;
+
+          try {
+              const sent = await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
+              useReplyMarkup = false;
+              if (sent?.message_id) {
+                  sentMessageIds.push(sent.message_id);
+                  rememberAiReplyMessageId(chatKey, sent.message_id);
+              }
+          } catch (error) {
+              if (isTelegramMessageTooLongError(error)) {
+                  chunkLimit = Math.max(500, Math.floor(chunkLimit * 0.75));
+                  chunks = splitTelegramMessageText([chunk, ...chunks.slice(i + 1)].join('\n'), chunkLimit);
+                  i = -1;
+                  useReplyMarkup = !sentMessageIds.length;
+                  continue;
+              }
+              throw error;
+          }
+      }
+
+      return sentMessageIds;
+  }
+
+  async function sendAiChatMessage(session, parts, promptText) {
+      if (!session || !session.chat) {
+          throw new Error('AI session unavailable');
+      }
+
+      const hasParts = Array.isArray(parts) && parts.length > 0;
+      const payload = {
+          message: promptText,
+          parts: hasParts ? parts : undefined
+      };
+
+      if (typeof session.chat.sendMessage !== 'function') {
+          throw new Error('AI chat missing sendMessage');
+      }
+
+      return session.chat.sendMessage(payload);
+  }
+
+  async function handleAiCommand(msg) {
+      const lang = await getLang(msg);
+      const chatKey = msg.chat?.id ? msg.chat.id.toString() : null;
+      const textOrCaption = (msg.text || msg.caption || '').trim();
+      const promptMatch = textOrCaption.match(/^\/ai(?:@[\w_]+)?(?:\s+([\s\S]+))?$/i);
+      const userPrompt = promptMatch && promptMatch[1] ? promptMatch[1].trim() : '';
+      const photos = Array.isArray(msg.photo) ? msg.photo : [];
+      const hasPhoto = photos.length > 0;
+
+      if (!userPrompt && !hasPhoto) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const client = getGeminiClient();
+      if (!client) {
+          await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      const promptText = userPrompt || t(lang, 'ai_default_prompt');
+      const formattedPrompt = buildAiPrompt(promptText);
+      const { parts, hasPhoto: hasMedia } = await buildAiUserParts(msg, formattedPrompt);
+      const session = createAiChatSession(chatKey, client);
+
+      if (!session) {
+          await sendReply(msg, t(lang, 'ai_error'), { reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      try {
+          try {
+              await bot.sendChatAction(msg.chat.id, hasMedia ? 'upload_photo' : 'typing');
+          } catch (error) {
+              // ignore chat action errors
+          }
+
+          const response = await sendAiChatMessage(session, parts, formattedPrompt);
+          const aiResponse = extractAiResponseText(response);
+          const body = aiResponse || t(lang, 'ai_error');
+          const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
+
+          const replyMarkup = buildCloseKeyboard(lang);
+          await sendAiReplyChunks(msg, replyText, replyMarkup, chatKey);
+          touchAiChatSession(chatKey);
+      } catch (error) {
+          console.error(`[AI] Failed to generate content: ${error.message}`);
+          clearAiChatSession(chatKey);
+          const errorKey = isGeminiQuotaError(error) ? 'ai_quota_exhausted' : 'ai_error';
+          await sendReply(msg, t(lang, errorKey), { reply_markup: buildCloseKeyboard(lang) });
+      }
+  }
+
+  async function handleAiFollowUpMessage(msg, session) {
+      const chatKey = msg.chat?.id ? msg.chat.id.toString() : null;
+      const lang = await getLang(msg);
+
+      if (!chatKey || !session) {
+          await sendReply(msg, t(lang, 'ai_session_expired'), { reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+
+      const textOrCaption = (msg.text || msg.caption || '').trim();
+      const photos = Array.isArray(msg.photo) ? msg.photo : [];
+      const hasPhoto = photos.length > 0;
+
+      if (!textOrCaption && !hasPhoto) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+
+      if (/^\/ai(?:@[\w_]+)?$/i.test(textOrCaption)) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+
+      const promptText = textOrCaption || t(lang, 'ai_default_prompt');
+      const formattedPrompt = buildAiPrompt(promptText);
+      const { parts } = await buildAiUserParts(msg, formattedPrompt);
+
+      try {
+          try {
+              await bot.sendChatAction(msg.chat.id, hasPhoto ? 'upload_photo' : 'typing');
+          } catch (error) {
+              // ignore chat action errors
+          }
+
+          const response = await sendAiChatMessage(session, parts, formattedPrompt);
+          const aiResponse = extractAiResponseText(response);
+          const body = aiResponse || t(lang, 'ai_error');
+          const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
+          const replyMarkup = buildCloseKeyboard(lang);
+
+          await sendAiReplyChunks(msg, replyText, replyMarkup, chatKey);
+          touchAiChatSession(chatKey);
+          return true;
+      } catch (error) {
+          console.error(`[AI] Failed to continue chat: ${error.message}`);
+          clearAiChatSession(chatKey);
+          const errorKey = isGeminiQuotaError(error) ? 'ai_quota_exhausted' : 'ai_session_expired';
+          await sendReply(msg, t(lang, errorKey), { reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+  }
 
     async function handleRmchatCommand(msg) {
         const chatId = msg.chat.id.toString();
@@ -10887,6 +11319,32 @@ async function handleTokenCommand(msg, explicitAddress = null) {
         await startTokenFlow({ chatId: userId, userId, lang: dmLang });
         return null;
     }
+
+    async function startContractWizard(userId, lang) {
+        const userKey = userId.toString();
+        const dmLang = await resolveNotificationLanguage(userKey, lang);
+
+        const existing = contractWizardStates.get(userKey);
+        if (existing?.promptMessageId) {
+            try {
+                await bot.deleteMessage(userId, existing.promptMessageId);
+            } catch (error) {
+                // ignore cleanup errors
+            }
+        }
+
+        const promptText = t(dmLang, 'contract_help_prompt');
+        const placeholder = t(dmLang, 'contract_help_placeholder');
+        const message = await bot.sendMessage(userId, promptText, {
+            reply_markup: {
+                force_reply: true,
+                input_field_placeholder: placeholder
+            }
+        });
+
+        contractWizardStates.set(userKey, { promptMessageId: message.message_id, chatId: userKey, lang: dmLang });
+        return message;
+    }
     
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
@@ -10996,6 +11454,11 @@ async function handleTokenCommand(msg, explicitAddress = null) {
 
     bot.onText(/^\/token(?:@[\w_]+)?(?:\s+.+)?$/, async (msg) => {
         await handleTokenCommand(msg, null);
+    });
+
+    bot.onText(/^\/contract(?:@[\w_]+)?(?:\s+(.+))?$/, async (msg, match) => {
+        const payload = match[1];
+        await handleContractCommand(msg, payload);
     });
 
     function parseDurationText(value) {
@@ -11461,6 +11924,12 @@ async function handleTokenCommand(msg, explicitAddress = null) {
             await handleStartNoToken(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
+        ai: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            synthetic.text = '/ai';
+            await handleAiCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
         register: async (query, lang) => {
             try {
                 await startRegisterWizard(query.from.id, lang);
@@ -11509,6 +11978,19 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
                 }
                 console.error(`[Help] Failed to start txhash wizard for ${query.from.id}: ${error.message}`);
+                return { message: t(lang, 'help_action_failed'), showAlert: true };
+            }
+        },
+        contract: async (query, lang) => {
+            try {
+                await startContractWizard(query.from.id, lang);
+                return { message: t(lang, 'help_action_dm_sent') };
+            } catch (error) {
+                const statusCode = error?.response?.statusCode;
+                if (statusCode === 403) {
+                    return { message: t(lang, 'help_action_dm_blocked'), showAlert: true };
+                }
+                console.error(`[Help] Failed to start contract wizard for ${query.from.id}: ${error.message}`);
                 return { message: t(lang, 'help_action_failed'), showAlert: true };
             }
         },
@@ -13578,7 +14060,48 @@ async function handleTokenCommand(msg, explicitAddress = null) {
     });
 
     bot.on('message', async (msg) => {
+        const chatId = msg?.chat?.id;
+        if (!chatId || !msg?.message_id) {
+            return;
+        }
+
+        if (!msg.from?.is_bot) {
+            rememberRmchatMessage(rmchatUserMessages, chatId, msg.message_id);
+        }
+
         if (await handleGoalTextInput(msg)) {
+            return;
+        }
+
+        const textOrCaption = (msg.text || msg.caption || '').trim();
+        const chatKey = chatId.toString();
+        const aiSession = chatKey ? aiChatSessions.get(chatKey) : null;
+        const isReplyToBot = Boolean(
+            botId &&
+            msg.reply_to_message &&
+            msg.reply_to_message.from &&
+            msg.reply_to_message.from.id === botId
+        );
+        const repliedToAi = Boolean(isReplyToBot && aiSession?.replyMessageIds?.has(msg.reply_to_message.message_id));
+
+        if (repliedToAi) {
+            await handleAiFollowUpMessage(msg, aiSession);
+            return;
+        }
+
+        if (
+            isReplyToBot &&
+            msg.reply_to_message?.text &&
+            msg.reply_to_message.text.toLowerCase().includes('gemini') &&
+            !aiSession
+        ) {
+            const lang = await getLang(msg);
+            await sendReply(msg, t(lang, 'ai_session_expired'), { reply_markup: buildCloseKeyboard(lang) });
+            return;
+        }
+
+        if (/^\/ai(?:@[\w_]+)?(?:\s|$)/i.test(textOrCaption)) {
+            await handleAiCommand(msg);
             return;
         }
 
@@ -13720,6 +14243,64 @@ async function handleTokenCommand(msg, explicitAddress = null) {
                     console.error(`[TokenWizard] Failed to handle token for ${userId}: ${error.message}`);
                     await sendReply(msg, t(effectiveLang, 'token_error'), {
                         reply_markup: buildCloseKeyboard(effectiveLang, { backCallbackData: 'token_back' })
+                    });
+                }
+                return;
+            }
+
+            const contractState = contractWizardStates.get(userId);
+            if (
+                contractState &&
+                msg.chat?.id?.toString() === contractState.chatId &&
+                msg.reply_to_message?.message_id === contractState.promptMessageId
+            ) {
+                const rawAddress = (msg.text || '').trim();
+                const effectiveLang = contractState.lang || lang;
+
+                if (!rawAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                const contractAddress = normalizeAddress(rawAddress);
+                if (!contractAddress) {
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+                    return;
+                }
+
+                try {
+                    if (contractState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, contractState.promptMessageId);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
+
+                    const oklinkUrl = buildContractLookupUrl(contractAddress);
+                    const addressLabel = formatCopyableValueHtml(contractAddress) || escapeHtml(contractAddress);
+                    const linkLabel = `<a href="${oklinkUrl}">${escapeHtml(oklinkUrl)}</a>`;
+                    const responseLines = [
+                        t(effectiveLang, 'contract_result'),
+                        t(effectiveLang, 'contract_result_address', { address: addressLabel }),
+                        t(effectiveLang, 'contract_result_link', { link: linkLabel })
+                    ];
+
+                    await sendMessageRespectingThread(contractState.chatId, msg, responseLines.join('\n'), {
+                        parse_mode: 'HTML',
+                        disable_web_page_preview: false,
+                        reply_markup: buildCloseKeyboard(effectiveLang)
+                    });
+
+                    contractWizardStates.delete(userId);
+                } catch (error) {
+                    console.error(`[ContractWizard] Failed to respond for ${userId}: ${error.message}`);
+                    await sendMessageRespectingThread(contractState.chatId, msg, t(effectiveLang, 'contract_invalid'), {
+                        reply_markup: buildCloseKeyboard(effectiveLang)
                     });
                 }
                 return;
