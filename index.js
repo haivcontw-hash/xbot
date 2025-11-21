@@ -107,6 +107,14 @@ const OKX_BANMAO_TOKEN_URL =
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
 const GEMINI_MODEL = 'gemini-2.5-flash';
+const AI_IMAGE_MAX_BYTES = (() => {
+    const value = Number(process.env.AI_IMAGE_MAX_BYTES || 15 * 1024 * 1024);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15 * 1024 * 1024;
+})();
+const AI_IMAGE_DOWNLOAD_TIMEOUT_MS = (() => {
+    const value = Number(process.env.AI_IMAGE_DOWNLOAD_TIMEOUT_MS || 20000);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 20000;
+})();
 
 let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
@@ -762,8 +770,14 @@ function buildContractLookupUrl(contractAddress) {
     return `https://www.oklink.com/x-layer/${contractAddress}/contract`;
 }
 
-async function urlToGenerativePart(url, mimeType) {
-    const response = await axios.get(url, { responseType: 'arraybuffer' });
+async function urlToGenerativePart(url, mimeType, options = {}) {
+    const { timeoutMs = AI_IMAGE_DOWNLOAD_TIMEOUT_MS, maxBytes = AI_IMAGE_MAX_BYTES } = options;
+    const response = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: timeoutMs,
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes
+    });
     const base64Data = Buffer.from(response.data).toString('base64');
     return {
         inlineData: {
@@ -10782,19 +10796,33 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
       const parts = [];
       const promptText = userPrompt || t(lang, 'ai_default_prompt');
-
-      if (hasPhoto) {
-          const largestPhoto = photos[photos.length - 1];
-          const fileInfo = await bot.getFile(largestPhoto.file_id);
-          const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
-          const mimeType = largestPhoto.mime_type || 'image/jpeg';
-          const imagePart = await urlToGenerativePart(fileUrl, mimeType);
-          parts.push(imagePart);
-      }
-
-      parts.push({ text: promptText });
+      const maxInlineBytes = AI_IMAGE_MAX_BYTES;
+      const maxInlineMb = Math.max(1, Math.ceil(maxInlineBytes / (1024 * 1024)));
 
       try {
+          if (hasPhoto) {
+              const largestPhoto = photos[photos.length - 1];
+              const fileInfo = await bot.getFile(largestPhoto.file_id);
+              const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
+              const mimeType = largestPhoto.mime_type || 'image/jpeg';
+              const fileSize = Number(largestPhoto.file_size || fileInfo?.file_size || 0);
+
+              if (fileSize && fileSize > maxInlineBytes) {
+                  await sendReply(msg, t(lang, 'ai_image_too_large', { limitMb: maxInlineMb }), {
+                      reply_markup: buildCloseKeyboard(lang)
+                  });
+                  return;
+              }
+
+              const imagePart = await urlToGenerativePart(fileUrl, mimeType, {
+                  timeoutMs: AI_IMAGE_DOWNLOAD_TIMEOUT_MS,
+                  maxBytes: maxInlineBytes
+              });
+              parts.push(imagePart);
+          }
+
+          parts.push({ text: promptText });
+
           try {
               await bot.sendChatAction(msg.chat.id, hasPhoto ? 'upload_photo' : 'typing');
           } catch (error) {
@@ -10834,7 +10862,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           }
       } catch (error) {
           console.error(`[AI] Failed to generate content: ${error.message}`);
-          await sendReply(msg, t(lang, 'ai_error'), { reply_markup: buildCloseKeyboard(lang) });
+          const isQuotaError = error?.response?.status === 429;
+          const isTimeoutError = error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '');
+          const messageKey = isTimeoutError ? 'ai_image_download_timeout' : isQuotaError ? 'ai_quota_exhausted' : 'ai_error';
+          await sendReply(msg, t(lang, messageKey), { reply_markup: buildCloseKeyboard(lang) });
       }
   }
 

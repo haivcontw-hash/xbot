@@ -128,6 +128,8 @@
   "ai_default_prompt": "Hãy mô tả hoặc phân tích bức ảnh này.",
   "ai_response_title": "Gemini trả lời:",
   "ai_error": "Xin lỗi, có lỗi khi gọi Gemini. Vui lòng thử lại.",
+  "ai_image_too_large": "⚠️ Ảnh quá lớn để xử lý (tối đa {limitMb} MB). Vui lòng gửi ảnh nhỏ hơn.",
+  "ai_image_download_timeout": "⚠️ Tải ảnh quá lâu. Hãy thử lại với ảnh nhỏ hơn hoặc thử sau.",
   "ai_quota_exhausted": "Hạn mức Gemini đang tạm bị giới hạn, vui lòng thử lại sau ít phút.",
   "ai_session_expired": "Phiên chat AI đã hết hạn. Hãy bắt đầu lại với /ai.",
   "txhash_title": "🔎 Phân tích giao dịch",
