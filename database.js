@@ -2142,17 +2142,27 @@ async function upsertUserProfile(chatId, profile = {}) {
     const now = Math.floor(Date.now() / 1000);
     const fullName = (profile.fullName || profile.name || '') || [profile.first_name, profile.last_name].filter(Boolean).join(' ');
     const username = profile.username ? profile.username.toLowerCase() : null;
-
-    await dbRun(
-        `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(chatId) DO UPDATE SET
-            fullName = excluded.fullName,
-            username = excluded.username,
-            lastSeen = excluded.lastSeen,
-            firstSeen = COALESCE(users.firstSeen, excluded.firstSeen)`,
-        [chatId, '[]', 'auto', fullName || null, username, now, now]
-    );
+    const existing = await dbGet('SELECT firstSeen FROM users WHERE chatId = ?', [chatId]);
+    if (existing) {
+        await dbRun(
+            `UPDATE users
+             SET fullName = ?,
+                 username = ?,
+                 lastSeen = ?,
+                 firstSeen = COALESCE(firstSeen, ?),
+                 lang = COALESCE(lang, NULL),
+                 wallets = COALESCE(wallets, ?),
+                 lang_source = COALESCE(lang_source, ?)
+             WHERE chatId = ?`,
+            [fullName || null, username, now, existing.firstSeen || now, '[]', 'auto', chatId]
+        );
+    } else {
+        await dbRun(
+            `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?)` ,
+            [chatId, '[]', 'auto', fullName || null, username, now, now]
+        );
+    }
 }
 
 async function listUsersDetailed() {
