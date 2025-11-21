@@ -11765,22 +11765,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           return;
       }
 
-      if (userId) {
-          const userLimit = await db.getCommandLimit('ai', userId);
-          const globalLimit = await db.getCommandLimit('ai', null);
-          const effectiveLimit = userLimit ?? globalLimit;
+      const userLimit = userId ? await db.getCommandLimit('ai', userId) : null;
+      const globalLimit = userId ? await db.getCommandLimit('ai', null) : null;
+      const effectiveLimit = userLimit ?? globalLimit;
 
-          if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
-              const currentUsage = await db.getCommandUsageCount('ai', userId, usageDate);
-              if (currentUsage >= effectiveLimit) {
-                  await sendReply(msg, t(lang, 'ai_limit_reached', { limit: effectiveLimit }), {
-                      reply_markup: buildCloseKeyboard(lang)
-                  });
-                  return;
-              }
-
-              await db.incrementCommandUsage('ai', userId, usageDate);
+      if (userId && Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+          const currentUsage = await db.getCommandUsageCount('ai', userId, usageDate);
+          if (currentUsage >= effectiveLimit) {
+              await sendReply(msg, t(lang, 'ai_limit_reached', { limit: effectiveLimit }), {
+                  reply_markup: buildCloseKeyboard(lang)
+              });
+              return;
           }
+      }
+
+      if (userId) {
+          await db.incrementCommandUsage('ai', userId, usageDate);
       }
 
       const parts = [];
