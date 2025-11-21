@@ -5188,11 +5188,7 @@ async function purgeChatHistory(chatId, ownerLang) {
     }
 }
 
-async function clearChatHistoriesForTarget(target, ownerLang) {
-    const chatIds = target?.scope === 'all'
-        ? await db.listUserChatIds()
-        : [target?.targetId].filter(Boolean);
-
+async function clearChatHistoriesForIds(chatIds, ownerLang) {
     const uniqueIds = Array.from(new Set((chatIds || []).map((id) => id?.toString()).filter(Boolean)));
     let deletedMessages = 0;
     let attemptedChats = 0;
@@ -5206,6 +5202,14 @@ async function clearChatHistoriesForTarget(target, ownerLang) {
     }
 
     return { attemptedChats, deletedMessages };
+}
+
+async function clearChatHistoriesForTarget(target, ownerLang, presetChatIds = null) {
+    const chatIds = presetChatIds || (target?.scope === 'all'
+        ? await db.listUserChatIds()
+        : [target?.targetId].filter(Boolean));
+
+    return clearChatHistoriesForIds(chatIds, ownerLang);
 }
 
 function buildUserInfoLine(user) {
@@ -5524,8 +5528,11 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
 
             const target = state.target || { scope: 'all', targetId: null };
             const targetId = target.scope === 'user' ? target.targetId : null;
+            const chatIdsForCleanup = target.scope === 'all'
+                ? await db.listUserChatIds()
+                : [targetId].filter(Boolean);
             const changes = await db.resetUserData(target.scope === 'all' ? null : targetId);
-            const cleanup = await clearChatHistoriesForTarget(target, lang);
+            const cleanup = await clearChatHistoriesForTarget(target, lang, chatIdsForCleanup);
             clearOwnerCaches(target);
 
             await sendReply(msg, t(lang, 'owner_reset_done', {
