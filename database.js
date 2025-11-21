@@ -1117,15 +1117,39 @@ async function init() {
             PRIMARY KEY (groupChatId, userId)
         );
     `);
-    await dbRun(`
-        CREATE TABLE IF NOT EXISTS command_limits (
-            command TEXT NOT NULL,
-            targetId TEXT,
-            limitValue INTEGER NOT NULL,
-            updatedAt INTEGER NOT NULL,
-            PRIMARY KEY (command, targetId)
-        );
-    `);
+    const existingCommandLimits = await dbAll('PRAGMA table_info(command_limits);');
+    if (existingCommandLimits && existingCommandLimits.length > 0) {
+        const hasLimitColumn = existingCommandLimits.some((c) => c.name === 'limit');
+        const hasLimitValueColumn = existingCommandLimits.some((c) => c.name === 'limitValue');
+
+        if (hasLimitColumn && !hasLimitValueColumn) {
+            await dbRun('ALTER TABLE command_limits RENAME TO command_limits_old');
+            await dbRun(`
+                CREATE TABLE command_limits (
+                    command TEXT NOT NULL,
+                    targetId TEXT,
+                    limitValue INTEGER NOT NULL,
+                    updatedAt INTEGER NOT NULL,
+                    PRIMARY KEY (command, targetId)
+                );
+            `);
+            await dbRun(`
+                INSERT INTO command_limits (command, targetId, limitValue, updatedAt)
+                SELECT command, targetId, "limit", updatedAt FROM command_limits_old;
+            `);
+            await dbRun('DROP TABLE command_limits_old');
+        }
+    } else {
+        await dbRun(`
+            CREATE TABLE IF NOT EXISTS command_limits (
+                command TEXT NOT NULL,
+                targetId TEXT,
+                limitValue INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL,
+                PRIMARY KEY (command, targetId)
+            );
+        `);
+    }
     await dbRun(`
         CREATE TABLE IF NOT EXISTS co_owners (
             userId TEXT PRIMARY KEY,
