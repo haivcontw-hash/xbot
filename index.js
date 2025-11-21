@@ -5151,13 +5151,16 @@ async function purgeChatHistory(chatId, ownerLang) {
         });
 
         const latestId = marker?.message_id || 0;
-        const startId = Math.max(1, latestId - 4000);
+        const maxSweep = 60000;
+        const startId = Math.max(1, latestId - maxSweep + 1);
         let deleted = 0;
+        let consecutiveSkips = 0;
 
         for (let messageId = latestId; messageId >= startId; messageId--) {
             try {
                 await bot.deleteMessage(normalizedChatId, messageId);
                 deleted++;
+                consecutiveSkips = 0;
             } catch (error) {
                 const description = error?.response?.body?.description || error?.message || '';
                 if (
@@ -5165,6 +5168,10 @@ async function purgeChatHistory(chatId, ownerLang) {
                     description.includes("message can't be deleted") ||
                     description.includes('MESSAGE_ID_INVALID')
                 ) {
+                    consecutiveSkips++;
+                    if (consecutiveSkips >= 250) {
+                        break;
+                    }
                     continue;
                 }
             }
