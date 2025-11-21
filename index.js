@@ -10820,9 +10820,18 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           const body = aiResponse || t(lang, 'ai_error');
           const replyText = `${t(lang, 'ai_response_title')}\n\n${body}`;
 
-          await sendMessageRespectingThread(msg.chat.id, msg, replyText, {
-              reply_markup: buildCloseKeyboard(lang)
-          });
+          const replyMarkup = buildCloseKeyboard(lang);
+          const chunks = splitTelegramMessageText(replyText);
+
+          for (let i = 0; i < chunks.length; i += 1) {
+              const chunk = chunks[i];
+              if (!chunk || !chunk.trim()) {
+                  continue;
+              }
+
+              const options = i === 0 ? { reply_markup: replyMarkup } : {};
+              await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
+          }
       } catch (error) {
           console.error(`[AI] Failed to generate content: ${error.message}`);
           await sendReply(msg, t(lang, 'ai_error'), { reply_markup: buildCloseKeyboard(lang) });
