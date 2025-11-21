@@ -10935,8 +10935,12 @@ async function handleTxhashCommand(msg, explicitHash = null) {
   }
 
   function isGeminiQuotaError(error) {
-      const status = error?.error?.status || error?.status || error?.code;
-      const message = error?.message || '';
+      if (error?.code === 'ETELEGRAM') {
+          return false;
+      }
+
+      const status = error?.error?.status || error?.error?.code || error?.status;
+      const message = error?.error?.message || error?.message || '';
       return status === 'RESOURCE_EXHAUSTED' || status === 429 || /quota|exhausted/i.test(message);
   }
 
