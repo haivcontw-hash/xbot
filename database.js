@@ -2151,35 +2151,24 @@ async function upsertUserProfile(chatId, profile = {}) {
     const username = profile.username ? profile.username.toLowerCase() : null;
     const lang = normalizeLanguageCode(profile.lang) || null;
     const langSource = profile.lang_source || profile.langSource || 'auto';
-
-    const existing = await dbGet('SELECT chatId, lang, wallets, lang_source, fullName, username, firstSeen FROM users WHERE chatId = ?', [chatId]);
-    const persistedWallets = existing?.wallets ?? '[]';
-    const firstSeen = existing?.firstSeen || now;
-
-    if (existing) {
-        const result = await dbRun(
-            `UPDATE users SET
-                fullName = COALESCE(?, fullName),
-                username = COALESCE(?, username),
-                lastSeen = ?,
-                lang = COALESCE(lang, ?),
-                wallets = COALESCE(wallets, ?),
-                lang_source = COALESCE(lang_source, ?),
-                firstSeen = COALESCE(firstSeen, ?)
-             WHERE chatId = ?`,
-            [fullName || null, username, now, lang, persistedWallets, langSource, firstSeen, chatId]
-        );
-
-        if (result?.changes > 0) {
-            return;
-        }
-    }
+    const firstSeen = profile.firstSeen || now;
+    const wallets =
+        profile.wallets && typeof profile.wallets !== 'string'
+            ? JSON.stringify(profile.wallets)
+            : profile.wallets || '[]';
 
     await dbRun(
-        `INSERT OR REPLACE INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ,
-        [chatId, lang, persistedWallets, langSource, fullName || null, username, firstSeen, now]
+        `INSERT INTO users (chatId, lang, wallets, lang_source, fullName, username, firstSeen, lastSeen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chatId) DO UPDATE SET
+            fullName = COALESCE(excluded.fullName, users.fullName),
+            username = COALESCE(excluded.username, users.username),
+            lang = COALESCE(users.lang, excluded.lang),
+            wallets = COALESCE(users.wallets, excluded.wallets),
+            lang_source = COALESCE(excluded.lang_source, users.lang_source),
+            firstSeen = COALESCE(users.firstSeen, excluded.firstSeen),
+            lastSeen = excluded.lastSeen`,
+        [chatId, lang, wallets, langSource, fullName || null, username, firstSeen, now]
     );
 }
 
