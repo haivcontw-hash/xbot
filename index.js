@@ -11008,11 +11008,6 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const photos = Array.isArray(msg.photo) ? msg.photo : [];
       const hasPhoto = photos.length > 0;
 
-      if (!userPrompt && !hasPhoto) {
-          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
-          return;
-      }
-
       const client = getGeminiClient();
       if (!client) {
           await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
@@ -11066,11 +11061,6 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const hasPhoto = photos.length > 0;
 
       if (!textOrCaption && !hasPhoto) {
-          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
-          return true;
-      }
-
-      if (/^\/ai(?:@[\w_]+)?$/i.test(textOrCaption)) {
           await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
           return true;
       }
