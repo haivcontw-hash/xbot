@@ -128,6 +128,7 @@
   "ai_default_prompt": "Jelaskan atau analisis gambar ini.",
   "ai_response_title": "Jawaban Gemini:",
   "ai_error": "Maaf, terjadi kesalahan saat menghubungi Gemini. Coba lagi.",
+  "ai_quota_exhausted": "Kuota Gemini sedang dibatasi. Silakan coba lagi sebentar lagi.",
   "ai_session_expired": "Sesi AI telah kedaluwarsa. Mulai baru dengan /ai."
   "txhash_title": "🔎 Rincian transaksi",
   "txhash_hash_line": "Hash: {hash}",

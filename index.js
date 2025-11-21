@@ -253,6 +253,7 @@ const TELEGRAM_MESSAGE_SAFE_LENGTH = (() => {
     const value = Number(process.env.TELEGRAM_MESSAGE_SAFE_LENGTH || 3900);
     return Number.isFinite(value) && value > 100 ? Math.min(Math.floor(value), 4050) : 3900;
 })();
+const AI_MESSAGE_CHUNK_LENGTH = Math.max(500, Math.min(3200, TELEGRAM_MESSAGE_SAFE_LENGTH - 600));
 const WALLET_TOKEN_HOLDER_LIMIT = 20;
 const WALLET_TOKEN_TRADE_LIMIT = 1;
 const WALLET_TOKEN_TX_HISTORY_LIMIT = 20;
@@ -10928,9 +10929,22 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           || (typeof response?.text === 'function' ? response.text() : response?.text);
   }
 
+  function isTelegramMessageTooLongError(error) {
+      const message = error?.message || '';
+      return /message is too long/i.test(message);
+  }
+
+  function isGeminiQuotaError(error) {
+      const status = error?.error?.status || error?.status || error?.code;
+      const message = error?.message || '';
+      return status === 'RESOURCE_EXHAUSTED' || status === 429 || /quota|exhausted/i.test(message);
+  }
+
   async function sendAiReplyChunks(msg, replyText, replyMarkup, chatKey) {
-      const chunks = splitTelegramMessageText(replyText);
+      let chunkLimit = AI_MESSAGE_CHUNK_LENGTH;
+      let chunks = splitTelegramMessageText(replyText, chunkLimit);
       const sentMessageIds = [];
+      let useReplyMarkup = true;
 
       for (let i = 0; i < chunks.length; i += 1) {
           const chunk = chunks[i];
@@ -10939,11 +10953,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
           }
 
           const baseOptions = { parse_mode: 'Markdown', disable_web_page_preview: true };
-          const options = i === 0 ? { ...baseOptions, reply_markup: replyMarkup } : baseOptions;
-          const sent = await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
-          if (sent?.message_id) {
-              sentMessageIds.push(sent.message_id);
-              rememberAiReplyMessageId(chatKey, sent.message_id);
+          const options = useReplyMarkup ? { ...baseOptions, reply_markup: replyMarkup } : baseOptions;
+
+          try {
+              const sent = await sendMessageRespectingThread(msg.chat.id, msg, chunk, options);
+              useReplyMarkup = false;
+              if (sent?.message_id) {
+                  sentMessageIds.push(sent.message_id);
+                  rememberAiReplyMessageId(chatKey, sent.message_id);
+              }
+          } catch (error) {
+              if (isTelegramMessageTooLongError(error)) {
+                  chunkLimit = Math.max(500, Math.floor(chunkLimit * 0.75));
+                  chunks = splitTelegramMessageText([chunk, ...chunks.slice(i + 1)].join('\n'), chunkLimit);
+                  i = -1;
+                  useReplyMarkup = !sentMessageIds.length;
+                  continue;
+              }
+              throw error;
           }
       }
 
@@ -11016,7 +11043,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       } catch (error) {
           console.error(`[AI] Failed to generate content: ${error.message}`);
           clearAiChatSession(chatKey);
-          await sendReply(msg, t(lang, 'ai_error'), { reply_markup: buildCloseKeyboard(lang) });
+          const errorKey = isGeminiQuotaError(error) ? 'ai_quota_exhausted' : 'ai_error';
+          await sendReply(msg, t(lang, errorKey), { reply_markup: buildCloseKeyboard(lang) });
       }
   }
 
@@ -11034,6 +11062,11 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       const hasPhoto = photos.length > 0;
 
       if (!textOrCaption && !hasPhoto) {
+          await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return true;
+      }
+
+      if (/^\/ai(?:@[\w_]+)?$/i.test(textOrCaption)) {
           await sendReply(msg, t(lang, 'ai_usage'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
           return true;
       }
@@ -11061,7 +11094,8 @@ async function handleTxhashCommand(msg, explicitHash = null) {
       } catch (error) {
           console.error(`[AI] Failed to continue chat: ${error.message}`);
           clearAiChatSession(chatKey);
-          await sendReply(msg, t(lang, 'ai_session_expired'), { reply_markup: buildCloseKeyboard(lang) });
+          const errorKey = isGeminiQuotaError(error) ? 'ai_quota_exhausted' : 'ai_session_expired';
+          await sendReply(msg, t(lang, errorKey), { reply_markup: buildCloseKeyboard(lang) });
           return true;
       }
   }

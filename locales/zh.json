@@ -126,6 +126,7 @@
   "ai_default_prompt": "请描述或分析这张图片。",
   "ai_response_title": "Gemini 回复：",
   "ai_error": "抱歉，调用 Gemini 时出错，请稍后再试。",
+  "ai_quota_exhausted": "Gemini 配额暂时受限，请稍后再试。",
   "ai_session_expired": "AI 对话已过期，请使用 /ai 重新开始。"
   "txhash_title": "🔎 交易详情",
   "txhash_hash_line": "哈希：{hash}",
