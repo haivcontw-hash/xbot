@@ -5075,6 +5075,10 @@ function buildOwnerMenuKeyboard(lang) {
             { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
             { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
         ],
+        [
+            { text: t(lang, 'owner_menu_group_stats'), callback_data: 'owner_menu|group_stats' },
+            { text: t(lang, 'owner_menu_run_command'), callback_data: 'owner_menu|run_command' }
+        ],
         [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
     ];
 
@@ -5238,6 +5242,36 @@ async function clearChatHistoriesForTarget(target, ownerLang, presetChatIds = nu
         : [target?.targetId].filter(Boolean));
 
     return clearChatHistoriesForIds(chatIds, ownerLang);
+}
+
+async function ensureGroupProfile(chat = {}) {
+    if (!chat.id || !['group', 'supergroup'].includes(chat.type)) {
+        return;
+    }
+
+    await db.upsertGroupProfile({
+        chatId: chat.id,
+        title: chat.title || null,
+        username: chat.username || null,
+        type: chat.type
+    });
+}
+
+function formatGroupAddress(profile = {}) {
+    if (profile.username) {
+        return `https://t.me/${profile.username}`;
+    }
+    return profile.chatId || 'N/A';
+}
+
+async function getGroupMemberCountSafe(chatId) {
+    try {
+        const count = await bot.getChatMemberCount(chatId);
+        return Number.isFinite(Number(count)) ? Number(count) : null;
+    } catch (error) {
+        console.warn(`[Owner] Failed to fetch member count for ${chatId}: ${error.message}`);
+        return null;
+    }
 }
 
 function buildUserInfoLine(user) {
@@ -5576,6 +5610,227 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
         }
     }
 
+    if (state.mode === 'group_stats') {
+        const trimmed = content.trim();
+        const [command, ...rest] = trimmed.split(/\s+/);
+        const action = (command || '').toLowerCase();
+
+        if (!action) {
+            await sendReply(msg, t(lang, 'owner_group_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (action === 'list') {
+            const groups = await db.listGroupProfiles();
+            if (!groups || groups.length === 0) {
+                await sendReply(msg, t(lang, 'owner_group_none'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            const lines = [];
+            for (const profile of groups) {
+                // eslint-disable-next-line no-await-in-loop
+                const memberCount = await getGroupMemberCountSafe(profile.chatId);
+                const countText = memberCount === null ? t(lang, 'owner_group_unknown_count') : memberCount;
+                lines.push(t(lang, 'owner_group_line', {
+                    title: profile.title || profile.chatId,
+                    id: profile.chatId,
+                    members: countText,
+                    address: formatGroupAddress(profile)
+                }));
+            }
+
+            await sendChunkedHtmlMessages(msg.chat.id, [t(lang, 'owner_group_list_header'), ...lines].join('\n'), {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true
+            });
+            return true;
+        }
+
+        if (action === 'info') {
+            const targetChatId = rest[0];
+            if (!targetChatId) {
+                await sendReply(msg, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            const groups = await db.listGroupProfiles();
+            const profile = groups.find((item) => item.chatId === targetChatId || item.chatId === targetChatId.toString());
+            const memberCount = await getGroupMemberCountSafe(targetChatId);
+            const address = formatGroupAddress(profile || { chatId: targetChatId });
+            const countText = memberCount === null ? t(lang, 'owner_group_unknown_count') : memberCount;
+
+            await sendReply(msg, t(lang, 'owner_group_info', {
+                title: profile?.title || targetChatId,
+                id: targetChatId,
+                address,
+                members: countText
+            }), { reply_markup: buildCloseKeyboard(lang), parse_mode: 'HTML', disable_web_page_preview: true });
+            return true;
+        }
+
+        if (action === 'broadcast') {
+            const payload = trimmed.slice(command.length).trim();
+            if (!payload) {
+                await sendReply(msg, t(lang, 'owner_broadcast_empty'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            const groups = await db.listGroupProfiles();
+            if (!groups || groups.length === 0) {
+                await sendReply(msg, t(lang, 'owner_group_none'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            let success = 0;
+            let failed = 0;
+            for (const profile of groups) {
+                // eslint-disable-next-line no-await-in-loop
+                try {
+                    await bot.sendMessage(profile.chatId, payload, { disable_web_page_preview: true });
+                    success += 1;
+                } catch (error) {
+                    failed += 1;
+                    console.error(`[Owner] Failed to broadcast to group ${profile.chatId}: ${error.message}`);
+                }
+            }
+
+            await sendReply(msg, t(lang, 'owner_group_broadcast_result', { success, failed }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return true;
+        }
+
+        if (action === 'remove') {
+            const targetChatId = rest[0];
+            if (!targetChatId) {
+                await sendReply(msg, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            try {
+                await bot.leaveChat(targetChatId);
+            } catch (error) {
+                console.warn(`[Owner] Failed to leave group ${targetChatId}: ${error.message}`);
+            }
+
+            await db.removeGroupProfile(targetChatId);
+            await db.wipeChatFootprint(targetChatId);
+
+            await sendReply(msg, t(lang, 'owner_group_removed', { id: targetChatId }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return true;
+        }
+
+        if (action === 'kick') {
+            const targetChatId = rest[0];
+            const userToken = rest[1];
+            if (!targetChatId || !userToken) {
+                await sendReply(msg, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            const lookup = userToken.replace(/^@/, '');
+            const resolved = await db.findUserByIdOrUsername(lookup);
+            const targetUserId = resolved?.chatId?.toString() || userToken.match(/-?\d+/)?.[0];
+
+            if (!targetUserId) {
+                await sendReply(msg, t(lang, 'owner_group_invalid_user'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            try {
+                await bot.banChatMember(targetChatId, Number(targetUserId));
+                try {
+                    await bot.unbanChatMember(targetChatId, Number(targetUserId), { only_if_banned: true });
+                } catch (error) {
+                    console.warn(`[Owner] Unban after kick failed for ${targetUserId} in ${targetChatId}: ${error.message}`);
+                }
+                await sendReply(msg, t(lang, 'owner_group_kick_done', { user: targetUserId, id: targetChatId }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+            } catch (error) {
+                console.error(`[Owner] Failed to kick ${targetUserId} from ${targetChatId}: ${error.message}`);
+                await sendReply(msg, t(lang, 'owner_group_kick_failed'), { reply_markup: buildCloseKeyboard(lang) });
+            }
+            return true;
+        }
+
+        await sendReply(msg, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
+        return true;
+    }
+
+    if (state.mode === 'run_command') {
+        if (state.step === 'user') {
+            const lookup = content.replace(/^@/, '');
+            const resolved = await db.findUserByIdOrUsername(lookup);
+            const targetId = resolved?.chatId?.toString() || content.match(/-?\d+/)?.[0];
+
+            if (!targetId) {
+                await sendReply(msg, t(lang, 'owner_run_invalid_user'), { reply_markup: buildCloseKeyboard(lang) });
+                return true;
+            }
+
+            ownerActionStates.set(userId, {
+                ...state,
+                step: 'group',
+                targetUser: {
+                    id: targetId,
+                    username: resolved?.username || lookup,
+                    fullName: resolved?.fullName || null
+                }
+            });
+            await sendReply(msg, t(lang, 'owner_run_group_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'group') {
+            const chatToken = content.trim();
+            const targetChatId = chatToken ? chatToken.match(/-?\d+/)?.[0] : null;
+            ownerActionStates.set(userId, { ...state, step: 'command', targetChatId: targetChatId || null });
+            await sendReply(msg, t(lang, 'owner_run_command_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'command') {
+            const commandText = content.startsWith('/') ? content : `/${content}`;
+            const executionChatId = state.targetChatId || msg.chat.id.toString();
+            const synthetic = {
+                message_id: Date.now(),
+                from: {
+                    id: state.targetUser?.id,
+                    is_bot: false,
+                    username: state.targetUser?.username || undefined,
+                    first_name: state.targetUser?.fullName || state.targetUser?.username || 'User'
+                },
+                chat: {
+                    id: executionChatId,
+                    type: state.targetChatId ? 'group' : 'private',
+                    title: state.targetChatId ? 'Owner delegation' : 'Owner console'
+                },
+                date: Math.floor(Date.now() / 1000),
+                text: commandText,
+                ownerRedirectId: msg.chat.id.toString()
+            };
+
+            try {
+                await bot.processUpdate({ update_id: Date.now(), message: synthetic });
+                await sendReply(msg, t(lang, 'owner_run_done', {
+                    command: commandText,
+                    user: state.targetUser?.id,
+                    chat: state.targetChatId || t(lang, 'owner_run_private_chat')
+                }), { reply_markup: buildCloseKeyboard(lang) });
+            } catch (error) {
+                console.error(`[Owner] Failed to run delegated command: ${error.message}`);
+                await sendReply(msg, t(lang, 'owner_run_failed'), { reply_markup: buildCloseKeyboard(lang) });
+            }
+
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
     if (state.mode === 'user_check') {
         const lowered = content.toLowerCase();
         const revokeIntent = lowered.startsWith('revoke ') || lowered.startsWith('remove ');
@@ -5767,7 +6022,8 @@ function sendReply(sourceMessage, text, options = {}) {
         throw new Error('sendReply requires a message with chat information');
     }
 
-    return sendMessageRespectingThread(sourceMessage.chat.id, sourceMessage, text, options);
+    const targetChatId = sourceMessage.ownerRedirectId || sourceMessage.chat.id;
+    return sendMessageRespectingThread(targetChatId, sourceMessage, text, options);
 }
 
 function buildUserMention(user) {
@@ -13030,6 +13286,24 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     return;
                 }
 
+                if (action === 'group_stats') {
+                    ownerActionStates.set(ownerId, { mode: 'group_stats', step: 'input', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_group_prompt_short') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_group_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'run_command') {
+                    ownerActionStates.set(ownerId, { mode: 'run_command', step: 'user', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_run_user_prompt') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_run_user_prompt'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
                 if (action === 'reset_id') {
                     ownerActionStates.set(ownerId, { mode: 'reset_id', step: 'target', chatId: targetChatId });
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_reset_prompt') });
@@ -15062,6 +15336,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         const textOrCaption = (msg.text || msg.caption || '').trim();
         const userId = msg.from?.id?.toString();
         const chatType = msg.chat?.type || '';
+
+        if (['group', 'supergroup'].includes(chatType)) {
+            await ensureGroupProfile(msg.chat);
+        }
 
         if (userId) {
             await db.upsertUserProfile(userId, {
