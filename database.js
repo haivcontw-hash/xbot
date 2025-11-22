@@ -1109,6 +1109,16 @@ async function init() {
         }
     }
     await dbRun(`
+        CREATE TABLE IF NOT EXISTS group_profiles (
+            chatId TEXT PRIMARY KEY,
+            title TEXT,
+            username TEXT,
+            type TEXT,
+            firstSeen INTEGER,
+            lastSeen INTEGER
+        );
+    `);
+    await dbRun(`
         CREATE TABLE IF NOT EXISTS group_member_languages (
             groupChatId TEXT NOT NULL,
             userId TEXT NOT NULL,
@@ -1895,7 +1905,8 @@ async function wipeChatFootprint(chatId) {
         { table: 'co_owners', column: 'userId' },
         { table: 'banned_users', column: 'userId' },
         { table: 'command_limits', column: 'targetId' },
-        { table: 'command_usage_logs', column: 'userId' }
+        { table: 'command_usage_logs', column: 'userId' },
+        { table: 'group_profiles', column: 'chatId' }
     ];
 
     let totalChanges = 0;
@@ -1934,7 +1945,8 @@ async function resetUserData(targetId = null) {
         { table: 'co_owners', column: 'userId' },
         { table: 'banned_users', column: 'userId' },
         { table: 'command_limits', column: 'targetId' },
-        { table: 'command_usage_logs', column: 'userId' }
+        { table: 'command_usage_logs', column: 'userId' },
+        { table: 'group_profiles', column: 'chatId' }
     ];
 
     let totalChanges = 0;
@@ -2101,6 +2113,44 @@ async function getGroupMemberLanguages(groupChatId) {
         userId: row.userId,
         lang: normalizeLanguageCode(row.lang)
     }));
+}
+
+async function upsertGroupProfile(profile = {}) {
+    if (!profile.chatId) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const normalizedChatId = profile.chatId.toString();
+    const title = profile.title || null;
+    const username = profile.username ? profile.username.toLowerCase() : null;
+    const type = profile.type || null;
+
+    const existing = await dbGet('SELECT firstSeen FROM group_profiles WHERE chatId = ?', [normalizedChatId]);
+    const firstSeen = existing?.firstSeen || now;
+
+    await dbRun(
+        `INSERT INTO group_profiles (chatId, title, username, type, firstSeen, lastSeen)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chatId) DO UPDATE SET
+            title = excluded.title,
+            username = excluded.username,
+            type = excluded.type,
+            firstSeen = COALESCE(group_profiles.firstSeen, excluded.firstSeen),
+            lastSeen = excluded.lastSeen`,
+        [normalizedChatId, title, username, type, firstSeen, now]
+    );
+}
+
+async function listGroupProfiles() {
+    return dbAll('SELECT chatId, title, username, type, firstSeen, lastSeen FROM group_profiles ORDER BY lastSeen DESC');
+}
+
+async function removeGroupProfile(chatId) {
+    if (!chatId) {
+        return;
+    }
+    await dbRun('DELETE FROM group_profiles WHERE chatId = ?', [chatId.toString()]);
 }
 
 async function setGroupMemberLanguage(groupChatId, userId, lang) {
@@ -2467,6 +2517,9 @@ module.exports = {
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
     updateGroupSubscriptionTopic,
+    upsertGroupProfile,
+    listGroupProfiles,
+    removeGroupProfile,
     listUserChatIds,
     upsertUserProfile,
     listUsersDetailed,
