@@ -5096,6 +5096,41 @@ function filterGroupProfiles(profiles = []) {
     });
 }
 
+function isGroupRevokedError(error) {
+    const statusCode = error?.response?.statusCode;
+    const description = error?.response?.body?.description || error?.message || '';
+
+    if (statusCode === 403 || statusCode === 400) {
+        return true;
+    }
+
+    return /kicked|blocked|not found|chat not found|forbidden|not a member|user not found/i.test(description);
+}
+
+async function cleanupGroupProfile(chatId) {
+    if (!chatId) {
+        return;
+    }
+
+    try {
+        await db.removeGroupProfile(chatId);
+    } catch (error) {
+        console.warn(`[Owner] Failed to purge group profile ${chatId}: ${error.message}`);
+    }
+
+    try {
+        await db.wipeChatFootprint(chatId);
+    } catch (error) {
+        console.warn(`[Owner] Failed to wipe group footprint ${chatId}: ${error.message}`);
+    }
+}
+
+async function loadActiveGroupProfiles() {
+    const groups = filterGroupProfiles(await db.listGroupProfiles());
+    const hydrated = filterGroupProfiles(await hydrateGroupProfiles(groups));
+    return hydrated;
+}
+
 function buildOwnerGroupDashboardKeyboard(lang, groups = []) {
     const inline_keyboard = [];
 
@@ -5328,7 +5363,7 @@ async function resolveOwnerGroupTarget(chatToken) {
 
     const tokenId = trimmed.match(/-?\d+/)?.[0] || null;
     const username = trimmed.startsWith('@') ? trimmed.slice(1).toLowerCase() : trimmed.toLowerCase();
-    const groups = filterGroupProfiles(await db.listGroupProfiles());
+    const groups = await loadActiveGroupProfiles();
 
     let profile = null;
 
@@ -5368,11 +5403,8 @@ async function resolveGroupMetadata(chatId, fallbackProfile = null) {
         };
     } catch (error) {
         console.warn(`[Owner] Unable to resolve group metadata for ${normalizedId}: ${error.message}`);
-        const isRevoked = error?.response?.statusCode === 403
-            || error?.response?.statusCode === 400
-            || /kicked|blocked|not found|chat not found|forbidden/i.test(error?.response?.body?.description || error?.message || '');
-        if (isRevoked) {
-            await db.removeGroupProfile(normalizedId);
+        if (isGroupRevokedError(error)) {
+            await cleanupGroupProfile(normalizedId);
             return { chatId: normalizedId, removed: true };
         }
     }
@@ -5431,13 +5463,15 @@ async function getGroupMemberCountSafe(chatId) {
         return Number.isFinite(Number(count)) ? Number(count) : null;
     } catch (error) {
         console.warn(`[Owner] Failed to fetch member count for ${chatId}: ${error.message}`);
+        if (isGroupRevokedError(error)) {
+            await cleanupGroupProfile(chatId?.toString());
+        }
         return null;
     }
 }
 
 async function sendOwnerGroupDashboard(chatId, lang) {
-    const groups = filterGroupProfiles(await db.listGroupProfiles());
-    const hydrated = filterGroupProfiles(await hydrateGroupProfiles(groups));
+    const hydrated = await loadActiveGroupProfiles();
     const dashboardText = hydrated.length
         ? t(lang, 'owner_group_dashboard', { count: hydrated.length })
         : t(lang, 'owner_group_none');
@@ -5459,9 +5493,11 @@ async function sendOwnerGroupDetail(chatId, targetChatId, lang) {
         return;
     }
 
-    const groups = filterGroupProfiles(await db.listGroupProfiles());
+    const groups = await loadActiveGroupProfiles();
     const profile = groups.find((item) => item.chatId === normalized) || { chatId: normalized };
-    const hydratedProfiles = await hydrateGroupProfiles([profile]);
+    const hydratedProfiles = profile.title || profile.username
+        ? [profile]
+        : await hydrateGroupProfiles([profile]);
     const hydrated = hydratedProfiles[0];
 
     if (!hydrated) {
@@ -5840,7 +5876,7 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
                 return true;
             }
 
-            const groups = await db.listGroupProfiles();
+            const groups = await loadActiveGroupProfiles();
             const targets = targetChatId
                 ? groups.filter((item) => item.chatId === targetChatId || item.chatId === targetChatId.toString())
                 : groups;
@@ -5861,6 +5897,9 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
                 } catch (error) {
                     failed += 1;
                     console.error(`[Owner] Failed to broadcast to group ${profile.chatId}: ${error.message}`);
+                    if (isGroupRevokedError(error)) {
+                        await cleanupGroupProfile(profile.chatId);
+                    }
                 }
             }
 
@@ -13538,7 +13577,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 }
 
                 if (action === 'copy') {
-                    const groups = filterGroupProfiles(await db.listGroupProfiles());
+                    const groups = await loadActiveGroupProfiles();
                     const profile = groups.find((item) => item.chatId === detail || item.chatId === detail?.toString())
                         || { chatId: detail };
                     const address = formatGroupAddress(profile);
@@ -13590,13 +13629,14 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 if (action === 'remove') {
                     if (targetChatId) {
                         try {
-                            await bot.leaveChat(targetChatId);
+                            if (isLikelyGroupChatId(targetChatId)) {
+                                await bot.leaveChat(targetChatId);
+                            }
                         } catch (error) {
                             console.warn(`[Owner] Failed to leave group ${targetChatId}: ${error.message}`);
                         }
 
-                        await db.removeGroupProfile(targetChatId);
-                        await db.wipeChatFootprint(targetChatId);
+                        await cleanupGroupProfile(targetChatId);
                         await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_group_removed', { id: targetChatId }) });
                         await sendOwnerGroupDashboard(chatId || ownerId, callbackLang);
                         return;
