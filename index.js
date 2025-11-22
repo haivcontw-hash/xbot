@@ -5121,29 +5121,29 @@ function buildHelpKeyboard(lang, selectedGroup = null) {
 function buildOwnerMenuKeyboard(lang) {
     const inline_keyboard = [
         [
-            { text: t(lang, 'owner_menu_broadcast'), callback_data: 'owner_menu|broadcast' },
-            { text: t(lang, 'owner_menu_ai_limit'), callback_data: 'owner_menu|ai_limit' }
+            { text: `📢 ${t(lang, 'owner_menu_broadcast')}`, callback_data: 'owner_menu|broadcast' },
+            { text: `🚧 ${t(lang, 'owner_menu_ai_limit')}`, callback_data: 'owner_menu|ai_limit' }
         ],
         [
-            { text: t(lang, 'owner_menu_ai_unlimit'), callback_data: 'owner_menu|ai_unlimit' },
-            { text: t(lang, 'owner_menu_check_users'), callback_data: 'owner_menu|check_users' }
+            { text: `♻️ ${t(lang, 'owner_menu_ai_unlimit')}`, callback_data: 'owner_menu|ai_unlimit' },
+            { text: `👥 ${t(lang, 'owner_menu_check_users')}`, callback_data: 'owner_menu|check_users' }
         ],
         [
-            { text: t(lang, 'owner_menu_ai_stats'), callback_data: 'owner_menu|ai_stats' },
-            { text: t(lang, 'owner_menu_reset_id'), callback_data: 'owner_menu|reset_id' }
+            { text: `📊 ${t(lang, 'owner_menu_ai_stats')}`, callback_data: 'owner_menu|ai_stats' },
+            { text: `🆔 ${t(lang, 'owner_menu_reset_id')}`, callback_data: 'owner_menu|reset_id' }
         ],
         [
-            { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
-            { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
+            { text: `⛔ ${t(lang, 'owner_menu_ban')}`, callback_data: 'owner_menu|ban' },
+            { text: `✅ ${t(lang, 'owner_menu_unban')}`, callback_data: 'owner_menu|unban' }
         ],
         [
-            { text: t(lang, 'owner_menu_group_stats'), callback_data: 'owner_menu|group_stats' },
-            { text: t(lang, 'owner_menu_run_command'), callback_data: 'owner_menu|run_command' }
+            { text: `🏘️ ${t(lang, 'owner_menu_group_stats')}`, callback_data: 'owner_menu|group_stats' },
+            { text: `🤖 ${t(lang, 'owner_menu_run_command')}`, callback_data: 'owner_menu|run_command' }
         ],
         [
-            { text: t(lang, 'owner_menu_command_limits'), callback_data: 'owner_menu|command_limits' }
+            { text: `⏱️ ${t(lang, 'owner_menu_command_limits')}`, callback_data: 'owner_menu|command_limits' }
         ],
-        [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
+        [{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'owner_menu|close' }]
     ];
 
     return { inline_keyboard };
@@ -5724,7 +5724,8 @@ async function sendOwnerUserOverview(chatId, lang) {
 }
 
 async function sendOwnerAiStats(chatId, lang) {
-    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100);
+    const usageDate = new Date().toISOString().slice(0, 10);
+    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100, usageDate);
     if (!leaderboard || leaderboard.length === 0) {
         await sendReply({ chat: { id: chatId } }, t(lang, 'owner_ai_stats_empty'), {
             parse_mode: 'HTML',
@@ -5738,12 +5739,13 @@ async function sendOwnerAiStats(chatId, lang) {
         return t(lang, 'owner_ai_stats_entry', { rank: index + 1, user: label, count: entry.total });
     });
 
-    const header = t(lang, 'owner_ai_stats_title');
+    const header = `${t(lang, 'owner_ai_stats_title')} (${usageDate})`;
     await sendChunkedHtmlMessages(chatId, [header, ...lines].join('\n'), { parse_mode: 'HTML' });
 }
 
 async function sendOwnerCommandUsageStats(chatId, lang) {
-    const stats = await db.getAllCommandUsageStats(100);
+    const usageDate = new Date().toISOString().slice(0, 10);
+    const stats = await db.getAllCommandUsageStats(100, usageDate);
     const filtered = (stats || []).map((entry) => {
         const commands = Object.entries(entry.commands || {}).filter(([key]) => key !== OWNER_COMMAND_LIMIT_KEY);
         return { ...entry, commands };
@@ -5754,7 +5756,7 @@ async function sendOwnerCommandUsageStats(chatId, lang) {
         return;
     }
 
-    const header = t(lang, 'owner_command_usage_header', { count: filtered.length });
+    const header = `${t(lang, 'owner_command_usage_header', { count: filtered.length })} (${usageDate})`;
     const lines = filtered.map((entry, index) => {
         const userLabel = buildUserInfoLine({
             userId: entry.userId,
