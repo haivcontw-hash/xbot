@@ -13392,10 +13392,20 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                         || { chatId: detail };
                     const address = formatGroupAddress(profile);
                     const value = targetChatId === 'address' ? address : profile.chatId;
-                    await bot.answerCallbackQuery(queryId, {
-                        text: value?.toString() || t(callbackLang, 'owner_group_unknown_count'),
-                        show_alert: true
-                    });
+                    const label = targetChatId === 'address'
+                        ? t(callbackLang, 'owner_group_button_copy_address')
+                        : t(callbackLang, 'owner_group_button_copy_id');
+
+                    const copyText = `${label}: ${value?.toString() || t(callbackLang, 'owner_group_unknown_count')}`;
+                    const target = chatId || ownerId;
+                    if (target) {
+                        await bot.sendMessage(target, copyText, {
+                            disable_web_page_preview: true,
+                            reply_markup: buildCloseKeyboard(callbackLang)
+                        });
+                    }
+
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'help_action_executed') });
                     return;
                 }
 
