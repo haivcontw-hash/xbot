@@ -765,6 +765,7 @@
   "owner_group_button_back": "⬅️ Kembali",
   "owner_run_user_prompt": "Masukkan ID atau @username yang ingin ditiru.",
   "owner_run_group_prompt": "Masukkan ID grup (opsional, kosongkan untuk jalankan di chat Anda).",
+  "owner_run_group_invalid": "Masukkan ID/username grup yang valid (ID grup diawali dengan -).",
   "owner_run_command_prompt": "Kirim perintah yang akan dijalankan (dengan atau tanpa /).",
   "owner_run_invalid_user": "Harap masukkan ID atau username yang valid.",
   "owner_run_done": "Perintah {command} dijalankan sebagai {user} di {chat}.",

@@ -5306,6 +5306,59 @@ async function ensureGroupProfile(chat = {}) {
     });
 }
 
+async function resolveOwnerGroupTarget(chatToken) {
+    const trimmed = (chatToken || '').trim();
+    if (!trimmed) {
+        return { targetChatId: null, profile: null };
+    }
+
+    const tokenId = trimmed.match(/-?\d+/)?.[0] || null;
+    const username = trimmed.startsWith('@') ? trimmed.slice(1).toLowerCase() : trimmed.toLowerCase();
+    const groups = await db.listGroupProfiles();
+
+    let profile = null;
+
+    if (tokenId) {
+        profile = groups.find((item) => item.chatId === tokenId || item.chatId === tokenId.toString());
+    }
+
+    if (!profile && username) {
+        profile = groups.find((item) => (item.username || '').toLowerCase() === username);
+    }
+
+    const isGroupIdLike = tokenId?.startsWith('-');
+    const targetChatId = profile?.chatId || (isGroupIdLike ? tokenId : null);
+
+    return { targetChatId, profile: profile || null };
+}
+
+async function resolveGroupMetadata(chatId, fallbackProfile = null) {
+    const normalizedId = chatId?.toString();
+    if (!normalizedId) {
+        return { chatId: null, title: null, username: null, type: null };
+    }
+
+    const profile = fallbackProfile || (await db.listGroupProfiles()).find((item) => item.chatId === normalizedId);
+    if (profile?.title || profile?.username) {
+        return { chatId: normalizedId, title: profile.title || null, username: profile.username || null, type: profile.type || 'supergroup' };
+    }
+
+    try {
+        const chat = await bot.getChat(normalizedId);
+        await ensureGroupProfile(chat);
+        return {
+            chatId: normalizedId,
+            title: chat.title || null,
+            username: chat.username || null,
+            type: chat.type || 'supergroup'
+        };
+    } catch (error) {
+        console.warn(`[Owner] Unable to resolve group metadata for ${normalizedId}: ${error.message}`);
+    }
+
+    return { chatId: normalizedId, title: null, username: null, type: 'supergroup' };
+}
+
 function formatGroupAddress(profile = {}) {
     if (profile.username) {
         return `https://t.me/${profile.username}`;
@@ -5325,12 +5378,13 @@ async function getGroupMemberCountSafe(chatId) {
 
 async function sendOwnerGroupDashboard(chatId, lang) {
     const groups = await db.listGroupProfiles();
+    const hydrated = await Promise.all(groups.map((profile) => resolveGroupMetadata(profile.chatId, profile)));
     const dashboardText = groups.length
         ? t(lang, 'owner_group_dashboard', { count: groups.length })
         : t(lang, 'owner_group_none');
 
     const help = groups.length ? `\n${t(lang, 'owner_group_dashboard_hint')}` : '';
-    const keyboard = buildOwnerGroupDashboardKeyboard(lang, groups.slice(0, 30));
+    const keyboard = buildOwnerGroupDashboardKeyboard(lang, hydrated.slice(0, 30));
 
     await bot.sendMessage(chatId, `${dashboardText}${help}`, {
         reply_markup: keyboard,
@@ -5348,18 +5402,19 @@ async function sendOwnerGroupDetail(chatId, targetChatId, lang) {
     const groups = await db.listGroupProfiles();
     const profile = groups.find((item) => item.chatId === targetChatId || item.chatId === targetChatId.toString())
         || { chatId: targetChatId };
+    const hydrated = await resolveGroupMetadata(targetChatId, profile);
     const memberCount = await getGroupMemberCountSafe(targetChatId);
-    const address = formatGroupAddress(profile);
+    const address = formatGroupAddress(hydrated);
     const countText = memberCount === null ? t(lang, 'owner_group_unknown_count') : memberCount;
     const text = t(lang, 'owner_group_info', {
-        title: profile?.title || profile?.username || targetChatId,
+        title: hydrated?.title || hydrated?.username || targetChatId,
         id: targetChatId,
         address,
         members: countText
     });
 
     await bot.sendMessage(chatId, text, {
-        reply_markup: buildOwnerGroupDetailKeyboard(lang, profile),
+        reply_markup: buildOwnerGroupDetailKeyboard(lang, hydrated),
         parse_mode: 'HTML',
         disable_web_page_preview: true
     });
@@ -5810,8 +5865,23 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
 
         if (state.step === 'group') {
             const chatToken = content.trim();
-            const targetChatId = chatToken ? chatToken.match(/-?\d+/)?.[0] : null;
-            ownerActionStates.set(userId, { ...state, step: 'command', targetChatId: targetChatId || null });
+            if (!chatToken) {
+                ownerActionStates.set(userId, { ...state, step: 'command', targetChatId: null, targetGroupProfile: null });
+            } else {
+                const { targetChatId, profile } = await resolveOwnerGroupTarget(chatToken);
+
+                if (!targetChatId) {
+                    await sendReply(msg, t(lang, 'owner_run_group_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+                    return true;
+                }
+
+                ownerActionStates.set(userId, {
+                    ...state,
+                    step: 'command',
+                    targetChatId,
+                    targetGroupProfile: profile || null
+                });
+            }
             await sendReply(msg, t(lang, 'owner_run_command_prompt'), { reply_markup: buildCloseKeyboard(lang) });
             return true;
         }
@@ -5819,6 +5889,9 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
         if (state.step === 'command') {
             const commandText = content.startsWith('/') ? content : `/${content}`;
             const executionChatId = state.targetChatId || msg.chat.id.toString();
+            const groupMeta = state.targetChatId
+                ? await resolveGroupMetadata(state.targetChatId, state.targetGroupProfile)
+                : null;
             const synthetic = {
                 message_id: Date.now(),
                 from: {
@@ -5829,8 +5902,12 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
                 },
                 chat: {
                     id: executionChatId,
-                    type: state.targetChatId ? 'group' : 'private',
-                    title: state.targetChatId ? 'Owner delegation' : 'Owner console'
+                    type: state.targetChatId ? (groupMeta?.type || 'supergroup') : 'private',
+                    title: state.targetChatId
+                        ? groupMeta?.title || groupMeta?.username || state.targetChatId
+                        : 'Owner console',
+                    username: groupMeta?.username || undefined,
+                    isDelegated: Boolean(state.targetChatId)
                 },
                 date: Math.floor(Date.now() / 1000),
                 text: commandText,

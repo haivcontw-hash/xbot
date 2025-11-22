@@ -765,6 +765,7 @@
   "owner_group_button_back": "⬅️ Назад",
   "owner_run_user_prompt": "Введите ID или @username, от имени кого выполнить команду.",
   "owner_run_group_prompt": "Введите ID группы (опционально, оставьте пустым для личного чата).",
+  "owner_run_group_invalid": "Укажите корректный ID/username группы (ID групп начинаются с -).",
   "owner_run_command_prompt": "Отправьте команду для выполнения (с / или без).",
   "owner_run_invalid_user": "Укажите корректный ID или username.",
   "owner_run_done": "Команда {command} отправлена как {user} в {chat}.",

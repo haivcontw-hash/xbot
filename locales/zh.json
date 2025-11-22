@@ -765,6 +765,7 @@
   "owner_group_button_back": "⬅️ 返回",
   "owner_run_user_prompt": "输入要模拟的用户 ID 或 @username。",
   "owner_run_group_prompt": "输入要执行的群组 ID（可选，留空则在你自己的聊天中执行）。",
+  "owner_run_group_invalid": "请输入有效的群组 ID/用户名（群组 ID 以 - 开头）。",
   "owner_run_command_prompt": "发送要执行的命令（可以有/也可以没有）。",
   "owner_run_invalid_user": "请提供有效的用户 ID 或用户名。",
   "owner_run_done": "命令 {command} 已以 {user} 身份在 {chat} 执行。",

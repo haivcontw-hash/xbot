@@ -765,6 +765,7 @@
   "owner_group_button_back": "⬅️ Back",
   "owner_run_user_prompt": "Enter the user ID or @username to impersonate.",
   "owner_run_group_prompt": "Enter a group ID to execute in (optional, leave blank to run in your chat).",
+  "owner_run_group_invalid": "Please provide a valid group ID/username (group IDs start with -).",
   "owner_run_command_prompt": "Send the command to execute (with or without the leading /).",
   "owner_run_invalid_user": "Please provide a valid user ID or username.",
   "owner_run_done": "Command {command} dispatched as {user} in {chat}.",

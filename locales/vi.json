@@ -765,6 +765,7 @@
   "owner_group_button_back": "⬅️ Quay lại",
   "owner_run_user_prompt": "Nhập ID hoặc @username cần giả lập.",
   "owner_run_group_prompt": "Nhập ID nhóm để thực thi (bỏ trống nếu chạy trong hộp chat của bạn).",
+  "owner_run_group_invalid": "Vui lòng nhập ID/username nhóm hợp lệ (ID nhóm bắt đầu bằng dấu -).",
   "owner_run_command_prompt": "Gửi lệnh cần chạy (có hoặc không có dấu /).",
   "owner_run_invalid_user": "Hãy nhập ID hoặc username hợp lệ.",
   "owner_run_done": "Đã chạy lệnh {command} với {user} tại {chat}.",
