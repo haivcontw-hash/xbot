@@ -751,6 +751,7 @@
   "owner_group_info": "Nhóm: <b>{title}</b>\nID: <code>{id}</code>\nThành viên: {members}\nĐịa chỉ: {address}",
   "owner_group_broadcast_result": "Đã gửi thông báo nhóm. Thành công: {success}, lỗi: {failed}.",
   "owner_group_removed": "Đã rời và xoá dữ liệu nhóm {id}.",
+  "owner_group_removed_auto": "Nhóm không còn khả dụng và đã bị xoá khỏi danh sách.",
   "owner_group_invalid_user": "Không tìm được ID/username cần xoá khỏi nhóm.",
   "owner_group_kick_done": "Đã xoá người dùng {user} khỏi nhóm {id}.",
   "owner_group_kick_failed": "Không thể xoá người dùng khỏi nhóm.",

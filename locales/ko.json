@@ -751,6 +751,7 @@
   "owner_group_info": "그룹: <b>{title}</b>\nID: <code>{id}</code>\n인원: {members}\n주소: {address}",
   "owner_group_broadcast_result": "그룹 공지 완료. 성공: {success}, 실패: {failed}.",
   "owner_group_removed": "그룹 {id}에서 나가고 데이터를 삭제했습니다.",
+  "owner_group_removed_auto": "그룹에 더 이상 접근할 수 없어 목록에서 제거되었습니다.",
   "owner_group_invalid_user": "제거할 사용자 ID/username을 찾지 못했습니다.",
   "owner_group_kick_done": "그룹 {id}에서 사용자 {user}를 제거했습니다.",
   "owner_group_kick_failed": "사용자를 그룹에서 제거하지 못했습니다.",

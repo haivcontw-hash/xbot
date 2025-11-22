@@ -751,6 +751,7 @@
   "owner_group_info": "Group: <b>{title}</b>\nID: <code>{id}</code>\nMembers: {members}\nAddress: {address}",
   "owner_group_broadcast_result": "Group broadcast finished. Success: {success}, failed: {failed}.",
   "owner_group_removed": "Bot removed and data cleared for group {id}.",
+  "owner_group_removed_auto": "Group is no longer available and was removed from the list.",
   "owner_group_invalid_user": "Could not resolve the user ID or username to remove.",
   "owner_group_kick_done": "Removed user {user} from group {id}.",
   "owner_group_kick_failed": "Unable to remove that user from the group.",

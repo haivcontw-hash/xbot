@@ -751,6 +751,7 @@
   "owner_group_info": "群组：<b>{title}</b>\nID：<code>{id}</code>\n成员：{members}\n地址：{address}",
   "owner_group_broadcast_result": "群组广播完成。成功：{success}，失败：{failed}。",
   "owner_group_removed": "已退出并清理群组 {id} 的数据。",
+  "owner_group_removed_auto": "群组已无法访问，已从列表移除。",
   "owner_group_invalid_user": "无法解析要移除的用户 ID/用户名。",
   "owner_group_kick_done": "已将用户 {user} 移出群组 {id}。",
   "owner_group_kick_failed": "无法将该用户移出群组。",

@@ -5132,7 +5132,10 @@ function buildOwnerGroupDetailKeyboard(lang, profile = {}) {
         [
             { text: t(lang, 'owner_group_button_remove'), callback_data: `owner_group|remove|${profile.chatId}` }
         ],
-        [{ text: t(lang, 'owner_group_button_back'), callback_data: 'owner_group|back' }]
+        [
+            { text: t(lang, 'owner_group_button_back'), callback_data: 'owner_group|back' },
+            { text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }
+        ]
     ];
 
     if (profile.username) {
@@ -5365,6 +5368,13 @@ async function resolveGroupMetadata(chatId, fallbackProfile = null) {
         };
     } catch (error) {
         console.warn(`[Owner] Unable to resolve group metadata for ${normalizedId}: ${error.message}`);
+        const isRevoked = error?.response?.statusCode === 403
+            || error?.response?.statusCode === 400
+            || /kicked|blocked|not found|chat not found|forbidden/i.test(error?.response?.body?.description || error?.message || '');
+        if (isRevoked) {
+            await db.removeGroupProfile(normalizedId);
+            return { chatId: normalizedId, removed: true };
+        }
     }
 
     const fallback = resolved || profile || null;
@@ -5385,6 +5395,10 @@ async function hydrateGroupProfiles(profiles = []) {
 
     for (const profile of profiles) {
         const resolved = await resolveGroupMetadata(profile?.chatId, profile);
+        if (!resolved?.chatId || resolved.removed) {
+            continue;
+        }
+
         hydrated.push(resolved);
 
         const hasNewTitle = resolved?.title && resolved.title !== profile?.title;
@@ -5447,8 +5461,16 @@ async function sendOwnerGroupDetail(chatId, targetChatId, lang) {
 
     const groups = filterGroupProfiles(await db.listGroupProfiles());
     const profile = groups.find((item) => item.chatId === normalized) || { chatId: normalized };
-    const [hydrated = profile] = await hydrateGroupProfiles([profile]);
-    const targetId = hydrated?.chatId || normalized;
+    const hydratedProfiles = await hydrateGroupProfiles([profile]);
+    const hydrated = hydratedProfiles[0];
+
+    if (!hydrated) {
+        await bot.sendMessage(chatId, t(lang, 'owner_group_removed_auto'), { reply_markup: buildCloseKeyboard(lang) });
+        await sendOwnerGroupDashboard(chatId, lang);
+        return;
+    }
+
+    const targetId = hydrated.chatId || normalized;
 
     if (!isLikelyGroupChatId(targetId)) {
         await bot.sendMessage(chatId, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });

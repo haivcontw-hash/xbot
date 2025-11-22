@@ -751,6 +751,7 @@
   "owner_group_info": "Grup: <b>{title}</b>\nID: <code>{id}</code>\nAnggota: {members}\nAlamat: {address}",
   "owner_group_broadcast_result": "Siaran grup selesai. Berhasil: {success}, gagal: {failed}.",
   "owner_group_removed": "Bot telah keluar dan menghapus data grup {id}.",
+  "owner_group_removed_auto": "Grup sudah tidak tersedia dan telah dihapus dari daftar.",
   "owner_group_invalid_user": "Tidak dapat menemukan ID/username untuk dihapus.",
   "owner_group_kick_done": "User {user} telah dihapus dari grup {id}.",
   "owner_group_kick_failed": "Gagal menghapus user dari grup.",

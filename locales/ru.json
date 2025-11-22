@@ -751,6 +751,7 @@
   "owner_group_info": "Группа: <b>{title}</b>\nID: <code>{id}</code>\nУчастники: {members}\nАдрес: {address}",
   "owner_group_broadcast_result": "Рассылка по группам завершена. Успех: {success}, ошибки: {failed}.",
   "owner_group_removed": "Бот покинул группу {id} и удалил данные.",
+  "owner_group_removed_auto": "Группа больше недоступна и удалена из списка.",
   "owner_group_invalid_user": "Не удалось определить ID/username для удаления.",
   "owner_group_kick_done": "Пользователь {user} удалён из группы {id}.",
   "owner_group_kick_failed": "Не удалось удалить пользователя из группы.",
