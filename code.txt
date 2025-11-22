@@ -9,8 +9,11 @@ scp .\database.js root@103.75.183.65:/root/xbot/
 scp .\scienceQuestions.js root@103.75.183.65:/root/xbot/
 scp .\.gitignore root@103.75.183.65:/root/xbot/
 scp .\db.json root@103.75.183.65:/root/xbot/
-
 scp .\.env root@103.75.183.65:/root/xbot/
+
+pm2 list
+# Hoặc lệnh tắt
+pm2 ls
 
 pm2 restart xbot
 pm2 stop xbot
@@ -23,6 +26,16 @@ pm2 startup
 cd /root/xbot
 ls -l
 mkdir xbot
+
+pm2 start pm2-logrotate
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *' # Xoay vòng mỗi ngày
+pm2 set pm2-logrotate:retain 3 # Giữ lại log của 3 ngày
+pm2 set pm2-logrotate:max_size 10M
+pm2 flush
+pm2 list
+pm2 prettylist
+pm2 show xbot
 
 npm install ethers node-telegram-bot-api dotenv
 npm install pm2 -g
