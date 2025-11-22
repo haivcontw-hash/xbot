@@ -25,6 +25,8 @@ const OWNER_PASSWORD = '0876200812@';
 const coOwnerIds = new Set();
 const bannedUserIds = new Set();
 const ownerPasswordPrompts = new Map();
+const ownerPasswordAttempts = new Map();
+const ownerPasswordMaxAttempts = 3;
 const API_PORT = 3000;
 const defaultLang = 'en';
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
@@ -241,6 +243,7 @@ const OKX_DEX_DEFAULT_RETRY_DELAY_MS = (() => {
 })();
 const walletTokenActionCache = new Map();
 const ownerActionStates = new Map();
+const OWNER_COMMAND_LIMIT_KEY = 'command_all';
 const WALLET_TOKEN_HISTORY_MAX_PAGES = (() => {
     const value = Number(process.env.WALLET_TOKEN_HISTORY_MAX_PAGES || 4);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
@@ -1103,11 +1106,69 @@ async function enforceBanForCallback(query, langHint) {
     return true;
 }
 
+function resetOwnerPasswordAttempts(userId) {
+    if (!userId) {
+        return;
+    }
+    ownerPasswordAttempts.delete(userId.toString());
+}
+
+async function recordOwnerPasswordFailure(msg, lang) {
+    const userId = msg?.from?.id?.toString();
+    if (!userId || isOwner(userId, msg.from?.username)) {
+        return false;
+    }
+
+    const next = (ownerPasswordAttempts.get(userId) || 0) + 1;
+    ownerPasswordAttempts.set(userId, next);
+
+    if (next > ownerPasswordMaxAttempts) {
+        await banUser(userId, msg.from, msg.from?.id?.toString());
+        await sendReply(msg, t(lang, 'owner_password_banned'), { reply_markup: buildCloseKeyboard(lang) });
+        ownerPasswordPrompts.delete(userId);
+        return true;
+    }
+
+    return false;
+}
+
 function clearOwnerAction(userId) {
     if (!userId) {
         return;
     }
     ownerActionStates.delete(userId.toString());
+}
+
+async function enforceOwnerCommandLimit(msg, commandKey) {
+    const userId = msg?.from?.id?.toString();
+    const username = msg?.from?.username || '';
+
+    if (!userId || isOwner(userId, username)) {
+        return false;
+    }
+
+    const lang = await getLang(msg);
+    const today = new Date().toISOString().slice(0, 10);
+    const userLimit = await db.getCommandLimit(OWNER_COMMAND_LIMIT_KEY, userId);
+    const globalLimit = await db.getCommandLimit(OWNER_COMMAND_LIMIT_KEY, null);
+    const effectiveLimit = userLimit ?? globalLimit;
+
+    if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+        const current = await db.getCommandUsageCount(OWNER_COMMAND_LIMIT_KEY, userId, today);
+        if (current >= effectiveLimit) {
+            await sendReply(msg, t(lang, 'owner_command_limit_reached', { limit: effectiveLimit }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            return true;
+        }
+    }
+
+    await db.incrementCommandUsage(OWNER_COMMAND_LIMIT_KEY, userId, today);
+    if (commandKey) {
+        await db.incrementCommandUsage(commandKey, userId, today);
+    }
+
+    return false;
 }
 
 function buildContractLookupUrl(contractAddress) {
@@ -5060,29 +5121,43 @@ function buildHelpKeyboard(lang, selectedGroup = null) {
 function buildOwnerMenuKeyboard(lang) {
     const inline_keyboard = [
         [
-            { text: t(lang, 'owner_menu_broadcast'), callback_data: 'owner_menu|broadcast' },
-            { text: t(lang, 'owner_menu_ai_limit'), callback_data: 'owner_menu|ai_limit' }
+            { text: `📢 ${t(lang, 'owner_menu_broadcast')}`, callback_data: 'owner_menu|broadcast' },
+            { text: `🚧 ${t(lang, 'owner_menu_ai_limit')}`, callback_data: 'owner_menu|ai_limit' }
         ],
         [
-            { text: t(lang, 'owner_menu_ai_unlimit'), callback_data: 'owner_menu|ai_unlimit' },
-            { text: t(lang, 'owner_menu_check_users'), callback_data: 'owner_menu|check_users' }
+            { text: `♻️ ${t(lang, 'owner_menu_ai_unlimit')}`, callback_data: 'owner_menu|ai_unlimit' },
+            { text: `👥 ${t(lang, 'owner_menu_check_users')}`, callback_data: 'owner_menu|check_users' }
         ],
         [
-            { text: t(lang, 'owner_menu_ai_stats'), callback_data: 'owner_menu|ai_stats' },
-            { text: t(lang, 'owner_menu_reset_id'), callback_data: 'owner_menu|reset_id' }
+            { text: `📊 ${t(lang, 'owner_menu_ai_stats')}`, callback_data: 'owner_menu|ai_stats' },
+            { text: `🆔 ${t(lang, 'owner_menu_reset_id')}`, callback_data: 'owner_menu|reset_id' }
         ],
         [
-            { text: t(lang, 'owner_menu_ban'), callback_data: 'owner_menu|ban' },
-            { text: t(lang, 'owner_menu_unban'), callback_data: 'owner_menu|unban' }
+            { text: `⛔ ${t(lang, 'owner_menu_ban')}`, callback_data: 'owner_menu|ban' },
+            { text: `✅ ${t(lang, 'owner_menu_unban')}`, callback_data: 'owner_menu|unban' }
         ],
         [
-            { text: t(lang, 'owner_menu_group_stats'), callback_data: 'owner_menu|group_stats' },
-            { text: t(lang, 'owner_menu_run_command'), callback_data: 'owner_menu|run_command' }
+            { text: `🏘️ ${t(lang, 'owner_menu_group_stats')}`, callback_data: 'owner_menu|group_stats' },
+            { text: `🤖 ${t(lang, 'owner_menu_run_command')}`, callback_data: 'owner_menu|run_command' }
         ],
-        [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
+        [
+            { text: `⏱️ ${t(lang, 'owner_menu_command_limits')}`, callback_data: 'owner_menu|command_limits' }
+        ],
+        [{ text: `✖️ ${t(lang, 'help_button_close')}`, callback_data: 'owner_menu|close' }]
     ];
 
     return { inline_keyboard };
+}
+
+function buildOwnerCommandLimitKeyboard(lang) {
+    return {
+        inline_keyboard: [
+            [{ text: `⏳ ${t(lang, 'owner_command_button_limit')}`, callback_data: 'owner_command|limit' }],
+            [{ text: `♻️ ${t(lang, 'owner_command_button_unlimit')}`, callback_data: 'owner_command|unlimit' }],
+            [{ text: `📈 ${t(lang, 'owner_command_button_stats')}`, callback_data: 'owner_command|stats' }],
+            [{ text: t(lang, 'help_button_close'), callback_data: 'owner_menu|close' }]
+        ]
+    };
 }
 
 function isLikelyGroupChatId(chatId) {
@@ -5649,7 +5724,8 @@ async function sendOwnerUserOverview(chatId, lang) {
 }
 
 async function sendOwnerAiStats(chatId, lang) {
-    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100);
+    const usageDate = new Date().toISOString().slice(0, 10);
+    const leaderboard = await db.getCommandUsageLeaderboard('ai', 100, usageDate);
     if (!leaderboard || leaderboard.length === 0) {
         await sendReply({ chat: { id: chatId } }, t(lang, 'owner_ai_stats_empty'), {
             parse_mode: 'HTML',
@@ -5663,8 +5739,49 @@ async function sendOwnerAiStats(chatId, lang) {
         return t(lang, 'owner_ai_stats_entry', { rank: index + 1, user: label, count: entry.total });
     });
 
-    const header = t(lang, 'owner_ai_stats_title');
+    const header = `${t(lang, 'owner_ai_stats_title')} (${usageDate})`;
     await sendChunkedHtmlMessages(chatId, [header, ...lines].join('\n'), { parse_mode: 'HTML' });
+}
+
+async function sendOwnerCommandUsageStats(chatId, lang) {
+    const usageDate = new Date().toISOString().slice(0, 10);
+    const stats = await db.getAllCommandUsageStats(100, usageDate);
+    const filtered = (stats || []).map((entry) => {
+        const commands = Object.entries(entry.commands || {}).filter(([key]) => key !== OWNER_COMMAND_LIMIT_KEY);
+        return { ...entry, commands };
+    }).filter((entry) => entry.commands.length);
+
+    if (!filtered.length) {
+        await bot.sendMessage(chatId, t(lang, 'owner_command_usage_empty'), { reply_markup: buildCloseKeyboard(lang) });
+        return;
+    }
+
+    const header = `${t(lang, 'owner_command_usage_header', { count: filtered.length })} (${usageDate})`;
+    const lines = filtered.map((entry, index) => {
+        const userLabel = buildUserInfoLine({
+            userId: entry.userId,
+            chatId: entry.userId,
+            username: entry.username,
+            fullName: entry.fullName
+        }) || escapeHtml(entry.userId);
+
+        const breakdown = entry.commands
+            .sort((a, b) => b[1] - a[1])
+            .map(([command, total]) => `• /${escapeHtml(command)}: ${total}`)
+            .join('\n');
+
+        return t(lang, 'owner_command_usage_entry', {
+            rank: index + 1,
+            user: userLabel,
+            total: entry.total,
+            breakdown
+        });
+    });
+
+    await sendChunkedHtmlMessages(chatId, [header, ...lines].join('\n\n'), {
+        parse_mode: 'HTML',
+        reply_markup: buildCloseKeyboard(lang)
+    });
 }
 
 async function handleOwnerStateMessage(msg, textOrCaption) {
@@ -5788,6 +5905,66 @@ async function handleOwnerStateMessage(msg, textOrCaption) {
             const targetId = target.scope === 'user' ? target.targetId : null;
             await db.clearCommandLimit('ai', targetId);
             await sendReply(msg, t(lang, 'owner_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'command_limit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            ownerActionStates.set(userId, { ...state, step: 'limit', target });
+            await sendReply(msg, t(lang, 'owner_command_limit_value_prompt'), { reply_markup: buildCloseKeyboard(lang) });
+            return true;
+        }
+
+        if (state.step === 'limit') {
+            const target = state.target || { scope: 'all', targetId: null };
+            const limitValue = Number.parseInt(content, 10);
+
+            if (!Number.isFinite(limitValue) || limitValue < 0) {
+                await sendReply(msg, t(lang, 'owner_command_limit_invalid'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            if (limitValue === 0) {
+                await db.clearCommandLimit(OWNER_COMMAND_LIMIT_KEY, targetId);
+                await sendReply(msg, t(lang, 'owner_command_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
+                    reply_markup: buildCloseKeyboard(lang)
+                });
+                clearOwnerAction(userId);
+                return true;
+            }
+
+            await db.setCommandLimit(OWNER_COMMAND_LIMIT_KEY, limitValue, targetId);
+            await sendReply(msg, t(lang, 'owner_command_limit_saved', {
+                limit: limitValue,
+                target: describeOwnerTarget(lang, target)
+            }), { reply_markup: buildCloseKeyboard(lang) });
+            clearOwnerAction(userId);
+            return true;
+        }
+    }
+
+    if (state.mode === 'command_unlimit') {
+        if (state.step === 'target') {
+            const target = parseOwnerTargetInput(content);
+            if (!target) {
+                await sendReply(msg, t(lang, 'owner_invalid_target'));
+                return true;
+            }
+
+            const targetId = target.scope === 'user' ? target.targetId : null;
+            await db.clearCommandLimit(OWNER_COMMAND_LIMIT_KEY, targetId);
+            await sendReply(msg, t(lang, 'owner_command_limit_cleared', { target: describeOwnerTarget(lang, target) }), {
                 reply_markup: buildCloseKeyboard(lang)
             });
             clearOwnerAction(userId);
@@ -11930,12 +12107,18 @@ async function getLang(msg) {
 function startTelegramBot() {
 
     async function handleStartNoToken(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'start')) {
+            return;
+        }
         const lang = await getLang(msg);
         const message = t(lang, 'welcome_generic');
         sendReply(msg, message, { parse_mode: 'Markdown' });
     }
 
     async function handleRegisterCommand(msg, payload) {
+        if (await enforceOwnerCommandLimit(msg, 'register')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         if (!payload || !payload.trim()) {
@@ -11968,6 +12151,9 @@ function startTelegramBot() {
     }
 
     async function handleMyWalletCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'mywallet')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         try {
@@ -11987,6 +12173,9 @@ function startTelegramBot() {
     }
 
     async function handleDonateCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'donate')) {
+            return;
+        }
         const lang = await getLang(msg);
         const chatId = msg.chat?.id?.toString();
         const groupSettings = chatId ? await db.getGroupBotSettings(chatId) : null;
@@ -11999,6 +12188,9 @@ function startTelegramBot() {
     }
 
     async function handleDonateDevCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'donatedev')) {
+            return;
+        }
         const lang = await getLang(msg);
         const text = buildDonateMessage(lang, { variant: 'developer' });
         await sendReply(msg, text, {
@@ -12009,6 +12201,9 @@ function startTelegramBot() {
     }
 
     async function handleDonateCommunityManageCommand(msg, payload) {
+        if (await enforceOwnerCommandLimit(msg, 'donatecm')) {
+            return;
+        }
         const lang = await getLang(msg);
         const chatId = msg.chat?.id?.toString();
         const userId = msg.from?.id;
@@ -12069,6 +12264,9 @@ function startTelegramBot() {
     }
 
     async function handleOkxChainsCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'okxchains')) {
+            return;
+        }
         const lang = await getLang(msg);
         try {
             const directory = await fetchOkxSupportedChains();
@@ -12101,6 +12299,9 @@ function startTelegramBot() {
     }
 
 async function handleOkx402StatusCommand(msg) {
+    if (await enforceOwnerCommandLimit(msg, 'okx402status')) {
+        return;
+    }
     const lang = await getLang(msg);
     try {
         const supported = await fetchOkx402Supported();
@@ -12118,6 +12319,9 @@ async function handleOkx402StatusCommand(msg) {
 }
 
 async function handleTxhashCommand(msg, explicitHash = null) {
+    if (await enforceOwnerCommandLimit(msg, 'txhash')) {
+        return;
+    }
     const lang = await getLang(msg);
     const text = msg.text || '';
     const match = text.match(/^\/txhash(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
@@ -12134,6 +12338,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 }
 
   async function handleTokenCommand(msg, explicitAddress = null) {
+      if (await enforceOwnerCommandLimit(msg, 'token')) {
+          return;
+      }
       const lang = await getLang(msg);
       const text = msg.text || '';
       const match = text.match(/^\/token(?:@[\w_]+)?(?:\s+([^\s]+))?/i);
@@ -12150,6 +12357,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
   }
 
   async function handleContractCommand(msg, payload) {
+      if (await enforceOwnerCommandLimit(msg, 'contract')) {
+          return;
+      }
       const lang = await getLang(msg);
       const rawPayload = (payload || '').trim();
       const chatId = msg.chat?.id?.toString();
@@ -12231,6 +12441,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
       if (!GEMINI_API_KEYS.length) {
           await sendReply(msg, t(lang, 'ai_missing_api_key'), { parse_mode: 'Markdown', reply_markup: buildCloseKeyboard(lang) });
+          return;
+      }
+
+      if (await enforceOwnerCommandLimit(msg, 'ai')) {
           return;
       }
 
@@ -12370,6 +12584,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
   }
 
     async function handleRmchatCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'rmchat')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         const text = [
@@ -12477,6 +12694,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     }
 
     async function handleUnregisterCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'unregister')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
         const menu = await buildUnregisterMenu(lang, chatId);
@@ -12487,6 +12707,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     }
 
     async function handleLanguageCommand(msg) {
+        if (await enforceOwnerCommandLimit(msg, 'language')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const lang = await getLang(msg);
@@ -12616,6 +12839,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         if (await enforceBanForMessage(msg)) {
             return;
         }
+        if (await enforceOwnerCommandLimit(msg, 'start')) {
+            return;
+        }
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
@@ -12689,6 +12915,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         if (await enforceBanForMessage(msg)) {
             return;
         }
+        if (await enforceOwnerCommandLimit(msg, 'checkin')) {
+            return;
+        }
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
         const userLang = await resolveNotificationLanguage(msg.from.id.toString(), msg.from.language_code);
@@ -12720,6 +12949,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
     bot.onText(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
         if (await enforceBanForMessage(msg)) {
+            return;
+        }
+        if (await enforceOwnerCommandLimit(msg, 'topcheckin')) {
             return;
         }
         const chatId = msg.chat.id.toString();
@@ -13129,6 +13361,10 @@ async function handleTxhashCommand(msg, explicitHash = null) {
             return;
         }
 
+        if (await enforceOwnerCommandLimit(msg, 'checkinadmin')) {
+            return;
+        }
+
         const fallbackLang = msg.from?.language_code;
 
         if (chatType === 'private') {
@@ -13228,8 +13464,15 @@ async function handleTxhashCommand(msg, explicitHash = null) {
         if (!isOwner(userId, username)) {
             if (providedPassword && providedPassword === OWNER_PASSWORD) {
                 await registerCoOwner(userId, msg.from, userId);
+                resetOwnerPasswordAttempts(userId);
                 ownerPasswordPrompts.delete(userId);
             } else {
+                if (providedPassword && providedPassword !== OWNER_PASSWORD) {
+                    const stopped = await recordOwnerPasswordFailure(msg, lang);
+                    if (stopped) {
+                        return;
+                    }
+                }
                 const prompt = await sendReply(msg, t(lang, 'owner_password_prompt'), {
                     reply_markup: {
                         force_reply: true,
@@ -13270,6 +13513,9 @@ async function handleTxhashCommand(msg, explicitHash = null) {
     // LỆNH: /help - Cần async
     bot.onText(/\/help/, async (msg) => {
         if (await enforceBanForMessage(msg)) {
+            return;
+        }
+        if (await enforceOwnerCommandLimit(msg, 'help')) {
             return;
         }
         const lang = await getLang(msg);
@@ -13522,6 +13768,16 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     return;
                 }
 
+                if (action === 'command_limits') {
+                    ownerActionStates.set(ownerId, { mode: 'command_limits', step: 'idle', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_command_limit_menu_short') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_command_limit_menu'), {
+                        parse_mode: 'HTML',
+                        reply_markup: buildOwnerCommandLimitKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
                 if (action === 'reset_id') {
                     ownerActionStates.set(ownerId, { mode: 'reset_id', step: 'target', chatId: targetChatId });
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_reset_prompt') });
@@ -13538,6 +13794,43 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                     await bot.sendMessage(targetChatId, t(callbackLang, promptKey), {
                         reply_markup: buildCloseKeyboard(callbackLang)
                     });
+                    return;
+                }
+            }
+
+            if (query.data?.startsWith('owner_command|')) {
+                const ownerId = query.from?.id?.toString();
+                const ownerUsername = query.from?.username || '';
+                if (!isOwner(ownerId, ownerUsername)) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_not_allowed'), show_alert: true });
+                    return;
+                }
+
+                const action = query.data.split('|')[1];
+                const targetChatId = query.message?.chat?.id || query.from?.id;
+
+                if (action === 'limit') {
+                    ownerActionStates.set(ownerId, { mode: 'command_limit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_command_limit_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_command_limit_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'unlimit') {
+                    ownerActionStates.set(ownerId, { mode: 'command_unlimit', step: 'target', chatId: targetChatId });
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_command_limit_prompt_target') });
+                    await bot.sendMessage(targetChatId, t(callbackLang, 'owner_command_limit_prompt_target'), {
+                        reply_markup: buildCloseKeyboard(callbackLang)
+                    });
+                    return;
+                }
+
+                if (action === 'stats') {
+                    clearOwnerAction(ownerId);
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_command_usage_running') });
+                    await sendOwnerCommandUsageStats(targetChatId, callbackLang);
                     return;
                 }
             }
@@ -15682,13 +15975,17 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
             if (textOrCaption === OWNER_PASSWORD) {
                 await registerCoOwner(userId, msg.from, userId);
+                resetOwnerPasswordAttempts(userId);
                 await sendReply(msg, t(lang, 'owner_password_success'), { reply_markup: buildCloseKeyboard(lang) });
                 await bot.sendMessage(msg.chat.id, t(lang, 'owner_menu_title'), {
                     parse_mode: 'HTML',
                     reply_markup: buildOwnerMenuKeyboard(lang)
                 });
             } else {
-                await sendReply(msg, t(lang, 'owner_password_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+                const stopped = await recordOwnerPasswordFailure(msg, lang);
+                if (!stopped) {
+                    await sendReply(msg, t(lang, 'owner_password_invalid'), { reply_markup: buildCloseKeyboard(lang) });
+                }
             }
             return;
         }

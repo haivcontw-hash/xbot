@@ -772,5 +772,22 @@
   "owner_run_done": "命令 {command} 已以 {user} 身份在 {chat} 执行。",
   "owner_run_failed": "无法执行委派的命令。",
   "owner_run_private_chat": "你的聊天",
-  "ai_limit_reached": "你已达到今日 /ai 的 {limit} 次限制。"
+  "ai_limit_reached": "你已达到今日 /ai 的 {limit} 次限制。",
+  "owner_password_banned": "密码错误次数过多，已被封禁。",
+  "owner_menu_command_limits": "指令限制",
+  "owner_command_limit_menu": "⚙️ <b>指令限制</b>\n选择操作来管理每日指令次数。",
+  "owner_command_limit_menu_short": "指令限制菜单",
+  "owner_command_button_limit": "设置限制",
+  "owner_command_button_unlimit": "取消限制",
+  "owner_command_button_stats": "使用统计",
+  "owner_command_limit_prompt_target": "输入 'all' 或指定的ID/@username 以应用每日指令限制。",
+  "owner_command_limit_value_prompt": "输入每日可用指令数（0 表示取消限制）。",
+  "owner_command_limit_invalid": "请输入非负数字。",
+  "owner_command_limit_saved": "已为 {target} 设置 {limit} 次/天的指令限制。",
+  "owner_command_limit_cleared": "已移除 {target} 的指令限制。",
+  "owner_command_limit_reached": "已达到每日指令上限 {limit}。",
+  "owner_command_usage_running": "正在统计指令使用...",
+  "owner_command_usage_header": "📈 指令使用 (前 {count})",
+  "owner_command_usage_entry": "{rank}. {user}\n总计: {total} 次\n{breakdown}",
+  "owner_command_usage_empty": "暂无指令使用记录。"
 }

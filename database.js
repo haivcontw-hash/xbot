@@ -2398,6 +2398,16 @@ async function getCommandUsageCount(command, userId, usageDate = null) {
     return row && Number.isFinite(Number(row.count)) ? Number(row.count) : 0;
 }
 
+let commandUsageLastPruneDate = null;
+
+async function pruneCommandUsage(beforeDate) {
+    if (!beforeDate) {
+        return 0;
+    }
+
+    await dbRun('DELETE FROM command_usage_logs WHERE usageDate < ?', [beforeDate]);
+}
+
 async function incrementCommandUsage(command, userId, usageDate = null) {
     const normalizedCommand = normalizeCommandKey(command);
     const normalizedUserId = normalizeTargetId(userId);
@@ -2406,6 +2416,12 @@ async function incrementCommandUsage(command, userId, usageDate = null) {
     }
 
     const date = usageDate || getTodayDateString('UTC');
+
+    if (commandUsageLastPruneDate !== date) {
+        commandUsageLastPruneDate = date;
+        await pruneCommandUsage(date);
+    }
+
     const current = await getCommandUsageCount(normalizedCommand, normalizedUserId, date);
     const nextCount = current + 1;
 
@@ -2419,26 +2435,69 @@ async function incrementCommandUsage(command, userId, usageDate = null) {
     return nextCount;
 }
 
-async function getCommandUsageLeaderboard(command, limit = 50) {
+async function getCommandUsageLeaderboard(command, limit = 50, usageDate = null) {
     const normalizedCommand = normalizeCommandKey(command);
     const numericLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 50;
     if (!normalizedCommand) {
         return [];
     }
 
+    const date = usageDate || getTodayDateString('UTC');
     const rows = await dbAll(
         `SELECT logs.userId, SUM(logs.count) AS total, users.username, users.fullName
          FROM command_usage_logs AS logs
          LEFT JOIN users ON users.chatId = logs.userId
-         WHERE logs.command = ?
+         WHERE logs.command = ? AND logs.usageDate = ?
          GROUP BY logs.userId, users.username, users.fullName
          HAVING total > 0
          ORDER BY total DESC
          LIMIT ?`,
-        [normalizedCommand, numericLimit]
+        [normalizedCommand, date, numericLimit]
     );
 
     return rows || [];
+}
+
+async function getAllCommandUsageStats(limit = 100, usageDate = null) {
+    const numericLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 100;
+    const date = usageDate || getTodayDateString('UTC');
+    const rows = await dbAll(
+        `SELECT logs.userId, logs.command, SUM(logs.count) AS total, users.username, users.fullName
+         FROM command_usage_logs AS logs
+         LEFT JOIN users ON users.chatId = logs.userId
+         WHERE logs.usageDate = ?
+         GROUP BY logs.userId, logs.command, users.username, users.fullName
+         HAVING total > 0
+         ORDER BY total DESC`,
+        [date]
+    );
+
+    const userMap = new Map();
+    for (const row of rows || []) {
+        const userId = row.userId?.toString();
+        if (!userId) {
+            continue;
+        }
+
+        const existing = userMap.get(userId) || {
+            userId,
+            username: row.username || null,
+            fullName: row.fullName || null,
+            total: 0,
+            commands: {}
+        };
+
+        const count = Number(row.total) || 0;
+        existing.total += count;
+        if (row.command) {
+            existing.commands[row.command] = (existing.commands[row.command] || 0) + count;
+        }
+
+        userMap.set(userId, existing);
+    }
+
+    const result = Array.from(userMap.values()).sort((a, b) => b.total - a.total);
+    return result.slice(0, numericLimit);
 }
 
 module.exports = {
@@ -2538,5 +2597,6 @@ module.exports = {
     getCommandUsageCount,
     incrementCommandUsage,
     getCommandUsageLeaderboard,
+    getAllCommandUsageStats,
     resetUserData
 };
