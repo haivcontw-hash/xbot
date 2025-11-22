@@ -5359,6 +5359,30 @@ async function resolveGroupMetadata(chatId, fallbackProfile = null) {
     return { chatId: normalizedId, title: null, username: null, type: 'supergroup' };
 }
 
+async function hydrateGroupProfiles(profiles = []) {
+    const hydrated = [];
+
+    for (const profile of profiles) {
+        const resolved = await resolveGroupMetadata(profile?.chatId, profile);
+        hydrated.push(resolved);
+
+        const hasNewTitle = resolved?.title && resolved.title !== profile?.title;
+        const hasNewUsername = resolved?.username && resolved.username !== profile?.username;
+        const hasNewType = resolved?.type && resolved.type !== profile?.type;
+
+        if (resolved?.chatId && (hasNewTitle || hasNewUsername || hasNewType)) {
+            await db.upsertGroupProfile({
+                chatId: resolved.chatId,
+                title: resolved.title || profile?.title || null,
+                username: resolved.username || profile?.username || null,
+                type: resolved.type || profile?.type || null
+            });
+        }
+    }
+
+    return hydrated;
+}
+
 function formatGroupAddress(profile = {}) {
     if (profile.username) {
         return `https://t.me/${profile.username}`;
@@ -5378,7 +5402,7 @@ async function getGroupMemberCountSafe(chatId) {
 
 async function sendOwnerGroupDashboard(chatId, lang) {
     const groups = await db.listGroupProfiles();
-    const hydrated = await Promise.all(groups.map((profile) => resolveGroupMetadata(profile.chatId, profile)));
+    const hydrated = await hydrateGroupProfiles(groups);
     const dashboardText = groups.length
         ? t(lang, 'owner_group_dashboard', { count: groups.length })
         : t(lang, 'owner_group_none');
@@ -5402,13 +5426,14 @@ async function sendOwnerGroupDetail(chatId, targetChatId, lang) {
     const groups = await db.listGroupProfiles();
     const profile = groups.find((item) => item.chatId === targetChatId || item.chatId === targetChatId.toString())
         || { chatId: targetChatId };
-    const hydrated = await resolveGroupMetadata(targetChatId, profile);
-    const memberCount = await getGroupMemberCountSafe(targetChatId);
+    const [hydrated = profile] = await hydrateGroupProfiles([profile]);
+    const targetId = hydrated?.chatId || targetChatId;
+    const memberCount = await getGroupMemberCountSafe(targetId);
     const address = formatGroupAddress(hydrated);
     const countText = memberCount === null ? t(lang, 'owner_group_unknown_count') : memberCount;
     const text = t(lang, 'owner_group_info', {
-        title: hydrated?.title || hydrated?.username || targetChatId,
-        id: targetChatId,
+        title: hydrated?.title || hydrated?.username || targetId,
+        id: targetId,
         address,
         members: countText
     });
