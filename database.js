@@ -2441,6 +2441,46 @@ async function getCommandUsageLeaderboard(command, limit = 50) {
     return rows || [];
 }
 
+async function getAllCommandUsageStats(limit = 100) {
+    const numericLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 100;
+    const rows = await dbAll(
+        `SELECT logs.userId, logs.command, SUM(logs.count) AS total, users.username, users.fullName
+         FROM command_usage_logs AS logs
+         LEFT JOIN users ON users.chatId = logs.userId
+         GROUP BY logs.userId, logs.command, users.username, users.fullName
+         HAVING total > 0
+         ORDER BY total DESC`,
+        []
+    );
+
+    const userMap = new Map();
+    for (const row of rows || []) {
+        const userId = row.userId?.toString();
+        if (!userId) {
+            continue;
+        }
+
+        const existing = userMap.get(userId) || {
+            userId,
+            username: row.username || null,
+            fullName: row.fullName || null,
+            total: 0,
+            commands: {}
+        };
+
+        const count = Number(row.total) || 0;
+        existing.total += count;
+        if (row.command) {
+            existing.commands[row.command] = (existing.commands[row.command] || 0) + count;
+        }
+
+        userMap.set(userId, existing);
+    }
+
+    const result = Array.from(userMap.values()).sort((a, b) => b.total - a.total);
+    return result.slice(0, numericLimit);
+}
+
 module.exports = {
     init,
     ensureCheckinGroup,
@@ -2538,5 +2578,6 @@ module.exports = {
     getCommandUsageCount,
     incrementCommandUsage,
     getCommandUsageLeaderboard,
+    getAllCommandUsageStats,
     resetUserData
 };
