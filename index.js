@@ -13262,6 +13262,13 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
                 if (action === 'close') {
                     clearOwnerAction(ownerId);
+                    if (query.message?.chat?.id && query.message?.message_id) {
+                        try {
+                            await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'help_action_executed') });
                     return;
                 }
@@ -13360,6 +13367,13 @@ async function handleTxhashCommand(msg, explicitHash = null) {
 
                 if (action === 'refresh' || action === 'back') {
                     ownerActionStates.set(ownerId, { mode: 'group_stats', step: 'idle', chatId: chatId || ownerId });
+                    if (query.message?.chat?.id && query.message?.message_id) {
+                        try {
+                            await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                        } catch (error) {
+                            // ignore cleanup errors
+                        }
+                    }
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'owner_group_prompt_short') });
                     await sendOwnerGroupDashboard(chatId || ownerId, callbackLang);
                     return;
