@@ -5085,6 +5085,17 @@ function buildOwnerMenuKeyboard(lang) {
     return { inline_keyboard };
 }
 
+function isLikelyGroupChatId(chatId) {
+    return chatId?.toString().startsWith('-');
+}
+
+function filterGroupProfiles(profiles = []) {
+    return (profiles || []).filter((profile) => {
+        const type = (profile?.type || '').toLowerCase();
+        return isLikelyGroupChatId(profile?.chatId) || type === 'group' || type === 'supergroup';
+    });
+}
+
 function buildOwnerGroupDashboardKeyboard(lang, groups = []) {
     const inline_keyboard = [];
 
@@ -5314,7 +5325,7 @@ async function resolveOwnerGroupTarget(chatToken) {
 
     const tokenId = trimmed.match(/-?\d+/)?.[0] || null;
     const username = trimmed.startsWith('@') ? trimmed.slice(1).toLowerCase() : trimmed.toLowerCase();
-    const groups = await db.listGroupProfiles();
+    const groups = filterGroupProfiles(await db.listGroupProfiles());
 
     let profile = null;
 
@@ -5339,14 +5350,14 @@ async function resolveGroupMetadata(chatId, fallbackProfile = null) {
     }
 
     const profile = fallbackProfile || (await db.listGroupProfiles()).find((item) => item.chatId === normalizedId);
-    if (profile?.title || profile?.username) {
-        return { chatId: normalizedId, title: profile.title || null, username: profile.username || null, type: profile.type || 'supergroup' };
-    }
+    let resolved = null;
 
     try {
         const chat = await bot.getChat(normalizedId);
-        await ensureGroupProfile(chat);
-        return {
+        if (isLikelyGroupChatId(normalizedId) || ['group', 'supergroup'].includes(chat.type)) {
+            await ensureGroupProfile(chat);
+        }
+        resolved = {
             chatId: normalizedId,
             title: chat.title || null,
             username: chat.username || null,
@@ -5356,7 +5367,17 @@ async function resolveGroupMetadata(chatId, fallbackProfile = null) {
         console.warn(`[Owner] Unable to resolve group metadata for ${normalizedId}: ${error.message}`);
     }
 
-    return { chatId: normalizedId, title: null, username: null, type: 'supergroup' };
+    const fallback = resolved || profile || null;
+    if (!fallback) {
+        return { chatId: normalizedId, title: null, username: null, type: 'supergroup' };
+    }
+
+    return {
+        chatId: normalizedId,
+        title: fallback.title || null,
+        username: fallback.username || null,
+        type: fallback.type || 'supergroup'
+    };
 }
 
 async function hydrateGroupProfiles(profiles = []) {
@@ -5401,13 +5422,13 @@ async function getGroupMemberCountSafe(chatId) {
 }
 
 async function sendOwnerGroupDashboard(chatId, lang) {
-    const groups = await db.listGroupProfiles();
-    const hydrated = await hydrateGroupProfiles(groups);
-    const dashboardText = groups.length
-        ? t(lang, 'owner_group_dashboard', { count: groups.length })
+    const groups = filterGroupProfiles(await db.listGroupProfiles());
+    const hydrated = filterGroupProfiles(await hydrateGroupProfiles(groups));
+    const dashboardText = hydrated.length
+        ? t(lang, 'owner_group_dashboard', { count: hydrated.length })
         : t(lang, 'owner_group_none');
 
-    const help = groups.length ? `\n${t(lang, 'owner_group_dashboard_hint')}` : '';
+    const help = hydrated.length ? `\n${t(lang, 'owner_group_dashboard_hint')}` : '';
     const keyboard = buildOwnerGroupDashboardKeyboard(lang, hydrated.slice(0, 30));
 
     await bot.sendMessage(chatId, `${dashboardText}${help}`, {
@@ -5418,16 +5439,22 @@ async function sendOwnerGroupDashboard(chatId, lang) {
 }
 
 async function sendOwnerGroupDetail(chatId, targetChatId, lang) {
-    if (!targetChatId) {
+    const normalized = targetChatId?.toString();
+    if (!normalized || !isLikelyGroupChatId(normalized)) {
         await bot.sendMessage(chatId, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
         return;
     }
 
-    const groups = await db.listGroupProfiles();
-    const profile = groups.find((item) => item.chatId === targetChatId || item.chatId === targetChatId.toString())
-        || { chatId: targetChatId };
+    const groups = filterGroupProfiles(await db.listGroupProfiles());
+    const profile = groups.find((item) => item.chatId === normalized) || { chatId: normalized };
     const [hydrated = profile] = await hydrateGroupProfiles([profile]);
-    const targetId = hydrated?.chatId || targetChatId;
+    const targetId = hydrated?.chatId || normalized;
+
+    if (!isLikelyGroupChatId(targetId)) {
+        await bot.sendMessage(chatId, t(lang, 'owner_group_usage_help'), { reply_markup: buildCloseKeyboard(lang) });
+        return;
+    }
+
     const memberCount = await getGroupMemberCountSafe(targetId);
     const address = formatGroupAddress(hydrated);
     const countText = memberCount === null ? t(lang, 'owner_group_unknown_count') : memberCount;
@@ -13489,7 +13516,7 @@ async function handleTxhashCommand(msg, explicitHash = null) {
                 }
 
                 if (action === 'copy') {
-                    const groups = await db.listGroupProfiles();
+                    const groups = filterGroupProfiles(await db.listGroupProfiles());
                     const profile = groups.find((item) => item.chatId === detail || item.chatId === detail?.toString())
                         || { chatId: detail };
                     const address = formatGroupAddress(profile);
